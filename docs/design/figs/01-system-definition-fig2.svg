@@ -1,0 +1,41 @@
+<svg viewbox="0 0 680 372" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+  
+  <rect x="14" y="10" width="652" height="52" rx="10" fill="rgba(255,200,87,.06)" stroke="#ffc857" stroke-opacity=".5"></rect>
+  <text x="32" y="31" fill="#ffc857" font-size="12" font-weight="700">接入层 Edge（Adapter）</text>
+  <text x="32" y="50" fill="#95a5bd" font-size="11">E1 网关（TLS / 认证 / 限流）　·　E2 协议适配（内部信封 ↔ A2A / HTTP）</text>
+
+  
+  <rect x="14" y="72" width="652" height="98" rx="10" fill="rgba(76,201,240,.06)" stroke="#4cc9f0" stroke-opacity=".55"></rect>
+  <text x="32" y="93" fill="#4cc9f0" font-size="12" font-weight="700">控制面 Control Plane —— 决定「怎么走」</text>
+  <rect x="30" y="104" width="200" height="54" rx="8" fill="#151d2a" stroke="#4cc9f0" stroke-opacity=".5"></rect>
+  <text x="130" y="124" fill="#dbe4f0" font-size="11" text-anchor="middle">C1 注册中心</text>
+  <text x="130" y="142" fill="#6b7c96" font-size="9.5" text-anchor="middle">角色卡 · 能力索引 · 心跳</text>
+  <rect x="240" y="104" width="200" height="54" rx="8" fill="#151d2a" stroke="#4cc9f0" stroke-opacity=".5"></rect>
+  <text x="340" y="124" fill="#dbe4f0" font-size="11" text-anchor="middle">C2 匹配器</text>
+  <text x="340" y="142" fill="#6b7c96" font-size="9.5" text-anchor="middle">能力匹配 · 确定性排序</text>
+  <rect x="450" y="104" width="200" height="54" rx="8" fill="#151d2a" stroke="#4cc9f0" stroke-opacity=".5"></rect>
+  <text x="550" y="124" fill="#dbe4f0" font-size="11" text-anchor="middle">C3 策略执行点</text>
+  <text x="550" y="142" fill="#6b7c96" font-size="9.5" text-anchor="middle">权限矩阵 · 配额 · 分级</text>
+
+  
+  <rect x="14" y="180" width="652" height="98" rx="10" fill="rgba(61,220,151,.06)" stroke="#3ddc97" stroke-opacity=".55"></rect>
+  <text x="32" y="201" fill="#3ddc97" font-size="12" font-weight="700">数据面 Data Plane —— 负责「走」</text>
+  <rect x="30" y="212" width="152" height="54" rx="8" fill="#151d2a" stroke="#3ddc97" stroke-opacity=".5"></rect>
+  <text x="106" y="232" fill="#dbe4f0" font-size="11" text-anchor="middle">D1 信箱</text>
+  <text x="106" y="250" fill="#6b7c96" font-size="9.5" text-anchor="middle">投递 · 拉取 · 可见性</text>
+  <rect x="192" y="212" width="152" height="54" rx="8" fill="#151d2a" stroke="#3ddc97" stroke-opacity=".5"></rect>
+  <text x="268" y="232" fill="#dbe4f0" font-size="11" text-anchor="middle">D2 任务生命周期</text>
+  <text x="268" y="250" fill="#6b7c96" font-size="9.5" text-anchor="middle">状态机 · 租约 · 幂等</text>
+  <rect x="354" y="212" width="152" height="54" rx="8" fill="#151d2a" stroke="#3ddc97" stroke-opacity=".5"></rect>
+  <text x="430" y="232" fill="#dbe4f0" font-size="11" text-anchor="middle">D3 会话与任务图</text>
+  <text x="430" y="250" fill="#6b7c96" font-size="9.5" text-anchor="middle">只跟踪 · 不决策</text>
+  <rect x="516" y="212" width="134" height="54" rx="8" fill="#151d2a" stroke="#3ddc97" stroke-opacity=".5"></rect>
+  <text x="583" y="232" fill="#dbe4f0" font-size="11" text-anchor="middle">D4 产物通道</text>
+  <text x="583" y="250" fill="#6b7c96" font-size="9.5" text-anchor="middle">大对象 · 一次性令牌</text>
+
+  
+  <rect x="14" y="288" width="652" height="76" rx="10" fill="rgba(123,140,255,.06)" stroke="#7b8cff" stroke-opacity=".55"></rect>
+  <text x="32" y="309" fill="#7b8cff" font-size="12" font-weight="700">管理面 Management Plane —— 负责「管」</text>
+  <text x="32" y="330" fill="#95a5bd" font-size="11">M1 配置中心（矩阵 / 白名单 / 配额，配置化非代码）　·　M2 审计留痕　·　M3 可观测　·　M4 运维接口（吊销 / 熔断 / 干预）</text>
+  <text x="32" y="350" fill="#6b7c96" font-size="10" font-family="monospace">横切以上三层；所有存储经 Port 抽象，Core 不依赖具体实现</text>
+</svg>

@@ -1,0 +1,47 @@
+<svg viewbox="0 0 680 330" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+  
+  <rect x="14" y="10" width="326" height="94" rx="10" fill="#151d2a" stroke="#3ddc97" stroke-opacity=".5"></rect>
+  <text x="30" y="31" fill="#3ddc97" font-size="12" font-weight="700">W1 请求-应答 Request-Reply</text>
+  <text x="30" y="50" fill="#95a5bd" font-size="10.5">Issuer ──任务──▶ Executor ──结果──▶ Issuer</text>
+  <text x="30" y="68" fill="#6b7c96" font-size="10">适用：秒级、结果小（查会议、查待办）</text>
+  <text x="30" y="86" fill="#6b7c96" font-size="10">失败：超时即失败，不进队列重试</text>
+
+  
+  <rect x="350" y="10" width="316" height="94" rx="10" fill="#151d2a" stroke="#3ddc97" stroke-opacity=".5"></rect>
+  <text x="366" y="31" fill="#3ddc97" font-size="12" font-weight="700">W2 提交-轮询-收取</text>
+  <text x="366" y="50" fill="#95a5bd" font-size="10.5">提交 → 排队 → 心跳续租 → 进度 → 完成</text>
+  <text x="366" y="68" fill="#6b7c96" font-size="10">适用：分钟级、结果较大（本地检索、汇总）</text>
+  <text x="366" y="86" fill="#6b7c96" font-size="10">失败：租约超时释放回队列，须幂等</text>
+
+  
+  <rect x="14" y="114" width="326" height="94" rx="10" fill="#151d2a" stroke="#b388ff" stroke-opacity=".5"></rect>
+  <text x="30" y="135" fill="#b388ff" font-size="12" font-weight="700">W3 扇出-聚合 Fan-out / Gather</text>
+  <text x="30" y="154" fill="#95a5bd" font-size="10.5">Aggregator ─┬─▶ A ─┐</text>
+  <text x="30" y="170" fill="#95a5bd" font-size="10.5">　　　　　　├─▶ B ─┼─▶ 合成结论</text>
+  <text x="30" y="186" fill="#95a5bd" font-size="10.5">　　　　　　└─▶ C ─┘</text>
+  <text x="30" y="201" fill="#6b7c96" font-size="10">★ 这是跨域组合的唯一合法形态（经 cloud 域）</text>
+
+  
+  <rect x="350" y="114" width="316" height="94" rx="10" fill="#151d2a" stroke="#b388ff" stroke-opacity=".5"></rect>
+  <text x="366" y="135" fill="#b388ff" font-size="12" font-weight="700">W4 流水线 Pipeline</text>
+  <text x="366" y="154" fill="#95a5bd" font-size="10.5">A ──▶ B ──▶ C ──▶ 结果</text>
+  <text x="366" y="172" fill="#6b7c96" font-size="10">适用：多阶段加工，前一步的输出是后一步的输入</text>
+  <text x="366" y="190" fill="#6b7c96" font-size="10">注意：每跳都要过策略；<b>数据等级不得逐跳放宽</b></text>
+  <text x="366" y="204" fill="#ff6b81" font-size="10">⚠ 流水线越长，跨域风险越高——优先同域内串</text>
+
+  
+  <rect x="14" y="218" width="326" height="100" rx="10" fill="#151d2a" stroke="#ffc857" stroke-opacity=".5"></rect>
+  <text x="30" y="239" fill="#ffc857" font-size="12" font-weight="700">W5 委托链 Delegation Chain</text>
+  <text x="30" y="258" fill="#95a5bd" font-size="10.5">A ──▶ B ──▶ C　（B 代表 A 发起，不是 A 直连 C）</text>
+  <text x="30" y="276" fill="#6b7c96" font-size="10">每跳权限单调收窄，绝不扩张</text>
+  <text x="30" y="294" fill="#6b7c96" font-size="10">Nexus 记录完整血统链；每个节点校验链上所有身份</text>
+  <text x="30" y="310" fill="#ff6b81" font-size="10">⚠ 当前配置 can_delegate_to = [] ，默认禁止二次委托</text>
+
+  
+  <rect x="350" y="218" width="316" height="100" rx="10" fill="#151d2a" stroke="#ff6b81" stroke-opacity=".5"></rect>
+  <text x="366" y="239" fill="#ff6b81" font-size="12" font-weight="700">W6 长流程 / 补偿</text>
+  <text x="366" y="258" fill="#95a5bd" font-size="10.5">多任务 DAG + 部分失败时的回退路径</text>
+  <text x="366" y="276" fill="#6b7c96" font-size="10">Nexus 提供：依赖跟踪 + 失败通知</text>
+  <text x="366" y="294" fill="#6b7c96" font-size="10">Issuer 负责：决定补偿策略</text>
+  <text x="366" y="310" fill="#ff6b81" font-size="10">⚠ 涉及对外副作用的流程，必须有你的确认闸门</text>
+</svg>

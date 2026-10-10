@@ -1,0 +1,48 @@
+<svg viewbox="0 0 680 400" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+  <defs>
+    <marker id="m1" markerwidth="9" markerheight="9" refx="7" refy="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#3ddc97"></path></marker>
+    <marker id="m2" markerwidth="9" markerheight="9" refx="7" refy="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#b388ff"></path></marker>
+  </defs>
+
+  
+  <rect x="276" y="6" width="128" height="38" rx="9" fill="#1a2434" stroke="#b388ff" stroke-opacity=".7"></rect>
+  <text x="340" y="30" fill="#b388ff" font-size="12.5" font-weight="700" text-anchor="middle">用户</text>
+  <text x="340" y="58" fill="#6b7c96" font-size="10" text-anchor="middle">不是网络成员 · 经 Agent 接入</text>
+
+  
+  <rect x="24" y="74" width="632" height="310" rx="14" fill="rgba(179,136,255,.055)" stroke="#b388ff" stroke-opacity=".55" stroke-dasharray="6 4"></rect>
+  <text x="42" y="96" fill="#b388ff" font-size="12.5" font-weight="700">系统边界：Nexus（独立基础设施）</text>
+
+  
+  <rect x="200" y="108" width="280" height="96" rx="11" fill="#151d2a" stroke="#4cc9f0" stroke-opacity=".7"></rect>
+  <text x="340" y="130" fill="#4cc9f0" font-size="13" font-weight="700" text-anchor="middle">Nexus Core</text>
+  <text x="340" y="150" fill="#dbe4f0" font-size="10.5" text-anchor="middle">注册中心 · 匹配器 · 策略执行点</text>
+  <text x="340" y="167" fill="#dbe4f0" font-size="10.5" text-anchor="middle">信箱 · 任务生命周期 · 会话跟踪</text>
+  <text x="340" y="187" fill="#6b7c96" font-size="10" text-anchor="middle" font-family="monospace">决定"怎么流转"，不决定"做什么"</text>
+
+  
+  <rect x="44" y="228" width="180" height="76" rx="10" fill="#1a2434" stroke="#ff6b81" stroke-opacity=".6"></rect>
+  <text x="134" y="250" fill="#ff6b81" font-size="12" font-weight="700" text-anchor="middle">工作 Agent</text>
+  <text x="134" y="268" fill="#95a5bd" font-size="10" text-anchor="middle">Executor · Issuer(受限)</text>
+  <text x="134" y="285" fill="#6b7c96" font-size="9.5" text-anchor="middle" font-family="monospace">domain: work · 上限为摘要级</text>
+
+  <rect x="250" y="228" width="180" height="76" rx="10" fill="#1a2434" stroke="#4cc9f0" stroke-opacity=".6"></rect>
+  <text x="340" y="250" fill="#4cc9f0" font-size="12" font-weight="700" text-anchor="middle">主 Agent</text>
+  <text x="340" y="268" fill="#95a5bd" font-size="10" text-anchor="middle">Issuer · Executor · Relay</text>
+  <text x="340" y="285" fill="#6b7c96" font-size="9.5" text-anchor="middle" font-family="monospace">domain: cloud · 人机入口</text>
+
+  <rect x="456" y="228" width="180" height="76" rx="10" fill="#1a2434" stroke="#3ddc97" stroke-opacity=".6"></rect>
+  <text x="546" y="250" fill="#3ddc97" font-size="12" font-weight="700" text-anchor="middle">本地 Agent</text>
+  <text x="546" y="268" fill="#95a5bd" font-size="10" text-anchor="middle">Issuer · Executor</text>
+  <text x="546" y="285" fill="#6b7c96" font-size="9.5" text-anchor="middle" font-family="monospace">domain: home · 片段级按需</text>
+
+  <text x="340" y="332" fill="#6b7c96" font-size="10.5" text-anchor="middle">↑ 成员：以角色接入，与 Nexus 之间只有协议关系</text>
+
+  <rect x="44" y="348" width="592" height="26" rx="7" fill="rgba(61,220,151,.06)" stroke="#3ddc97" stroke-opacity=".35"></rect>
+  <text x="340" y="365" fill="#3ddc97" font-size="10.5" text-anchor="middle">未来可加入：手机端 Agent · 监控 Agent · 第三方服务 Agent · 其他系统的 Agent</text>
+
+  <line x1="340" y1="44" x2="340" y2="104" stroke="#b388ff" stroke-width="1.4" marker-end="url(#m2)"></line>
+  <line x1="240" y1="204" x2="180" y2="224" stroke="#3ddc97" stroke-width="1.4" marker-end="url(#m1)"></line>
+  <line x1="340" y1="204" x2="340" y2="224" stroke="#3ddc97" stroke-width="1.4" marker-end="url(#m1)"></line>
+  <line x1="440" y1="204" x2="500" y2="224" stroke="#3ddc97" stroke-width="1.4" marker-end="url(#m1)"></line>
+</svg>

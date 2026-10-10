@@ -1,0 +1,37 @@
+<svg viewbox="0 0 680 190" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+  <defs>
+    <marker id="f1" markerwidth="8" markerheight="8" refx="6" refy="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6b7c96"></path></marker>
+  </defs>
+  <rect x="14" y="60" width="104" height="42" rx="8" fill="#1a2434" stroke="#6b7c96"></rect>
+  <text x="66" y="86" fill="#dbe4f0" font-size="11.5" text-anchor="middle">submitted</text>
+
+  <rect x="172" y="60" width="104" height="42" rx="8" fill="#1a2434" stroke="#4cc9f0" stroke-opacity=".8"></rect>
+  <text x="224" y="86" fill="#4cc9f0" font-size="11.5" text-anchor="middle">working</text>
+
+  <rect x="330" y="14" width="118" height="38" rx="8" fill="#1a2434" stroke="#ffc857" stroke-opacity=".8"></rect>
+  <text x="389" y="38" fill="#ffc857" font-size="11" text-anchor="middle">input_required</text>
+
+  <rect x="330" y="108" width="104" height="42" rx="8" fill="#1a2434" stroke="#3ddc97" stroke-opacity=".85"></rect>
+  <text x="382" y="134" fill="#3ddc97" font-size="11.5" text-anchor="middle">completed</text>
+
+  <rect x="500" y="60" width="80" height="42" rx="8" fill="#1a2434" stroke="#ff6b81" stroke-opacity=".8"></rect>
+  <text x="540" y="86" fill="#ff6b81" font-size="11.5" text-anchor="middle">failed</text>
+
+  <rect x="596" y="116" width="74" height="38" rx="8" fill="#1a2434" stroke="#6b7c96"></rect>
+  <text x="633" y="140" fill="#95a5bd" font-size="11" text-anchor="middle">canceled</text>
+
+  <line x1="118" y1="81" x2="168" y2="81" stroke="#6b7c96" stroke-width="1.4" marker-end="url(#f1)"></line>
+  <line x1="276" y1="70" x2="326" y2="42" stroke="#6b7c96" stroke-width="1.4" marker-end="url(#f1)"></line>
+  <line x1="389" y1="52" x2="310" y2="68" stroke="#6b7c96" stroke-width="1.4" stroke-dasharray="3 3" marker-end="url(#f1)"></line>
+  <line x1="276" y1="92" x2="326" y2="122" stroke="#6b7c96" stroke-width="1.4" marker-end="url(#f1)"></line>
+  <line x1="434" y1="81" x2="496" y2="81" stroke="#6b7c96" stroke-width="1.4" marker-end="url(#f1)"></line>
+  <line x1="434" y1="130" x2="560" y2="104" stroke="#6b7c96" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#f1)"></line>
+  <line x1="252" y1="102" x2="600" y2="128" stroke="#6b7c96" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#f1)"></line>
+
+  <text x="146" y="52" fill="#6b7c96" font-size="9.5" text-anchor="middle">投递</text>
+  <text x="316" y="34" fill="#6b7c96" font-size="9.5" text-anchor="middle">需追问</text>
+  <text x="352" y="60" fill="#6b7c96" font-size="9.5">已回答</text>
+  <text x="316" y="128" fill="#6b7c96" font-size="9.5" text-anchor="middle">成功</text>
+  <text x="466" y="72" fill="#6b7c96" font-size="9.5" text-anchor="middle">出错</text>
+  <text x="440" y="140" fill="#6b7c96" font-size="9.5">超时/取消</text>
+</svg>

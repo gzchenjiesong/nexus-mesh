@@ -1,0 +1,28 @@
+<svg viewbox="0 0 680 296" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,PingFang SC,sans-serif">
+  <rect x="14" y="10" width="652" height="86" rx="11" fill="rgba(76,201,240,.05)" stroke="#4cc9f0" stroke-opacity=".45"></rect>
+  <text x="32" y="32" fill="#4cc9f0" font-size="12.5" font-weight="700">维度一 · 任务流向 Task Flow</text>
+  <text x="32" y="50" fill="#6b7c96" font-size="10.5">在这个方向上它能做什么</text>
+  <rect x="32" y="58" width="146" height="30" rx="7" fill="#1a2434" stroke="#4cc9f0" stroke-opacity=".6"></rect>
+  <text x="105" y="78" fill="#dbe4f0" font-size="11" text-anchor="middle">Issuer 发布</text>
+  <rect x="188" y="58" width="146" height="30" rx="7" fill="#1a2434" stroke="#4cc9f0" stroke-opacity=".6"></rect>
+  <text x="261" y="78" fill="#dbe4f0" font-size="11" text-anchor="middle">Executor 执行</text>
+  <rect x="344" y="58" width="146" height="30" rx="7" fill="#1a2434" stroke="#4cc9f0" stroke-opacity=".6"></rect>
+  <text x="417" y="78" fill="#dbe4f0" font-size="11" text-anchor="middle">Relay 中转</text>
+  <rect x="500" y="58" width="150" height="30" rx="7" fill="#1a2434" stroke="#4cc9f0" stroke-opacity=".6"></rect>
+  <text x="575" y="78" fill="#dbe4f0" font-size="11" text-anchor="middle">Observer 只读观察</text>
+
+  <rect x="14" y="106" width="652" height="86" rx="11" fill="rgba(179,136,255,.05)" stroke="#b388ff" stroke-opacity=".45"></rect>
+  <text x="32" y="128" fill="#b388ff" font-size="12.5" font-weight="700">维度二 · 能力供给 Capability</text>
+  <text x="32" y="146" fill="#6b7c96" font-size="10.5">它提供什么能力——这是能力发现与任务匹配的依据</text>
+  <rect x="32" y="154" width="196" height="30" rx="7" fill="#1a2434" stroke="#b388ff" stroke-opacity=".6"></rect>
+  <text x="130" y="174" fill="#dbe4f0" font-size="11" text-anchor="middle">Provider 能力提供</text>
+  <rect x="238" y="154" width="196" height="30" rx="7" fill="#1a2434" stroke="#b388ff" stroke-opacity=".6"></rect>
+  <text x="336" y="174" fill="#dbe4f0" font-size="11" text-anchor="middle">Aggregator 聚合</text>
+  <rect x="444" y="154" width="206" height="30" rx="7" fill="#1a2434" stroke="#b388ff" stroke-opacity=".6"></rect>
+  <text x="547" y="174" fill="#dbe4f0" font-size="11" text-anchor="middle">Decomposer 拆解</text>
+
+  <rect x="14" y="202" width="652" height="84" rx="11" fill="rgba(255,107,129,.05)" stroke="#ff6b81" stroke-opacity=".45"></rect>
+  <text x="32" y="224" fill="#ff6b81" font-size="12.5" font-weight="700">维度三 · 信任约束 Trust —— 与上两维正交，不可由能力推导</text>
+  <text x="32" y="255" fill="#95a5bd" font-size="11">信任域 domain　·　可达数据等级 clearance　·　可发布 / 可接收的类型集　·　配额 quota</text>
+  <text x="32" y="274" fill="#6b7c96" font-size="10.5" font-family="monospace">"能力很强" ≠ "权限很大"　·　能力不能突破约束</text>
+</svg>
