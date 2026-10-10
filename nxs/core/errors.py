@@ -1,0 +1,161 @@
+"""错误码与异常体系。
+
+设计要点
+--------
+拒绝（deny）与失败（fail）是两件事，不要混用：
+
+* **拒绝（Deny）** —— 策略判定不允许。返回 ``rule_id`` 与一条**不含任何业务内容**
+  的固定消息。这是安全设计的一部分：错误信息本身也是信道，泄露被拒内容的前缀、
+  摘要或细节，等于绕过了应答边界。
+* **失败（Fail）** —— 执行过程中出错。可以携带技术性细节（堆栈、超时原因），
+  因为这些信息对攻击者没有额外价值。
+
+命名约定
+--------
+``rule_id`` 形如 ``<域>-<对象>-<序号>``：
+
+===========  ==========================================
+前缀          含义
+===========  ==========================================
+``FM-``       格式 / schema 校验
+``AU-``       认证与凭据
+``MX-``       权限矩阵
+``WL-``       白名单（任务类型 / 应答字段 / 数据等级）
+``QT-``       配额与速率
+``LF-``       任务生命周期
+===========  ==========================================
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+
+
+class RuleId(str, Enum):
+    """策略规则的稳定标识符。
+
+    取值一旦发布就不再变更——审计日志与外部告警都会引用它们。
+    需要更细的粒度时新增取值，不要修改既有取值。
+    """
+
+    # ---------- FM- 格式与 schema ----------
+    FM_ENVELOPE_INVALID = "FM-SCHEMA-01"
+    FM_TASK_PARAM_INVALID = "FM-PARAM-02"
+    FM_CARDCARD_INVALID = "FM-CARD-03"
+
+    # ---------- AU- 认证与凭据 ----------
+    AU_SIGNATURE_INVALID = "AU-SIG-01"
+    AU_REPLAY_DETECTED = "AU-REPLAY-02"
+    AU_CREDENTIAL_REVOKED = "AU-CRED-03"
+    AU_NODE_UNKNOWN = "AU-NODE-04"
+
+    # ---------- MX- 权限矩阵 ----------
+    MX_DOMAIN_FORBIDDEN = "MX-DOMAIN-02"
+    MX_ISSUER_NOT_ALLOWED = "MX-ISSUER-01"
+    MX_RECEIVE_NOT_ALLOWED = "MX-RECEIVE-03"
+    MX_DELEGATION_TOO_DEEP = "MX-DELEGATE-04"
+
+    # ---------- WL- 白名单 ----------
+    WL_TYPE_NOT_REGISTERED = "WL-TYPE-404"
+    WL_FIELD_NOT_ALLOWED = "WL-FIELD-001"
+    WL_LEVEL_EXCEEDED = "WL-LEVEL-002"
+    WL_FREETEXT_NOT_ALLOWED = "WL-FREETEXT-003"
+
+    # ---------- QT- 配额与速率 ----------
+    QT_TASKS_PER_DAY = "QT-TASK-01"
+    QT_BYTES_PER_RESPONSE = "QT-BYTE-02"
+    QT_BYTES_PER_DAY = "QT-BYTE-03"
+    QT_RATE_LIMITED = "QT-RATE-04"
+    QT_CONCURRENCY = "QT-CONC-05"
+
+    # ---------- LF- 生命周期 ----------
+    LF_LEASE_HELD = "LF-LEASE-01"
+    LF_TASK_EXPIRED = "LF-EXPIRE-02"
+    LF_INVALID_TRANSITION = "LF-STATE-03"
+    LF_DUPLICATE_IDEMPOTENCY = "LF-IDEM-04"
+
+
+#: 拒绝时回给调用方的**固定消息**。
+#:
+#: 刻意保持极简：只有规则标识符，不含被拒内容、字段名、字段值、
+#: 长度、前若干字符等任何可用于推断内容的线索。
+#: 需要排查问题时，细节记在**本地**审计日志里（见 mgmt/audit）。
+_SAFE_MESSAGES: dict[RuleId, str] = {
+    RuleId.FM_ENVELOPE_INVALID: "envelope rejected",
+    RuleId.FM_TASK_PARAM_INVALID: "task parameters rejected",
+    RuleId.FM_CARDCARD_INVALID: "role card rejected",
+    RuleId.AU_SIGNATURE_INVALID: "authentication failed",
+    RuleId.AU_REPLAY_DETECTED: "request rejected",
+    RuleId.AU_CREDENTIAL_REVOKED: "authentication failed",
+    RuleId.AU_NODE_UNKNOWN: "node not registered",
+    RuleId.MX_DOMAIN_FORBIDDEN: "delegation not permitted",
+    RuleId.MX_ISSUER_NOT_ALLOWED: "publish not permitted",
+    RuleId.MX_RECEIVE_NOT_ALLOWED: "delivery not permitted",
+    RuleId.MX_DELEGATION_TOO_DEEP: "delegation not permitted",
+    RuleId.WL_TYPE_NOT_REGISTERED: "task type not available",
+    RuleId.WL_FIELD_NOT_ALLOWED: "response rejected",
+    RuleId.WL_LEVEL_EXCEEDED: "response rejected",
+    RuleId.WL_FREETEXT_NOT_ALLOWED: "response rejected",
+    RuleId.QT_TASKS_PER_DAY: "quota exhausted",
+    RuleId.QT_BYTES_PER_RESPONSE: "quota exceeded",
+    RuleId.QT_BYTES_PER_DAY: "quota exhausted",
+    RuleId.QT_RATE_LIMITED: "rate limited",
+    RuleId.QT_CONCURRENCY: "quota exhausted",
+    RuleId.LF_LEASE_HELD: "task unavailable",
+    RuleId.LF_TASK_EXPIRED: "task expired",
+    RuleId.LF_INVALID_TRANSITION: "state transition rejected",
+    RuleId.LF_DUPLICATE_IDEMPOTENCY: "duplicate request",
+}
+
+
+def safe_message(rule_id: RuleId) -> str:
+    """返回规则的固定对外消息。未知规则一律降级为最保守的措辞。"""
+    return _SAFE_MESSAGES.get(rule_id, "request rejected")
+
+
+class NexusError(Exception):
+    """所有 Nexus 异常的基类。"""
+
+
+@dataclass
+class PolicyDenied(NexusError):
+    """策略拒绝。
+
+    只携带 ``rule_id``——**不要把被拒的内容放进这个异常**，
+    因为它会被序列化进 HTTP 响应体送回调用方。细节请写本地审计日志。
+
+    :param rule_id: 命中的规则
+    :param detail: **仅用于本地日志**，绝不进入对外响应。默认 None。
+    """
+
+    rule_id: RuleId
+    detail: str | None = None
+
+    def __str__(self) -> str:  # pragma: no cover - 便于调试
+        return f"denied[{self.rule_id.value}]"
+
+    def to_wire(self) -> dict[str, str]:
+        """序列化为对外响应。**只含 rule_id 与固定消息。**"""
+        return {
+            "denied": "true",
+            "rule_id": self.rule_id.value,
+            "message": safe_message(self.rule_id),
+        }
+
+
+class AuthFailed(NexusError):
+    """认证失败。对外同样只暴露 rule_id。"""
+
+    def __init__(self, rule_id: RuleId, detail: str | None = None) -> None:
+        super().__init__(rule_id.value)
+        self.rule_id = rule_id
+        self.detail = detail
+
+
+class TaskExecutionError(NexusError):
+    """执行期错误。这类信息对外可以带技术细节，因为它不泄露业务内容。"""
+
+
+class ConfigError(NexusError):
+    """配置非法。启动时应直接失败，不要带着坏配置运行。"""

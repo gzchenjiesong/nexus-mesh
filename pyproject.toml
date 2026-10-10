@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexus-mesh"
+version = "0.1.0"
+description = "A self-hosted coordination network for heterogeneous AI agents — each agent joins with its own identity, role, and trust domain; the mesh handles discovery, structured task delegation, lifecycle, and scoped results."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "gzchenjiesong", email = "gzchenjiesong@users.noreply.github.com" },
+]
+keywords = [
+    "ai-agents",
+    "multi-agent",
+    "agent-coordination",
+    "heterogeneous-agents",
+    "mesh-network",
+    "self-hosted",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+
+# 依赖最小化原则：这是基础设施，不是应用。
+# 每多一个依赖就多一个许可证要检查、多一个升级负担。
+# v0.1 仅此一个运行时依赖 —— 配置与权限矩阵用 YAML 更好读。
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# 开发依赖
+dev = [
+    "pytest>=8.0",
+]
+
+[project.urls]
+Repository = "https://github.com/gzchenjiesong/nexus-mesh"
+Documentation = "https://github.com/gzchenjiesong/nexus-mesh/tree/main/docs"
+Issues = "https://github.com/gzchenjiesong/nexus-mesh/issues"
+
+[project.scripts]
+nxs = "nxs.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["nxs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

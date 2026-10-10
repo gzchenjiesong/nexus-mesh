@@ -1,0 +1,247 @@
+# ==============================================================================
+#  Nexus Mesh · 示例配置
+# ==============================================================================
+#  这是**中性示例**，不含任何真实场景信息。你可以直接复制为 local.yaml 后修改：
+#
+#      cp config/nxs.example.yaml config/local.yaml
+#
+#  ⚠ local.yaml 已被 .gitignore 排除，请把真实节点、真实任务类型、真实域名
+#    都放在 local.yaml 里，不要改这个示例文件。
+#
+#  ⚠ 凭据（secret）请不要写在这个文件里。优先用环境变量：
+#
+#      export NXS_SECRET_HUB=$(openssl rand -hex 32)
+#      export NXS_SECRET_NODE_A=$(openssl rand -hex 32)
+#      export NXS_SECRET_NODE_B=$(openssl rand -hex 32)
+#
+#    环境变量名规则：NXS_SECRET_<节点ID 大写，非字母数字转下划线>
+#
+#    例外：`nxs demo` 会自动为示例配置生成临时凭据，无需手工设置。
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 服务
+# ------------------------------------------------------------------------------
+server:
+  host: 127.0.0.1
+  port: 8443
+  max_body_bytes: 262144          # 传输层兜底；应答另有按节点的字节配额
+  # TLS 为可选。本地 demo 用明文；部署到公网时务必配置：
+  # tls_cert: /etc/letsencrypt/live/nxs.example.com/fullchain.pem
+  # tls_key:  /etc/letsencrypt/live/nxs.example.com/privkey.pem
+
+# ------------------------------------------------------------------------------
+# 存储
+# ------------------------------------------------------------------------------
+# 只声明"用哪种后端"，不声明连接细节——具体实现在 nxs/backends/ 下，
+# 换后端不改核心代码。memory 仅用于 demo 与测试，进程退出即丢。
+stores:
+  queue: memory                   # memory | sqlite
+  registry: memory                # memory | sqlite
+  audit: file
+  data_dir: .nxs                  # 运行时状态根目录（已 gitignore）
+
+# ------------------------------------------------------------------------------
+# 策略
+# ------------------------------------------------------------------------------
+# ★ 权限矩阵的维度是「域 × 类型」，不是「节点 × 节点」。
+#
+#   这样做的好处：新增节点只需归属到既有域，规则自动继承，不必写 N 条新规则。
+#   如果按节点逐对授权，3 个节点就要 6 条，10 个节点就要 90 条。
+#
+# ★ 没有匹配到规则的「域 × 域」组合一律拒绝（默认拒绝）。
+#   下面的矩阵刻意不给 zone-a / zone-b 之间任何规则——它们之间必须互不可达。
+policy:
+  rate_limit_per_second: 20       # 每节点每秒请求上限，0 表示不限
+
+  # ★ 启动时自动批准的信任域。**默认空 = 不批准任何人。**
+  #
+  #   默认空是刻意的（默认拒绝）：新节点必须被显式批准才能接入，
+  #   这落实了"已知的少数节点 + 预配置信任"这个前提。
+  #
+  #   示例里批准 hub 域只是为了让 demo 开箱可跑——
+  #   生产环境请按实际信任关系填写，或干脆留空、用运维命令逐个批准。
+  auto_approve_domains: [hub]
+
+  matrix:
+    # 协调域可以把任务派给 zone-a，但只限这两个类型，且应答上限为摘要级（summary）
+    - from_domain: hub
+      to_domain: zone-a
+      allow_types: [demo.echo, demo.count]
+      max_level: summary
+
+    # 派给 zone-b 的类型用前缀通配，演示"新增同前缀类型不必改矩阵"
+    # ⚠ 不接受裸通配 '*'——那等于取消默认拒绝
+    - from_domain: hub
+      to_domain: zone-b
+      allow_types: ["demo.*"]
+      max_level: fragment
+
+    # ★ 让 zone-b 可以向协调域上报（演示"有发布权"与"跨域被拒"是两个层次）
+    #
+    #   这条规则存在的目的是让示例能演示完整的控制层次：
+    #     · 角色层：roles.issuer 决定"能不能发"
+    #     · 矩阵层：本条规则决定"能发给谁"
+    #   只有两条都通过才能投递成功。
+    #
+    #   ⚠ 生产环境是否给某个域开放 Issuer，是需要你决策的事
+    #     （Issuer 开放会让"任务参数"成为数据外流通道）。
+    #     示例里开放它，仅为展示矩阵层仍然有效。
+    - from_domain: zone-b
+      to_domain: hub
+      allow_types: ["demo.*"]
+      max_level: summary
+
+    # zone-a / zone-b 之间刻意**没有规则**：
+    # 任一方向的委托都会被 MX-DOMAIN-02 拒绝。这是"信任域之间互不可达"的保证。
+    #
+    # 注意这一层的意义：即使某个节点具备 Issuer 角色（角色层放行），
+    # 只要矩阵里没有对应的「域 × 域」规则，投递**仍然**会被拒。
+    # 两层控制彼此独立，这正是不用「点对点授权」而用「域 × 类型」的原因。
+
+# ------------------------------------------------------------------------------
+# 节点
+# ------------------------------------------------------------------------------
+# 每个节点一张角色卡，三个正交维度：
+#
+#   ① roles        任务流向  —— 能发布 / 能执行 / 能中转 / 只读
+#   ② capabilities 能力供给  —— 提供哪些任务类型，各自的参数 schema 与应答字段
+#   ③ constraints  信任约束  —— 可达数据等级 / 可发布类型 / 可接收来源 / 配额
+#
+# ★ 维度三与维度一二**正交**：「能力很强」不等于「权限很大」。
+#   一个节点可以声明很多能力，但 max_response_level 把它锁死在摘要级。
+# ------------------------------------------------------------------------------
+nodes:
+
+  # ============================================================================
+  # 协调节点：人机入口 + 唯一的跨域聚合点
+  # ============================================================================
+  - node_id: hub
+    domain: hub
+    display_name: "Coordinator"
+    roles:
+      issuer: true                # 能发布任务
+      executor: true              # 也能执行（例如调用外部模型、合成结论）
+      human_interface: true       # ★ 人机入口。由配置表达，不是架构特例——
+                                  #   将来加第二个入口只需多配一个节点，不改代码
+    capabilities:
+      - type: demo.synthesize
+        level: summary
+        mode: sync
+        description: "把多个子结果合成一个结论（跨域聚合）"
+        params_schema:
+          inputs: "string"
+        response_fields: [summary, level]
+    constraints:
+      max_response_level: fragment      # 协调域自己可见更高等级
+      can_receive_from: []        # 不接收任何人的委托
+      can_issue_types: ["demo.*"] # 能发布 demo.* 前缀下的类型
+      can_delegate_to: []         # 不做二次委托
+      quota:
+        tasks_per_day: 1000
+        bytes_per_response: 131072
+        bytes_per_day: 16777216
+        concurrent_tasks: 4
+
+  # ============================================================================
+  # 节点 A：模拟"最严约束"的一侧
+  #   应答上限为摘要级，只能接收来自 hub 的委托，且不可作为 Issuer 发布任何任务。
+  # ============================================================================
+  - node_id: node-a
+    domain: zone-a
+    display_name: "Strict Node"
+    roles:
+      executor: true
+      issuer: false               # ★ 不开 Issuer：避免任务参数成为数据外流通道
+    capabilities:
+      # 最简单的回显能力，用来验证链路
+      - type: demo.echo
+        level: metadata
+        mode: sync
+        description: "原样回显输入内容"
+        params_schema:
+          text: "string"
+        response_fields: [echo, level]
+
+      # 计数能力，演示"应答只含白名单字段"
+      - type: demo.count
+        level: summary
+        mode: sync
+        description: "统计输入条数"
+        params_schema:
+          items: "string"
+        response_fields: [count, level]
+
+    constraints:
+      # ★ 硬上限。片段级 / 原文级 对这个节点而言**在实现层不存在代码路径**，
+      #   而不是"产出了再拦截"。这是本系统区别于普通消息队列的关键。
+      max_response_level: summary
+      can_receive_from: [hub]     # 只有 hub 能给它派任务
+      can_issue_types: []         # 空列表 = 不可发布任何任务
+      can_delegate_to: []         # 不做二次委托
+      quota:
+        tasks_per_day: 200
+        bytes_per_response: 65536
+        bytes_per_day: 4194304
+        concurrent_tasks: 1       # 单并发：这类节点通常资源有限
+
+  # ============================================================================
+  # 节点 B：约束较宽松的一侧
+  #   应答上限为片段级，且有一个自由文本字段——演示"含自由文本"的特殊处理。
+  # ============================================================================
+  - node_id: node-b
+    domain: zone-b
+    display_name: "Open Node"
+    roles:
+      executor: true
+      # ★ 开启 Issuer，用于演示三层控制是"逐层收窄"的：
+      #     ① roles.issuer      —— 角色层：能不能发
+      #     ② can_issue_types   —— 白名单层：能发哪些类型
+      #     ③ policy.matrix     —— 关系层：能发给哪个域
+      #   三层全部通过才能投递。这里开了 ①，但 ③ 仍会拦住发往 zone-a 的请求。
+      #   ⚠ 生产环境是否开放 Issuer 需要你决策（见设计文档 Q9）——
+      #     开放它会让"任务参数"本身成为一个数据外流通道。
+      issuer: true
+    capabilities:
+      - type: demo.echo
+        level: metadata
+        mode: sync
+        description: "原样回显输入内容"
+        params_schema:
+          text: "string"
+        response_fields: [echo, level]
+
+      # ★ 这个能力含自由文本字段。freetext_fields 必须同时出现在
+      #   response_fields 中，且适用更严格的长度上限。
+      #   呈现给用户时也必须明确标注"含自由文本"——因为自由文本是
+      #   提示注入的载体，接收方需要知道这段内容不可信。
+      - type: demo.search
+        level: fragment
+        mode: async
+        description: "检索并返回结果集与一段自然语言摘要"
+        params_schema:
+          query: "string"
+        response_fields: [results, freetext_summary, level]
+        freetext_fields: [freetext_summary]
+
+      - type: demo.slow
+        level: summary
+        mode: async
+        description: "耗时任务，用于验证租约续期与断电恢复"
+        params_schema:
+          seconds: "int"
+        response_fields: [slept, level]
+
+    constraints:
+      max_response_level: fragment
+      can_receive_from: [hub]
+      # ★ 开了 Issuer 以便演示"角色层与矩阵层是两个独立层次"：
+      #   它有发布权，但矩阵里只允许发给 hub 域，发给 zone-a 仍会被拒。
+      #   ⚠ 生产环境是否开放 Issuer 需要你决策（见文档 Q9）。
+      can_issue_types: ["demo.*"]
+      can_delegate_to: []
+      quota:
+        tasks_per_day: 500
+        bytes_per_response: 131072
+        bytes_per_day: 8388608
+        concurrent_tasks: 2

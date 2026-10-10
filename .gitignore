@@ -1,0 +1,77 @@
+# ============================================================
+#  Nexus Mesh · .gitignore
+# ============================================================
+#  设计原则：本地真实配置、运行时状态、密钥一律不入库。
+#  这样在推送 GitHub 之前，无需逐文件检查敏感信息。
+# ============================================================
+
+# ---------- 本地真实配置（★ 重要）----------
+# 仓库只保留 *.example.yaml；真实成员名单、真实任务类型、
+# 真实域名与凭据都放这里，永不入库。
+config/local.yaml
+config/*.local.yaml
+config/local/
+config/members.yaml
+config/nxs.yaml
+config/secrets.yaml
+
+# ---------- 密钥与凭据（★ 重要）----------
+*.key
+*.pem
+*.crt
+*.p12
+.env
+.env.*
+secrets/
+credentials/
+
+# ---------- 运行时状态 ----------
+.nxs/
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+run/
+logs/
+*.log
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+
+# ---------- 测试与工具缓存 ----------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ---------- 编辑器与系统 ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 个人笔记（防止误提交）----------
+NOTES.md
+TODO.local.md
+*.private.md
+.nxs-backup
