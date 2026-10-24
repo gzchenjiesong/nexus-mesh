@@ -12,6 +12,15 @@
     7  ★ 断电恢复：节点被 kill 后任务自动回到队列
 
 若 4、5、6 有任何一条不能稳定复现地通过，本项目就没有达成设计目标。
+
+两种跑法
+--------
+* ``nxs demo``       —— 同进程传输（快，无网络依赖）
+* ``nxs demo --net`` —— **同一套断言，走真实 HTTP**
+
+``--net`` 不是另一份实现：七步代码完全共用，只有 ``transports`` 换了。
+这正是"传输可替换"的证明——如果节点逻辑真的与传输解耦，
+换个传输跑同一套断言应当不需要改任何一行流程代码。
 """
 
 from __future__ import annotations
@@ -68,13 +77,19 @@ def detail(msg: str) -> None:
 # 核心装配
 # ---------------------------------------------------------------------------
 
-def build(force_memory: bool = True) -> NexusApp:
+def build(force_memory: bool = True, config_path: str | None = None) -> NexusApp:
     """用示例配置装配一个内存版核心。
 
     demo 用内存后端是刻意的——它让每次运行都从干净状态开始，
     且不需要清理临时文件。真实部署用 ``stores: sqlite``。
+
+    :param config_path: 省略时用仓库自带的示例配置。
+        demo 断言的笑是**示例拓扑**（hub / node-a / node-b），
+        换配置只在拓扑一致时有意义。
     """
-    cfg_path = Path(__file__).resolve().parent.parent / "config" / "nxs.example.yaml"
+    cfg_path = Path(config_path) if config_path else (
+        Path(__file__).resolve().parent.parent / "config" / "nxs.example.yaml"
+    )
     env = {
         f"NXS_SECRET_{m.upper().replace('-', '_')}":
             f"{m}-demo-secret-0123456789abcdef"
@@ -88,32 +103,95 @@ def build(force_memory: bool = True) -> NexusApp:
     return app
 
 
-def clients(app: NexusApp) -> dict[str, NodeClient]:
-    t = app.transport
+def clients(app: NexusApp, transports: dict[str, Any] | None = None) -> dict[str, NodeClient]:
+    if transports is None:
+        t = app.transport
+        return {
+            "node-a": NodeClient(NODE_A, t),
+            "node-b": NodeClient(NODE_B, t),
+        }
     return {
-        "node-a": NodeClient(NODE_A, t),
-        "node-b": NodeClient(NODE_B, t),
+        "node-a": NodeClient(NODE_A, transports["node-a"]),
+        "node-b": NodeClient(NODE_B, transports["node-b"]),
     }
+
+
+def make_transports(app: NexusApp, *, net: bool) -> tuple[dict[str, Any], Any]:
+    """按模式准备传输。
+
+    同进程模式下三个节点共用同一个传输对象（本来就是同一个进程）；
+    网络模式下各自是独立的 HTTP 客户端——**每个节点有自己的密钥**，
+    这与真实部署一致。
+
+    :return: (传输表, 网关或 None)
+    """
+    if not net:
+        t = app.transport
+        return {"hub": t, "node-a": t, "node-b": t}, None
+
+    from nxs.edge.client import HttpTransport
+    from nxs.edge.gateway import Gateway
+
+    # 用系统分配的端口，避免 8443 被占用时 demo 演不出来
+    from dataclasses import replace
+
+    gateway = Gateway(app, server_config=replace(app.config.server, port=0)).start()
+    transports = {
+        node_id: HttpTransport(gateway.base_url, node_id=node_id, secret=secret)
+        for node_id, secret in app.config.secrets.items()
+    }
+    return transports, gateway
 
 
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
-def main() -> int:
+def main(net: bool = False, config_path: str | None = None) -> int:
     total = 7
+    mode = "HTTP 传输（真实网络）" if net else "同进程传输"
     print(c("\n  Nexus Mesh · 七步验收 Demo", "b"))
+    print(c(f"  传输：{mode}", "dim"))
     print(c("  " + "─" * 62, "dim"))
 
-    app = build()
-    cl = clients(app)
+    app = build(config_path=config_path)
+    transports, gateway = make_transports(app, net=net)
+    hub = transports["hub"]
+    cl = clients(app, transports)
     failures: list[str] = []
+    try:
+        failures = _run_steps(app, hub, transports, cl, net=net)
+    finally:
+        if gateway is not None:
+            gateway.stop()
+
+    # ---- 结论 ----
+    print(c("\n  " + "─" * 62, "dim"))
+    if failures:
+        print(c(f"  {len(failures)} 项未通过：", "bad"))
+        for f in failures:
+            print(c(f"    · {f}", "bad"))
+        return 1
+    print(c("  七步全部通过 ✓", "ok"))
+    print(c("  其中第 4、5、6 步是安全断言——它们才是这个项目的意义所在。", "dim"))
+    return 0
+
+
+def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
+               cl: dict[str, NodeClient], *, net: bool) -> list[str]:
+    """七步流程本体。**两种传输共用这一段**，不复制两份。"""
+    total = 7
+    failures: list[str] = []
+    sess = "ses-demo-1"
 
     # ---- 1 ----
     step(1, total, "启动核心")
     ok(f"配置加载自 {Path(app.config.source_path).name}")
+    backend = "memory"
     detail(f"节点 {len(app.config.nodes)} 个 · 矩阵规则 "
-           f"{len(app.config.policy.rules)} 条 · 后端 memory")
+           f"{len(app.config.policy.rules)} 条 · 后端 {backend}")
+    if net:
+        detail(f"网关监听 {hub.base_url}（节点出站连入，网关不主动连节点）")
 
     # ---- 2 ----
     step(2, total, "节点注册与批准")
@@ -128,10 +206,9 @@ def main() -> int:
 
     # ---- 3 ----
     step(3, total, "正常任务：投递 → 领取 → 执行 → 回传")
-    sess = "ses-demo-1"
-    d = app.transport.publish(from_node="hub", to_node="node-a",
-                              task_type="demo.echo", params={"text": "hello"},
-                              session_id=sess, idempotency_key="idem-1")
+    d = hub.publish(from_node="hub", to_node="node-a",
+                    task_type="demo.echo", params={"text": "hello"},
+                    session_id=sess, idempotency_key="idem-1")
     ok(f"投递成功  task={d.task.id}  实际上限={d.effective_max_level}")
     task = cl["node-a"].run_once()
     if task and task.status == "completed":
@@ -143,8 +220,8 @@ def main() -> int:
     # ---- 4 ----
     step(4, total, "★ 安全断言①  未注册的任务类型")
     try:
-        app.transport.publish(from_node="hub", to_node="node-a",
-                              task_type="demo.unknown", params={}, session_id=sess)
+        hub.publish(from_node="hub", to_node="node-a",
+                    task_type="demo.unknown", params={}, session_id=sess)
         failures.append("第 4 步：未注册类型竟被接受")
         print(c("       ✗ 未注册类型竟被接受", "bad"))
     except PolicyDenied as e:
@@ -154,15 +231,17 @@ def main() -> int:
     # ---- 5 ----
     step(5, total, "★ 安全断言②  越界字段（核心收不到内容）")
     # 构造一个"诚实但越界"的节点：它产出了白名单之外的字段
-    from examples.nodes import NODE_A as _A
-    honest = NodeClient(_A, app.transport)
-    t5 = app.transport.publish(from_node="hub", to_node="node-a",
-                               task_type="demo.echo", params={"text": "x"},
-                               session_id=sess, idempotency_key="idem-5",
-                               ).task
+    t5 = hub.publish(from_node="hub", to_node="node-a",
+                     task_type="demo.echo", params={"text": "x"},
+                     session_id=sess, idempotency_key="idem-5",
+                     ).task
     leaked_payload = {"echo": "x", "level": "metadata", "internal_note": "不该外传的内容"}
     try:
-        app.transport.complete("node-a", t5, [
+        # ★ 由 node-a 自己的传输回传。**不能让 hub 代它回传**——
+        #   服务端只接受"任务收件人本人"的回传（S11）。
+        #   同进程模式下三个节点共用一个传输对象，但传的 node_id 仍是 node-a，
+        #   所以两种模式走的是同一条逻辑。
+        transports["node-a"].complete("node-a", t5, [
             Artifact(level=Level.METADATA, kind="structured", data=leaked_payload)
         ])
         failures.append("第 5 步：越界字段竟被放行")
@@ -178,8 +257,9 @@ def main() -> int:
 
     # 6a 角色层：最严节点连发布权都没有
     try:
-        app.transport.publish(from_node="node-a", to_node="hub",
-                              task_type="demo.synthesize", params={}, session_id=sess)
+        transports["node-a"].publish(from_node="node-a", to_node="hub",
+                                     task_type="demo.synthesize", params={},
+                                     session_id=sess)
         failures.append("第 6a 步：无发布权的节点竟能发布")
         print(c("       ✗ 无发布权的节点竟能发布", "bad"))
     except PolicyDenied as e:
@@ -187,9 +267,9 @@ def main() -> int:
 
     # 6b 矩阵层：节点有发布权，但跨信任域仍被拒
     try:
-        app.transport.publish(from_node="node-b", to_node="node-a",
-                              task_type="demo.echo", params={"text": "x"},
-                              session_id=sess)
+        transports["node-b"].publish(from_node="node-b", to_node="node-a",
+                                     task_type="demo.echo", params={"text": "x"},
+                                     session_id=sess)
         failures.append("第 6b 步：跨信任域委托竟被允许")
         print(c("       ✗ 跨信任域委托竟被允许", "bad"))
     except PolicyDenied as e:
@@ -199,18 +279,18 @@ def main() -> int:
 
     # 6c 反向同理
     try:
-        app.transport.publish(from_node="node-a", to_node="node-b",
-                              task_type="demo.echo", params={"text": "x"},
-                              session_id=sess)
+        transports["node-a"].publish(from_node="node-a", to_node="node-b",
+                                     task_type="demo.echo", params={"text": "x"},
+                                     session_id=sess)
     except PolicyDenied as e:
         denied(e.rule_id.value, "node-a → node-b（反方向同样不可达）")
 
     # ---- 7 ----
     step(7, total, "★ 断电恢复：节点被 kill 后任务自动回到队列")
-    t7 = app.transport.publish(from_node="hub", to_node="node-a",
-                               task_type="demo.echo", params={"text": "recover"},
-                               session_id=sess, idempotency_key="idem-7").task
-    claimed = app.mailbox.poll("node-a")
+    t7 = hub.publish(from_node="hub", to_node="node-a",
+                     task_type="demo.echo", params={"text": "recover"},
+                     session_id=sess, idempotency_key="idem-7").task
+    claimed = transports["node-a"].poll("node-a")
     ok(f"任务 {claimed.id} 被领取（attempt={claimed.attempt}）")
     detail("模拟节点进程被 kill：不回传、不报告、无任何信号")
 
@@ -221,7 +301,7 @@ def main() -> int:
     released = app.lifecycle.release_expired(now=future)
     ok(f"租约超时 → 自动释放 {len(released)} 个任务（零人工干预）")
 
-    reclaimed = app.mailbox.poll("node-a")
+    reclaimed = transports["node-a"].poll("node-a")
     if reclaimed is not None and reclaimed.id == claimed.id:
         ok(f"重启后自动接续  attempt={reclaimed.attempt}（重试次数累积）")
         cl["node-a"].run_once()
@@ -241,17 +321,7 @@ def main() -> int:
     print(f"       会话 {sess}: {view['total']} 个任务 "
           f"（{view['by_status']}）")
     detail("审计只记元数据，不含任务参数与产出内容")
-
-    # ---- 结论 ----
-    print(c("\n  " + "─" * 62, "dim"))
-    if failures:
-        print(c(f"  {len(failures)} 项未通过：", "bad"))
-        for f in failures:
-            print(c(f"    · {f}", "bad"))
-        return 1
-    print(c("  七步全部通过 ✓", "ok"))
-    print(c("  其中第 4、5、6 步是安全断言——它们才是这个项目的意义所在。", "dim"))
-    return 0
+    return failures
 
 
 if __name__ == "__main__":

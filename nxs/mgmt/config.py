@@ -56,15 +56,26 @@ class ServerConfig:
     #: TLS 证书路径。为 None 时以明文 HTTP 运行（仅限本地 demo 与测试）。
     tls_cert: str | None = None
     tls_key: str | None = None
+    #: 是否启用 SSE 通知流。关掉也不影响功能——节点退回固定周期轮询。
+    sse_enabled: bool = True
+    #: SSE 心跳间隔（秒）。中间设备通常 30~60 秒空闲就断，取更小的值更稳。
+    sse_keepalive_seconds: int = 15
+    #: 常规请求并发上限。**不含** SSE 流——那条单独计。
+    max_concurrent_requests: int = 64
+    #: SSE 流上限。同一节点重连时旧流会被要求退出，不会无限堆积。
+    max_sse_streams: int = 16
 
-    _FIELDS = ("host", "port", "max_body_bytes", "tls_cert", "tls_key")
+    _FIELDS = ("host", "port", "max_body_bytes", "tls_cert", "tls_key",
+               "sse_enabled", "sse_keepalive_seconds",
+               "max_concurrent_requests", "max_sse_streams")
 
     @classmethod
     def from_dict(cls, obj: Mapping[str, Any] | None) -> "ServerConfig":
         obj = obj or {}
         _reject_unknown(obj, cls._FIELDS, "server")
         port = obj.get("port", 8443)
-        if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
+        # port=0 表示"由操作系统分配"（测试与 demo 用，避免抢固定端口）
+        if not isinstance(port, int) or isinstance(port, bool) or not (0 <= port <= 65535):
             raise ConfigError(f"server.port: 非法端口 {port!r}")
         max_body = obj.get("max_body_bytes", 256 * 1024)
         if not isinstance(max_body, int) or max_body <= 0:
@@ -72,12 +83,35 @@ class ServerConfig:
         cert, key = obj.get("tls_cert"), obj.get("tls_key")
         if (cert is None) != (key is None):
             raise ConfigError("server: tls_cert 与 tls_key 必须同时提供或同时省略")
+
+        sse_enabled = obj.get("sse_enabled", True)
+        if not isinstance(sse_enabled, bool):
+            raise ConfigError("server.sse_enabled: 必须是布尔值")
+
+        keepalive = obj.get("sse_keepalive_seconds", 15)
+        if not isinstance(keepalive, int) or isinstance(keepalive, bool) \
+                or not (1 <= keepalive <= 60):
+            raise ConfigError("server.sse_keepalive_seconds: 必须在 1..60 之间")
+
+        max_req = obj.get("max_concurrent_requests", 64)
+        if not isinstance(max_req, int) or isinstance(max_req, bool) or max_req <= 0:
+            raise ConfigError("server.max_concurrent_requests: 必须是正整数")
+
+        max_streams = obj.get("max_sse_streams", 16)
+        if not isinstance(max_streams, int) or isinstance(max_streams, bool) \
+                or max_streams <= 0:
+            raise ConfigError("server.max_sse_streams: 必须是正整数")
+
         return cls(
             host=str(obj.get("host", "127.0.0.1")),
             port=port,
             max_body_bytes=max_body,
             tls_cert=cert,
             tls_key=key,
+            sse_enabled=sse_enabled,
+            sse_keepalive_seconds=keepalive,
+            max_concurrent_requests=max_req,
+            max_sse_streams=max_streams,
         )
 
 
@@ -226,9 +260,6 @@ EXAMPLE_CONFIG_PATH = "config/nxs.example.yaml"
 #:
 #: **新增配置项时，要么实现它，要么加到这里。**
 UNIMPLEMENTED: tuple[tuple[str, str], ...] = (
-    ("tls_cert / tls_key", "v0.1 无 HTTP 传输层，配置的 TLS 不会生效"),
-    ("max_body_bytes", "同上，传输层未实现"),
-    ("rate_limit_per_second", "速率限制未接入；tasks_per_day 与并发是生效的"),
     ("params_schema", "参数 schema 只声明、未校验；格式错误的参数由执行节点自己承担失败"),
     ("bytes_per_day", "应答字节数未按节点累计，故按日字节配额永不触发"),
 )

@@ -73,6 +73,7 @@ git clone https://github.com/gzchenjiesong/nexus-mesh.git
 cd nexus-mesh
 make install
 make demo          # 等价于 nxs demo
+make demo-net      # 同一套七步断言，走真实 HTTP
 ```
 
 四个命令：
@@ -80,8 +81,8 @@ make demo          # 等价于 nxs demo
 | 命令 | 作用 |
 |---|---|
 | `nxs verify` | 配置自检：校验角色卡、矩阵、凭据的一致性 |
-| `nxs demo` | 跑七步验收 demo（**先看这个**） |
-| `nxs serve` | 核心常驻（含定期维护：标记 stale、释放过期租约） |
+| `nxs demo` | 跑七步验收 demo（**先看这个**）。加 `--net` 改走真实网络 |
+| `nxs serve` | 核心常驻：**真的监听 HTTP 端口** + 定期维护（标记 stale、释放过期租约） |
 | `nxs status` | 查看节点状态与审计摘要 |
 
 `nxs demo` 会跑出一段完整的协作流程，包括**三条安全断言**：
@@ -97,6 +98,44 @@ make demo          # 等价于 nxs demo
 
 **这三条断言是这个项目区别于普通消息传递的地方。** 若它们不能稳定复现地通过，本项目就没有达成设计目标。
 
+`nxs demo --net` 跑的是**同一段流程代码**，只把传输换成了 HTTP。
+两条命令的审计摘要应当完全一致——这就是"传输可替换"的证明。
+
+### 接入一个真实节点
+
+协调端（有独立 IP 的那台）：
+
+```bash
+export NXS_SECRET_HUB=$(openssl rand -hex 32)
+export NXS_SECRET_NODE_A=$(openssl rand -hex 32)
+nxs serve -c config/local.yaml          # 监听 :8443
+```
+
+节点端（**只出站，不监听任何端口**）：
+
+```python
+from nxs.core.models import Level
+from nxs.edge.client import HttpTransport
+from nxs.sdk import NodeClient, NodeConfig
+
+transport = HttpTransport("https://hub.example.com:8443/nxs",
+                          node_id="node-a", secret=secret)
+client = NodeClient(
+    NodeConfig("node-a",
+               handlers={"demo.echo": lambda p: {"echo": p["text"],
+                                                 "level": "metadata"}},
+               levels={"demo.echo": Level.METADATA}),
+    transport,
+)
+client.run_forever()        # 没装 SSE 也能跑：纯短轮询
+```
+
+想降低延迟就再起一个线程订阅通知流；订阅失败不影响功能：
+
+```python
+transport.subscribe(on_work=lambda: None)   # 断开时正常返回，不抛异常
+```
+
 ### 设计原则
 
 1. **只流转，不决策** —— 网络决定"怎么送"，节点决定"做什么"
@@ -109,7 +148,7 @@ make demo          # 等价于 nxs demo
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.1.0）
+### 已实现（v0.2.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -122,17 +161,19 @@ make demo          # 等价于 nxs demo
 | 应答边界（字段白名单 / 等级上限 / 自由文本清洗） | ✅ |
 | 审计留痕（只记元数据 / 写入失败熔断） | ✅ |
 | 存储后端 | memory · sqlite |
+| **HTTP 传输层**（网关 + 节点客户端，走真实网络） | ✅ |
+| **SSE 通知流**（只推"有活"，不推内容；断线自动退回短轮询） | ✅ |
 | CLI | verify · demo · serve · status |
 
 ### 尚未实现
 
 | 项 | 说明 |
 |---|---|
-| **HTTP 传输层** | 目前只有同进程传输（demo 用）。传输接口已预留，接入真实节点时实现即可，核心代码无需改动 |
 | **能力匹配（Capability-Match）** | 当前用 Direct 模式（指定目标节点） |
 | **会话任务图与依赖跟踪** | 目前只记录 `session_id` 用于审计聚合 |
 | **大产物的产物通道** | 当前应答都走信封（小数据） |
 | **mTLS** | 目前用共享密钥 HMAC；接口不变，Core 不感知认证方式 |
+| **可观测与运维接口** | 指标、告警、在线吊销等仍走 CLI 与改配置 |
 
 ### 开发
 
@@ -213,15 +254,23 @@ See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
 
-**v0.1.0** — the minimal closed loop is complete and tested end to end
-(190 tests): envelope signing, role cards, policy enforcement, registry,
-mailbox, task lifecycle with leases and idempotency, response boundary,
-and audit.
+**v0.2.0** — the network is real now. `nxs serve` listens on HTTP and a
+node can actually connect to it from another machine (231 tests).
 
-Not yet implemented: HTTP transport layer, capability matching, session
-task graph, large-artifact channel, mTLS, observability, ops API.
-See [`docs/architecture.md`](docs/architecture.md#10-已知缺口) for the
-tracked gaps.
+* **Transport**: `POST /nxs/publish` · `GET /nxs/poll` · `POST /nxs/result`
+  · `POST /nxs/fail` · `GET /nxs/events` (SSE) · `GET /nxs/health`
+* **Two signing layers**: envelopes sign task content; a separate request
+  signature covers method + path + body digest for calls that carry no task
+* **Egress-only**: nodes only dial out and never listen; the gateway never
+  initiates a connection — push rides the connection the node opened
+* **Adversarial evidence**: 20 tests that actively attack the wire — forged
+  signatures, path/method/body tampering, replays, cross-node task theft,
+  slow-loris, oversized bodies, stream-quota exhaustion
+
+Not yet implemented: capability matching, session task graph,
+large-artifact channel, mTLS, observability, ops API.
+See [`docs/architecture.md`](docs/architecture.md) for the tracked gaps —
+including the ones with **weaker evidence** (TLS has no automated test).
 
 ### License
 

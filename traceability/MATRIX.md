@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **151** 个测试方法（已声明覆盖）· **66** 个纵向编号项（51 功能点 + 15 模块需求）
+共 **196** 个测试方法（已声明覆盖）· **77** 个纵向编号项（60 功能点 + 17 模块需求）
 
 ## 设计目标
 
@@ -19,19 +19,30 @@
 
 ### M1 网关与认证
 
-平面 `接入层` · 实现 `nxs/edge/auth.py` · 状态 **部分实现**
+平面 `接入层` · 实现 `nxs/edge/auth.py · gateway.py · httpsig.py · client.py` · 状态 **已实现**
 
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
 | **M1.F1** | 信封签名生成 | `nxs/core/envelope.py:Envelope.sign/compute_signature` | G2 | P0 | S4 | 1 |
 | **M1.F2** | 签名验签（常数时间比较） | `nxs/core/envelope.py:Envelope.verify` | G2 | P0 | S4 | 6 |
-| **M1.F3** | 时间窗校验（防重放） | `nxs/core/envelope.py:Envelope.verify（drift 判定）` | G2 | P0 | S4 | 3 |
+| **M1.F3** | 时间窗校验（防重放） | `nxs/core/envelope.py:Envelope.verify（drift 判定）` | G2 | P0 | S4 | 4 |
 | **M1.F4** | 规范 JSON 序列化（签名确定性） | `nxs/core/envelope.py:canonical_bytes` | G2 | P0 | — | 1 |
-| **M1.F5** | nonce 去重防重放（有界缓存） | `nxs/edge/auth.py:Authenticator._check_nonce` | G2 | P0 | S4 | 2 |
+| **M1.F5** | nonce 去重防重放（有界缓存） | `nxs/edge/auth.py:Authenticator._check_nonce` | G2 | P0 | S4 | 4 |
 | **M1.F6** | 凭据管理（轮换／吊销即时生效） | `nxs/edge/auth.py:Authenticator.set_secret/revoke` | G2 | P0 | S10 | 1 |
 | **M1.F7** | 成员认证编排（四步校验顺序） | `nxs/edge/auth.py:Authenticator.verify` | G2 | P0 | S4 | 2 |
 | **M1.F8** | 信封格式校验（版本与结构） | `nxs/core/envelope.py:Envelope.from_dict` | G1,G2 | P0 | — | 1 |
+| **M1.F9** | 请求签名生成（方法+路径+节点+时间+nonce+体摘要） | `nxs/edge/httpsig.py:sign_request/compute_signature` | G2 | P0 | — | 4 |
+| **M1.F10** | 请求签名校验（与信封共用 nonce 缓存与吊销表） | `nxs/edge/auth.py:Authenticator.verify_request` | G2 | P0 | S4 | 8 |
+| **M1.F11** | HTTP 端点分发与规则→状态码映射 | `nxs/edge/gateway.py:_Handler._dispatch/status_for` | G1,G2 | P0 | S11 | 18 |
+| **M1.F12** | 请求体上限（读入前按 Content-Length 判定） | `nxs/edge/gateway.py:_Handler._read_body` | G2 | P1 | — | 3 |
+| **M1.F13** | 并发与流配额（短请求与 SSE 分别计） | `nxs/edge/gateway.py:Gateway.acquire_request_slot/acquire_sse_slot` | G2 | P1 | — | 3 |
+| **M1.F14** | SSE 通知流（仅通知不含数据 · 心跳 · 重连换流） | `nxs/edge/gateway.py:_Handler._handle_events` | G1 | P1 | — | 4 |
+| **M1.F15** | 网关优雅关闭（先关中枢再停 accept） | `nxs/edge/gateway.py:Gateway.stop` | G1 | P2 | — | 2 |
+| **M1.F16** | 节点侧 HTTP 传输（实现 Transport 协议） | `nxs/edge/client.py:HttpTransport` | G1,G4 | P0 | — | 5 |
+| **M1.F17** | 推送不可用时降级为短轮询 | `nxs/edge/client.py:HttpTransport.subscribe` | G1 | P1 | — | 2 |
 | **M1.R1** | 认证失败不得区分具体原因（防成员枚举） | （由 M1.F7 实现） | G2 | P0 | S4 | 1 |
+| **M1.R2** | Egress-Only：节点侧永不监听端口，入站连接只由总线提供 | （由 M1.F16, M1.F17 实现） | G2 | P1 | — | 1 |
+| **M1.R3** | 未认证输入不得进入审计（拒绝时不记录调用方自报的标识） | （由 M1.F11 实现） | G2,G3 | P0 | S4 | 2 |
 
 ### M2 协议适配
 
@@ -210,13 +221,14 @@ _（未实现，暂无功能点）_
 | **S1** | 下发未注册的任务类型时，投递被拒绝，且不进入任何执行逻辑 | M5.F1 |
 | **S2** | 产出含白名单外字段时被拒绝，且发起方收不到该内容的任何痕迹 | M5.F4, M10.F1 |
 | **S3** | 跨信任域的委托默认被拒绝 | M5.F2, M5.F3, M5.F6, M11.F2, M5.R1 |
-| **S4** | 拒绝响应只含 rule_id 与固定消息，不含字段名/值/长度/前缀 | M1.F1, M1.F2, M1.F3, M1.F5, M1.F7, M12.F1, M1.R1 |
+| **S4** | 拒绝响应只含 rule_id 与固定消息，不含字段名/值/长度/前缀 | M1.F1, M1.F2, M1.F3, M1.F5, M1.F7, M1.F10, M12.F1, M1.R1, M1.R3 |
 | **S5** | 产出等级上限取三重约束的最小值 | M5.F5, M5.R2 |
 | **S6** | 产出等级由产出方标注，发起方无法指定 | M10.R1 |
 | **S7** | 回传内容的 semantics 被强制改写为 data | M10.F2, M10.R2 |
 | **S8** | 自由文本字段受长度上限约束，并做指令前缀剥离与控制字符清理 | M10.F3, M10.R2 |
 | **S9** | 新节点不能自行加入——注册后需人工批准 | M3.F1, M3.F2, M3.R1 |
 | **S10** | 凭据吊销立即生效，不等过期 | M1.F6, M3.F3, M3.R2 |
+| **S11** | 回传时以服务端持有的任务为准，节点无法冒领他人的任务 | M1.F11 |
 
 ## 尚未实现的模块
 

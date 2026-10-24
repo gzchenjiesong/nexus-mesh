@@ -4,18 +4,18 @@
 
     nxs verify  配置自检：加载配置、校验合法性、打印生效的规则
     nxs demo    跑七步验收 demo（同 ``make demo``）
-    nxs serve   核心常驻：初始化注册表 + 定期维护（sweep）
+    nxs serve   核心常驻：启动 HTTP 网关 + 定期维护（sweep）
     nxs status  查看当前节点状态与审计摘要
 
 关于 HTTP 端点
 --------------
-v0.1 **尚未实现 HTTP 传输层**。原因：目前只有同进程的 demo 需要跑通，
-而 HTTP 层在没有第二个真实节点接入前无法被真实验证——留一层未验证的
-网络代码只会增加不确定性。
+v0.2 起 **``serve`` 会真的监听端口**（``nxs/edge/gateway.py``）。
+节点侧用 ``nxs/edge/client.py`` 的 ``HttpTransport`` 接入——
+它实现与同进程传输相同的 ``Transport`` 协议，因此 ``NodeClient``
+一行都不用改。
 
-传输接口已由 ``nxs.app.Transport`` 协议预留，节点侧 SDK 也已与传输解耦
-（``nxs/sdk/`` 只依赖该协议）。要接入真实节点时，实现一个基于
-``http.server``（或用 FastAPI）的 Transport 即可，**核心代码无需改动**。
+设计上刻意有两条路径：同进程（demo/测试）与 HTTP（真实部署）。
+两者走同一套策略与边界逻辑，只是后者多了序列化与认证。
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from pathlib import Path
 from . import __version__
 from .app import NexusApp
 from .core.errors import ConfigError, NexusError
+from .edge.gateway import Gateway
 from .mgmt.config import (
     DEFAULT_CONFIG_PATH,
     EXAMPLE_CONFIG_PATH,
@@ -154,7 +155,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_demo(args: argparse.Namespace) -> int:
-    """跑七步验收 demo。"""
+    """跑七步验收 demo。``--net`` 时改走真实 HTTP（同一套断言）。"""
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root))
     try:
@@ -163,7 +164,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         _err(f"无法加载 demo 模块：{exc}")
         _err(f"请在仓库根目录运行（当前解析到的根：{root}）")
         return 2
-    return demo_main()
+    return demo_main(net=args.net, config_path=args.config)
 
 
 # ---------------------------------------------------------------------------
@@ -171,11 +172,13 @@ def cmd_demo(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    """核心常驻。
+    """核心常驻：**启动 HTTP 网关 + 定期维护**。
 
-    v0.1 的职责：初始化注册表、按固定间隔执行维护（标记 stale 节点、
-    释放过期租约）。**维护动作是断电恢复的驱动源** —— 只要它在跑，
-    被中断的任务最终都会自动回到队列。
+    两件事并行：
+    * **网关** —— 接受节点连接（节点出站连入），处理投递/领取/回传
+    * **维护循环** —— 标记 stale 节点、释放过期租约。
+      **维护动作是断电恢复的驱动源**：只要它在跑，被中断的任务
+      最终都会自动回到队列，无需人工干预。
     """
     try:
         app = _load_app(args, force_memory=args.memory)
@@ -199,8 +202,22 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if not args.memory:
         _warn("已使用持久化后端；如需每次从干净状态启动，加 --memory")
 
-    _info(_color("传输层：v0.1 未实现 HTTP 端点。"
-                 "当前仅同进程（demo）可用，见 `nxs --help`。", "dim"))
+    gateway = Gateway(app)
+    try:
+        gateway.start()
+    except ConfigError as exc:
+        _err(f"网关启动失败：{exc}")
+        return 2
+
+    cfg = app.config.server
+    _info(_color("传输层", "b"))
+    _info(f"  监听      : {gateway.base_url}")
+    _info(f"  TLS       : {'已启用' if cfg.tls_cert else '未启用（仅限本地/内网）'}")
+    _info(f"  推送(SSE) : {'启用' if cfg.sse_enabled else '关闭'}"
+          f" · 心跳 {cfg.sse_keepalive_seconds}s")
+    _info(f"  限额      : 体 {cfg.max_body_bytes}B · "
+          f"并发 {cfg.max_concurrent_requests} · 流 {cfg.max_sse_streams}")
+    _info("")
     _info(_color(f"开始常驻（Ctrl-C 退出）", "dim"))
 
     ticks = 0
@@ -217,7 +234,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 break
     except KeyboardInterrupt:
         _info("")
-        _info("收到中断，已停止")
+        _info("收到中断，正在关闭网关…")
+    finally:
+        gateway.stop()
+    _info("已停止")
     return 0
 
 
@@ -264,8 +284,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "示例：\n"
             "  nxs verify                         自检示例配置\n"
-            "  nxs demo                           跑七步验收 demo\n"
-            "  nxs serve -c config/local.yaml     以持久化后端常驻\n"
+            "  nxs demo                           跑七步验收 demo（同进程）\n"
+            "  nxs demo --net                     同一套断言，走真实 HTTP\n"
+            "  nxs serve -c config/local.yaml     常驻：监听端口 + 定期维护\n"
             "  nxs status                         查看节点与审计\n\n"
             "配置路径也可用环境变量 NXS_CONFIG 指定。\n"
             "节点凭据从环境变量读取：NXS_SECRET_<节点ID大写>。\n"
@@ -286,6 +307,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_verify)
 
     sp = sub.add_parser("demo", help="跑七步验收 demo")
+    add_common(sp)
+    sp.add_argument("--net", action="store_true",
+                    help="改走真实 HTTP（同一套七步断言，验证传输层）")
     sp.set_defaults(func=cmd_demo)
 
     sp = sub.add_parser("serve", help="核心常驻（含定期维护）")

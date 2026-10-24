@@ -30,6 +30,16 @@ server:
   # tls_cert: /etc/letsencrypt/live/nxs.example.com/fullchain.pem
   # tls_key:  /etc/letsencrypt/live/nxs.example.com/privkey.pem
 
+  # ---- 传输层自保（这些不是业务配额，是防止被压垮）----
+  # ★ 体积上限在**读入之前**按 Content-Length 判定，超限直接 413。
+  #   先读后判等于把内存交给调用方决定。
+  max_concurrent_requests: 64     # 常规请求并发；超出返回 503
+  # ★ SSE 流单独计，不占常规槽。否则几条长连接就能把短请求饿死——
+  #   推送可用反而降低可用性。
+  max_sse_streams: 16
+  sse_enabled: true               # 关掉也不影响功能，节点退回固定周期轮询
+  sse_keepalive_seconds: 15       # 中间设备通常 30~60 秒空闲就断，取更小的值更稳
+
 # ------------------------------------------------------------------------------
 # 存储
 # ------------------------------------------------------------------------------

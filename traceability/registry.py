@@ -161,7 +161,9 @@ GOALS: tuple[Goal, ...] = (
 
 MODULES: tuple[Module, ...] = (
     # ---- 接入层 ----
-    Module("M1", "网关与认证", "接入层", "nxs/edge/auth.py", "部分实现", ("G2", "G4")),
+    Module("M1", "网关与认证", "接入层",
+           "nxs/edge/auth.py · gateway.py · httpsig.py · client.py",
+           "已实现", ("G2", "G4")),
     Module("M2", "协议适配", "接入层", "nxs/edge/proto（未建）", "未实现", ("G4",)),
     # ---- 控制面 ----
     Module("M3", "注册中心", "控制面", "nxs/control/registry.py", "已实现", ("G1", "G5")),
@@ -211,6 +213,35 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M1.F8", "信封格式校验（版本与结构）",
             "nxs/core/envelope.py:Envelope.from_dict",
             ("G1", "G2"), "P0"),
+
+    # ---- v0.2 传输层（M1 网关）新增 ----
+    Feature("M1.F9", "请求签名生成（方法+路径+节点+时间+nonce+体摘要）",
+            "nxs/edge/httpsig.py:sign_request/compute_signature",
+            ("G2",), "P0"),
+    Feature("M1.F10", "请求签名校验（与信封共用 nonce 缓存与吊销表）",
+            "nxs/edge/auth.py:Authenticator.verify_request",
+            ("G2",), "P0", ("S4",)),
+    Feature("M1.F11", "HTTP 端点分发与规则→状态码映射",
+            "nxs/edge/gateway.py:_Handler._dispatch/status_for",
+            ("G1", "G2"), "P0", ("S11",)),
+    Feature("M1.F12", "请求体上限（读入前按 Content-Length 判定）",
+            "nxs/edge/gateway.py:_Handler._read_body",
+            ("G2",), "P1"),
+    Feature("M1.F13", "并发与流配额（短请求与 SSE 分别计）",
+            "nxs/edge/gateway.py:Gateway.acquire_request_slot/acquire_sse_slot",
+            ("G2",), "P1"),
+    Feature("M1.F14", "SSE 通知流（仅通知不含数据 · 心跳 · 重连换流）",
+            "nxs/edge/gateway.py:_Handler._handle_events",
+            ("G1",), "P1"),
+    Feature("M1.F15", "网关优雅关闭（先关中枢再停 accept）",
+            "nxs/edge/gateway.py:Gateway.stop",
+            ("G1",), "P2"),
+    Feature("M1.F16", "节点侧 HTTP 传输（实现 Transport 协议）",
+            "nxs/edge/client.py:HttpTransport",
+            ("G1", "G4"), "P0"),
+    Feature("M1.F17", "推送不可用时降级为短轮询",
+            "nxs/edge/client.py:HttpTransport.subscribe",
+            ("G1",), "P1"),
 
     # ---------------- M3 注册中心 ----------------
     Feature("M3.F1", "角色卡注册（默认不批准）",
@@ -369,6 +400,15 @@ REQUIREMENTS: tuple[Requirement, ...] = (
         realized_by=("M1.F7",), goals=("G2",), priority="P0", security=("S4",),
     ),
     Requirement(
+        "M1.R2", "Egress-Only：节点侧永不监听端口，入站连接只由总线提供",
+        realized_by=("M1.F16", "M1.F17"), goals=("G2",), priority="P1",
+    ),
+    Requirement(
+        "M1.R3", "未认证输入不得进入审计（拒绝时不记录调用方自报的标识）",
+        realized_by=("M1.F11",), goals=("G2", "G3"), priority="P0",
+        security=("S4",),
+    ),
+    Requirement(
         "M3.R1", "新节点不能自行加入——注册后需人工批准才可参与",
         realized_by=("M3.F1", "M3.F2", "M3.F6"), goals=("G2", "G5"),
         priority="P0", security=("S9",),
@@ -491,6 +531,7 @@ SECURITY: tuple[SecurityReq, ...] = (
     SecurityReq("S8", "自由文本字段受长度上限约束，并做指令前缀剥离与控制字符清理"),
     SecurityReq("S9", "新节点不能自行加入——注册后需人工批准"),
     SecurityReq("S10", "凭据吊销立即生效，不等过期"),
+    SecurityReq("S11", "回传时以服务端持有的任务为准，节点无法冒领他人的任务"),
 )
 
 

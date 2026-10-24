@@ -43,6 +43,9 @@ class RuleId(str, Enum):
     FM_ENVELOPE_INVALID = "FM-SCHEMA-01"
     FM_TASK_PARAM_INVALID = "FM-PARAM-02"
     FM_CARDCARD_INVALID = "FM-CARD-03"
+    #: v0.2 新增（传输层）：请求体超过 ``server.max_body_bytes``。
+    #: 传输层必须在**读入之前**用 Content-Length 判断，否则上限形同虚设。
+    FM_BODY_TOO_LARGE = "FM-BODY-04"
 
     # ---------- AU- 认证与凭据 ----------
     AU_SIGNATURE_INVALID = "AU-SIG-01"
@@ -68,6 +71,10 @@ class RuleId(str, Enum):
     QT_BYTES_PER_DAY = "QT-BYTE-03"
     QT_RATE_LIMITED = "QT-RATE-04"
     QT_CONCURRENCY = "QT-CONC-05"
+    #: v0.2 新增（传输层）：入站并发连接/请求超过 ``server.max_concurrent_requests``。
+    #: 与 ``QT-CONC-05``（某节点任务并发配额）刻意分开：那是业务配额，
+    #: 这是传输层自保，两者触发源不同、处置也不同。
+    QT_CONNECTION_LIMIT = "QT-CONN-06"
 
     # ---------- LF- 生命周期 ----------
     LF_LEASE_HELD = "LF-LEASE-01"
@@ -85,6 +92,7 @@ _SAFE_MESSAGES: dict[RuleId, str] = {
     RuleId.FM_ENVELOPE_INVALID: "envelope rejected",
     RuleId.FM_TASK_PARAM_INVALID: "task parameters rejected",
     RuleId.FM_CARDCARD_INVALID: "role card rejected",
+    RuleId.FM_BODY_TOO_LARGE: "request rejected",
     RuleId.AU_SIGNATURE_INVALID: "authentication failed",
     RuleId.AU_REPLAY_DETECTED: "request rejected",
     RuleId.AU_CREDENTIAL_REVOKED: "authentication failed",
@@ -102,6 +110,7 @@ _SAFE_MESSAGES: dict[RuleId, str] = {
     RuleId.QT_BYTES_PER_DAY: "quota exhausted",
     RuleId.QT_RATE_LIMITED: "rate limited",
     RuleId.QT_CONCURRENCY: "quota exhausted",
+    RuleId.QT_CONNECTION_LIMIT: "service busy",
     RuleId.LF_LEASE_HELD: "task unavailable",
     RuleId.LF_TASK_EXPIRED: "task expired",
     RuleId.LF_INVALID_TRANSITION: "state transition rejected",

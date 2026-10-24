@@ -20,12 +20,15 @@
 
 from __future__ import annotations
 
+import hmac
 import threading
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
+from typing import Mapping
 
 from ..core.envelope import CLOCK_SKEW_SECONDS, Envelope, parse_iso
-from ..core.errors import AuthFailed, RuleId
+from ..core.errors import AuthFailed, ConfigError, RuleId
+from . import httpsig
 
 #: nonce 缓存容量。窗口内正常流量远低于此值，超出即淘汰最旧的。
 DEFAULT_NONCE_CACHE_SIZE = 10_000
@@ -105,6 +108,60 @@ class Authenticator:
 
         # -- 4. 防重放 --
         self._check_nonce(node_id, envelope.nonce, now=now)
+        return node_id
+
+    # ------------------------------------------------------------------
+    # 请求签名（不带任务的调用）
+    # ------------------------------------------------------------------
+
+    def verify_request(self, *, method: str, path: str,
+                       headers: Mapping[str, str],
+                       body: bytes | None = None,
+                       now: datetime | None = None) -> str:
+        """校验请求头签名，成功返回调用方 node_id。
+
+        用于 **不携带任务** 的调用（``/poll``、``/events``）——那类调用
+        没有 Task 可签，若不做这层校验，任何人删掉信封就能领走别人的任务。
+
+        校验顺序与 :meth:`verify` 一致，且**共用同一个 nonce 缓存**。
+        共用是刻意的：若两套签名各自记账，攻击者可用某一套的 nonce
+        去重放另一套。
+
+        失败抛 :class:`AuthFailed`，**四步共用同一组错误码**，
+        理由同 :meth:`verify`：具体是签名错还是时间偏，本身是探测信道。
+        """
+        node_id = headers.get(httpsig.HEADER_NODE, "")
+        ts = headers.get(httpsig.HEADER_TS, "")
+        nonce = headers.get(httpsig.HEADER_NONCE, "")
+        sig = headers.get(httpsig.HEADER_SIG, "")
+
+        # 缺头与"签名错"报同一个错，避免通过差异判断头是否被识别
+        if not (node_id and ts and nonce and sig):
+            raise AuthFailed(RuleId.AU_SIGNATURE_INVALID, "missing signature headers")
+
+        if self.is_revoked(node_id):
+            raise AuthFailed(RuleId.AU_CREDENTIAL_REVOKED, f"revoked {node_id}")
+        secret = self._secrets.get(node_id)
+        if secret is None:
+            raise AuthFailed(RuleId.AU_SIGNATURE_INVALID, f"unknown {node_id}")
+
+        expected = httpsig.compute_signature(
+            secret, method=method, path=path, node_id=node_id,
+            ts=ts, nonce=nonce, body=body,
+        )
+        if not hmac.compare_digest(expected, sig):
+            raise AuthFailed(RuleId.AU_SIGNATURE_INVALID, "request signature mismatch")
+
+        ref = now or datetime.now(timezone.utc)
+        try:
+            sent_at = httpsig.parse_iso(ts)
+        except ConfigError as exc:
+            raise AuthFailed(RuleId.AU_REPLAY_DETECTED, str(exc)) from exc
+        drift = httpsig.skew_seconds(ref, sent_at)
+        if drift > self._skew:
+            raise AuthFailed(RuleId.AU_REPLAY_DETECTED, f"timestamp drift {drift:.0f}s")
+
+        self._check_nonce(node_id, nonce, now=now)
         return node_id
 
     def _check_nonce(self, node_id: str, nonce: str,

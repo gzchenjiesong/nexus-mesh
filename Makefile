@@ -30,8 +30,11 @@ test:  ## 跑测试（含四条安全断言）
 verify:  ## 环境自检：配置合法性 + 端口可用性
 	$(BIN)/nxs verify --config $(CONFIG)
 
-demo:  ## 跑完整的 7 步验收 Demo
+demo:  ## 跑完整的 7 步验收 Demo（同进程传输）
 	$(BIN)/nxs demo --config $(CONFIG)
+
+demo-net:  ## 同一套 7 步验收，走真实 HTTP（验证传输层）
+	$(BIN)/nxs demo --net --config $(CONFIG)
 
 demo-clean:  ## 清理 demo 产生的运行时数据
 	rm -rf .nxs/

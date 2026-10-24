@@ -232,6 +232,16 @@ def _task_to_dict(task: Task) -> dict[str, Any]:
     }
 
 
+def task_to_wire(task: Task) -> dict[str, Any]:
+    """把任务序列化成**线格式**。
+
+    与信封内的 ``task`` 表示完全一致——刻意复用同一实现，
+    否则"信封里的任务"与"响应的任务"会出现两种形状，
+    客户端要写两套解析，迟早不一致。
+    """
+    return _task_to_dict(task)
+
+
 def envelope_for(secret: bytes, sender: str, task: Task, *,
                  session_id: str = "", trace_id: str = "",
                  ttl_seconds: int | None = None) -> Envelope:
@@ -258,4 +268,5 @@ __all__ = [
     "new_nonce",
     "now_iso",
     "parse_iso",
+    "task_to_wire",
 ]
