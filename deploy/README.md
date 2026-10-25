@@ -322,7 +322,7 @@ work-laptop     zone-work   alive    ✓    1     work.calendar
 ```bash
 cd /opt/nexus-mesh
 sudo -u nxs git fetch --tags
-sudo -u nxs git checkout v0.4.0
+sudo -u nxs git checkout v0.5.0
 sudo -u nxs .venv/bin/pip install -e .
 sudo systemctl restart nexus-mesh
 sudo -u nxs .venv/bin/python -m nxs doctor --config /etc/nexus-mesh/local.yaml --production

@@ -161,7 +161,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.4.0）
+### 已实现（v0.5.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -272,7 +272,7 @@ See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
 
-**v0.4.0** — deployable. A node on a company laptop can register itself,
+**v0.5.0** — deployable. A node on a company laptop can register itself,
 get approved remotely, receive a task, run it, and hand back a result that
 survived **two** response boundaries (322 tests).
 
