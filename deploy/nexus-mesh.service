@@ -1,0 +1,57 @@
+[Unit]
+Description=Nexus Mesh · Agent 协作网络协调节点
+Documentation=https://github.com/gzchenjiesong/nexus-mesh
+# 等网络就绪再启动：协调节点要监听端口，网络没起来会绑定失败
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# ⚠ 不要用 root 跑。见 deploy/README.md 的「权限」一节
+User=nxs
+Group=nxs
+WorkingDirectory=/opt/nexus-mesh
+
+# 凭据只从环境变量读，**不写进 unit 文件**——
+# unit 文件在 /etc/systemd/system 下，容易被备份、被 diff、被误提交。
+# 用 EnvironmentFile 指向一个 chmod 600 的文件。
+EnvironmentFile=/etc/nexus-mesh/nxs.env
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/opt/nexus-mesh/.venv/bin/python -m nxs serve --config /etc/nexus-mesh/local.yaml
+
+# always：异常退出要拉起来。协调节点是单点，不能因为一次崩溃就静默停摆
+Restart=always
+RestartSec=5
+# 启动后 15 秒内退出算启动失败，会进入 failed 而不是无限重启
+TimeoutStartSec=15
+
+# 停止时给 SSE 长连接与在途请求留时间优雅退出。
+# 太短会让节点看到连接被硬断；太长会拖慢部署。
+TimeoutStopSec=20
+# mixed：主进程 SIGTERM，子进程 SIGKILL。网关是线程模型，用 mixed 足够
+KillMode=mixed
+KillSignal=SIGTERM
+
+# ---- 加固（尽量收窄这个进程能做的事）----
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# 只有数据目录与审计目录可写，其余文件系统只读
+ReadWritePaths=/var/lib/nexus-mesh
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# 只需要 IPv4/IPv6 + unix socket
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# ---- 日志 ----
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nexus-mesh
+
+[Install]
+WantedBy=multi-user.target

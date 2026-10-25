@@ -81,8 +81,10 @@ make demo-net      # 同一套七步断言，走真实 HTTP
 | 命令 | 作用 |
 |---|---|
 | `nxs verify` | 配置自检：校验角色卡、矩阵、凭据的一致性 |
+| `nxs doctor` | **部署前自检**：持久化、权限、TLS、运维通道（加 `--production` 按生产标准） |
 | `nxs demo` | 跑七步验收 demo（**先看这个**）。加 `--net` 改走真实网络 |
-| `nxs serve` | 核心常驻：**真的监听 HTTP 端口** + 定期维护（标记 stale、释放过期租约） |
+| `nxs serve` | 核心常驻：**真的监听 HTTP 端口** + 定期维护 |
+| `nxs ops` | 远程运维：`approve` / `revoke` / `release` / `nodes` |
 | `nxs status` | 查看节点状态与审计摘要 |
 
 `nxs demo` 会跑出一段完整的协作流程，包括**三条安全断言**：
@@ -103,18 +105,24 @@ make demo-net      # 同一套七步断言，走真实 HTTP
 
 ### 接入一个真实节点
 
+> 📖 **完整部署步骤见 [`deploy/README.md`](deploy/README.md)**——
+> 含 systemd unit、TLS、权限加固、排查顺序、升级回滚。
+> 可运行的节点示例见 [`examples/node_run.py`](examples/node_run.py)。
+
 协调端（有独立 IP 的那台）：
 
 ```bash
 export NXS_SECRET_HUB=$(openssl rand -hex 32)
 export NXS_SECRET_NODE_A=$(openssl rand -hex 32)
-nxs serve -c config/local.yaml          # 监听 :8443
+export NXS_OPS_SECRET=$(openssl rand -hex 32)   # ⚠ 不设 = 运维接口关闭
+nxs doctor --config config/local.yaml --production   # 先自检
+nxs serve -c config/local.yaml                       # 监听 :8443
 ```
 
 节点端（**只出站，不监听任何端口**）：
 
 ```python
-from nxs.core.models import Level
+from nxs.core.models import Level, RoleCard
 from nxs.edge.client import HttpTransport
 from nxs.sdk import NodeClient, NodeConfig
 
@@ -124,17 +132,22 @@ client = NodeClient(
     NodeConfig("node-a",
                handlers={"demo.echo": lambda p: {"echo": p["text"],
                                                  "level": "metadata"}},
-               levels={"demo.echo": Level.METADATA}),
+               levels={"demo.echo": Level.METADATA},
+               card=card,          # 给了 card 才有完整的节点侧边界
+               renew_interval=5),  # 长任务自动续租
     transport,
 )
 client.run_forever()        # 没装 SSE 也能跑：纯短轮询
 ```
 
-想降低延迟就再起一个线程订阅通知流；订阅失败不影响功能：
+首次启动会打印"已注册但**尚未批准**"——这是正常的。去服务器上批准：
 
-```python
-transport.subscribe(on_work=lambda: None)   # 断开时正常返回，不抛异常
+```bash
+nxs ops approve node-a --url https://hub.example.com/nxs
 ```
+
+> ⚠ **角色卡必须确定性生成**（不要放时间戳/随机串）。
+> 审批绑定的是"那张卡片"，卡片一变批准就撤销。
 
 ### 设计原则
 
@@ -148,7 +161,7 @@ transport.subscribe(on_work=lambda: None)   # 断开时正常返回，不抛异�
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.2.0）
+### 已实现（v0.4.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -159,11 +172,16 @@ transport.subscribe(on_work=lambda: None)   # 断开时正常返回，不抛异�
 | 注册中心（人工批准 / 心跳 / 三档存活状态） | ✅ |
 | 信箱与生命周期（租约 / 幂等 / **断电自愈**） | ✅ |
 | 应答边界（字段白名单 / 等级上限 / 自由文本清洗） | ✅ |
+| **节点侧应答边界**（数据离节点前裁剪，双层防御） | ✅ |
 | 审计留痕（只记元数据 / 写入失败熔断） | ✅ |
 | 存储后端 | memory · sqlite |
 | **HTTP 传输层**（网关 + 节点客户端，走真实网络） | ✅ |
 | **SSE 通知流**（只推"有活"，不推内容；断线自动退回短轮询） | ✅ |
-| CLI | verify · demo · serve · status |
+| **节点自注册 + 心跳**（不用改云端配置重启） | ✅ |
+| **长任务续租**（`/nxs/ack`，不靠调大租约） | ✅ |
+| **远程运维**（批准 / 吊销 / 释放租约，走 HTTP + 审计） | ✅ |
+| **部署物**（systemd unit · 生产配置模板 · 部署自检 · 指南） | ✅ |
+| CLI | verify · **doctor** · demo · serve · **ops** · status |
 
 ### 尚未实现
 
@@ -254,21 +272,30 @@ See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
 
-**v0.2.0** — the network is real now. `nxs serve` listens on HTTP and a
-node can actually connect to it from another machine (231 tests).
+**v0.4.0** — deployable. A node on a company laptop can register itself,
+get approved remotely, receive a task, run it, and hand back a result that
+survived **two** response boundaries (322 tests).
 
-* **Transport**: `POST /nxs/publish` · `GET /nxs/poll` · `POST /nxs/result`
-  · `POST /nxs/fail` · `GET /nxs/events` (SSE) · `GET /nxs/health`
+* **Transport**: `POST /nxs/register` · `POST /nxs/ack` · `POST /nxs/publish`
+  · `GET /nxs/poll` · `POST /nxs/result` · `POST /nxs/fail` · `GET /nxs/events`
+  (SSE) · `GET /nxs/health` · `POST /nxs/ops/*`
 * **Two signing layers**: envelopes sign task content; a separate request
   signature covers method + path + body digest for calls that carry no task
 * **Egress-only**: nodes only dial out and never listen; the gateway never
   initiates a connection — push rides the connection the node opened
+* **Two response boundaries**: the node trims its own output *before* sending
+  (so a compromised hub gets nothing extra), the hub re-checks authoritatively
+* **Self-registration with approval semantics**: approval binds to *that role
+  card*, not the node id — change the card and approval is revoked; a node can
+  never approve itself, and ops endpoints are opt-in and never rate-limited
 * **Adversarial evidence**: 20 tests that actively attack the wire — forged
   signatures, path/method/body tampering, replays, cross-node task theft,
   slow-loris, oversized bodies, stream-quota exhaustion
+* **Deployable**: systemd unit, production config template, `nxs doctor`
+  pre-flight check, and a step-by-step [`deploy/README.md`](deploy/README.md)
 
 Not yet implemented: capability matching, session task graph,
-large-artifact channel, mTLS, observability, ops API.
+large-artifact channel, mTLS, metrics/observability.
 See [`docs/architecture.md`](docs/architecture.md) for the tracked gaps —
 including the ones with **weaker evidence** (TLS has no automated test).
 

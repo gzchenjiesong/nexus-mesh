@@ -223,6 +223,15 @@ class Registry:
     def all_records(self) -> tuple[NodeRecord, ...]:
         return tuple(self._store.list_all())
 
+    def all_cards(self) -> tuple[RoleCard, ...]:
+        """全部角色卡（含未批准）。
+
+        策略层的类型索引需要它——**不能只枚举配置里的节点**，
+        否则自注册节点提供的能力在策略层不可见，投递会被判为
+        ``WL-TYPE-404``（"类型未注册"），而实际上它就在注册表里。
+        """
+        return tuple(rec.card for rec in self._store.list_all())
+
     def capability_index(self) -> dict[str, tuple[str, ...]]:
         """能力 → 可路由的提供者列表。
 

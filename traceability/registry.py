@@ -313,6 +313,9 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M5.F9", "能力发现查询",
             "nxs/control/policy.py:PolicyEngine.providers_of",
             ("G1",), "P1"),
+    Feature("M5.F10", "角色卡来源可注入（策略层以注册表为准，而非只看配置）",
+            "nxs/control/policy.py:PolicyEngine.__init__（card_resolver/cards_source）",
+            ("G1", "G5"), "P0"),
 
     # ---------------- M6 信箱 ----------------
     Feature("M6.F1", "任务投递（先校验后入队）",
@@ -407,6 +410,12 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M11.F6", "配置摘要输出",
             "nxs/mgmt/config.py:NexusConfig.describe",
             ("G3",), "P2"),
+    Feature("M11.F7", "信任域显式声明（域是第一类实体，可从矩阵引用）",
+            "nxs/mgmt/config.py:_parse_domains/NexusConfig.known_domains",
+            ("G4", "G5"), "P0"),
+    Feature("M11.F8", "校验分级（声明了域即接受自注册节点，类型不做静态核对）",
+            "nxs/mgmt/config.py:load_config（strict 分支）",
+            ("G4",), "P1"),
 
     # ---------------- M12 审计 ----------------
     Feature("M12.F1", "元数据白名单写入",
@@ -443,6 +452,9 @@ FEATURES: tuple[Feature, ...] = (
             ("G3",), "P0"),
     Feature("M14.F7", "运维 CLI（nxs ops）",
             "nxs/__main__.py:cmd_ops",
+            ("G3",), "P1"),
+    Feature("M14.F8", "部署自检（nxs doctor：持久化／权限／TLS／运维通道）",
+            "nxs/__main__.py:cmd_doctor",
             ("G3",), "P1"),
 )
 

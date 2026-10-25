@@ -1,0 +1,141 @@
+# ==============================================================================
+#  Nexus Mesh · 生产环境配置模板
+# ==============================================================================
+#  用法：
+#      sudo install -m 600 -o nxs -g nxs deploy/local.yaml.example \
+#           /etc/nexus-mesh/local.yaml
+#      然后按下面注释填真实值。
+#
+#  ⚠ 这个文件里**不出现任何凭据**。凭据全部走 /etc/nexus-mesh/nxs.env。
+# ==============================================================================
+
+server:
+  # ⚠ 生产环境建议改 0.0.0.0 才能被外网节点连到。
+  #   但**更推荐**保持 127.0.0.1 + 前置 Nginx/Caddy 做 TLS 终止与限流：
+  #   那样证书轮换、WAF、访问日志都能复用系统里成熟的东西。
+  host: 127.0.0.1
+  port: 8443
+
+  max_body_bytes: 262144
+
+  # ---- TLS ----
+  # 若用前置代理（推荐），这里留空，由代理终止 TLS。
+  # 若让 nxs 自己终止 TLS，填这两项：
+  # tls_cert: /etc/letsencrypt/live/nxs.example.com/fullchain.pem
+  # tls_key:  /etc/letsencrypt/live/nxs.example.com/privkey.pem
+
+  # ---- 传输层自保 ----
+  max_concurrent_requests: 64
+  max_sse_streams: 16
+  sse_enabled: true
+  sse_keepalive_seconds: 15
+
+# ------------------------------------------------------------------------------
+# 存储
+# ------------------------------------------------------------------------------
+# ⚠ **生产必须用 sqlite，不能用 memory。**
+#   memory 后端进程退出即丢——重启后所有节点注册、所有在途任务全没了，
+#   节点必须重新注册、重新批准。那等于每次部署都是一次事故。
+stores:
+  queue: sqlite
+  registry: sqlite
+  audit: file
+  data_dir: /var/lib/nexus-mesh
+
+# ------------------------------------------------------------------------------
+# 策略
+# ------------------------------------------------------------------------------
+policy:
+  # 每节点每秒请求上限。设 0 表示不限——**不建议**，
+  # 那等于把抗洪水的能力交给前置代理。
+  rate_limit_per_second: 20
+
+  # ★ 启动时自动批准的信任域。**生产建议留空。**
+  #   留空 = 任何节点都要运维显式批准（nxs ops approve）。
+  #   留非空会让该域下所有节点自动获批——包括未来新接入的。
+  auto_approve_domains: []
+
+  # ★ 权限矩阵的维度是「域 × 类型」，不是「节点 × 节点」。
+  #   新增节点只需归属到既有域，规则自动继承。
+  #   没有匹配规则的「域 × 域」一律拒绝（默认拒绝）。
+  matrix:
+    # 协调域 → 工作域：只允许这两类任务，应答上限摘要级
+    - from_domain: hub
+      to_domain: zone-work
+      allow_types: ["work.calendar", "work.summary"]
+      max_level: summary
+
+    # 工作域 → 协调域：允许上报，但不允许它给别人派活
+    - from_domain: zone-work
+      to_domain: hub
+      allow_types: ["work.*"]
+      max_level: summary
+
+    # 家里那台（低优先级，暂不开放）
+    # - from_domain: hub
+    #   to_domain: zone-home
+    #   allow_types: ["home.*"]
+    #   max_level: fragment
+
+# ------------------------------------------------------------------------------
+# 信任域
+# ------------------------------------------------------------------------------
+# ⭐ **这一段是生产配置的关键，也决定了校验的严格程度。**
+#
+#   矩阵的维度是「域 × 类型」，而工作电脑上的节点**在协调节点启动时还不存在**
+#   （它靠自注册接入）。所以域必须在这里显式声明，否则矩阵里写
+#   `hub → zone-work` 会被判为"引用了不存在的域"。
+#
+#   ⚠ 声明了这一段，就等于告诉系统"这个部署会接纳自注册节点"——
+#     因此矩阵里的**具体类型名不再做启动时静态核对**（那些节点的能力
+#     运行时才出现）。通配写法（如 `work.*`）本来就是运行时匹配。
+#
+#   不声明这一段时（demo / 测试的配置），系统会退化为从节点卡片推导域，
+#   并要求所有被引用的类型都必须有节点提供——那是"所有节点都在配置里"的假设。
+#
+#   另外：节点自报的域必须属于这里声明的域之一，否则运维批准时会看到
+#   一个陌生的域名而无法判断。**信任域是运维划的边界，不是节点自选的房间。**
+domains:
+  - name: hub
+    description: 协调域（云端，人机入口）
+  - name: zone-work
+    description: 办公内网（工作电脑上的执行节点）
+  - name: zone-home
+    description: 家庭内网（本地 NAS 节点，暂未接入）
+
+# ------------------------------------------------------------------------------
+# 节点
+# ------------------------------------------------------------------------------
+# ⚠ 这里**只放协调节点自己**。工作电脑上的节点走自注册（POST /nxs/register），
+#   不需要提前写在这里——这正是 v0.3 解掉的那个部署阻塞。
+#
+#   例外：如果你想让某个节点的**信任域由配置锁定**（不让它自报），
+#   就在这里登记它的 node_id 与 domain（哪怕其余字段简写）。
+#   配置里有的节点，domain 一律以配置为准。
+nodes:
+  - node_id: hub
+    domain: hub
+    display_name: "Coordinator"
+    roles:
+      issuer: true
+      executor: true
+      human_interface: true
+    capabilities:
+      - type: work.summary
+        level: summary
+        mode: sync
+        description: "把多个子结果合成结论"
+        params_schema:
+          inputs: "string"
+        response_fields: [summary, level]
+    constraints:
+      max_response_level: metadata
+      # 不接收任何人的委托（它是发起方）
+      can_receive_from: []
+      can_issue_types: ["work.*"]
+      can_delegate_to: []
+      quota:
+        tasks_per_day: 2000
+        bytes_per_response: 131072
+        bytes_per_day: 33554432
+        concurrent_tasks: 8

@@ -274,11 +274,32 @@ UNIMPLEMENTED: tuple[tuple[str, str], ...] = (
 )
 
 
+@dataclass(frozen=True)
+class DomainDecl:
+    """一个信任域的声明。
+
+    ⭐ **信任域是第一类实体，不是从节点卡片推导出来的附庸。**
+
+    为什么必须显式声明：矩阵的维度是「域 × 类型」，而工作电脑上的节点
+    **在协调节点启动时还不存在**（它靠自注册接入）。如果域只能从节点推导，
+    生产配置里就写不出 `hub → zone-work` 这条规则——启动时校验会报
+    "引用了不存在的域"。
+
+    顺带解决另一个问题：节点自报的域必须属于已声明的域之一。
+    否则它可以自创一个域名，让运维在批准时看着一个陌生的域无从判断。
+    """
+
+    name: str
+    description: str = ""
+
+
 @dataclass
 class NexusConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     stores: StoreConfig = field(default_factory=StoreConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
+    #: 信任域声明，按名字索引。为空时退化为"从节点卡片推导"（向后兼容）。
+    domains: dict[str, DomainDecl] = field(default_factory=dict)
     #: 节点角色卡，按 node_id 索引
     nodes: dict[str, RoleCard] = field(default_factory=dict)
     #: 节点凭据，按 node_id 索引。**只存在于内存，不写入任何日志。**
@@ -288,6 +309,15 @@ class NexusConfig:
     # ------------------------------------------------------------------
     # 查询辅助
     # ------------------------------------------------------------------
+
+    def known_domains(self) -> set[str]:
+        """全部已知信任域。
+
+        声明了 ``domains`` 就用声明；否则从节点卡片推导（v0.1 的旧行为）。
+        """
+        if self.domains:
+            return set(self.domains)
+        return {c.domain for c in self.nodes.values()}
 
     def domain_of(self, node_id: str) -> str | None:
         card = self.nodes.get(node_id)
@@ -345,6 +375,31 @@ class NexusConfig:
         for name, why in UNIMPLEMENTED:
             lines.append(f"  · {name:<22} {why}")
         return "\n".join(lines)
+
+
+def _parse_domains(obj: Any) -> dict[str, DomainDecl]:
+    """解析 ``domains`` 段。省略时返回空字典（= 旧式配置，从节点推导域）。"""
+    if obj is None:
+        return {}
+    if not isinstance(obj, (list, tuple)):
+        raise ConfigError("domains: 期望列表")
+    out: dict[str, DomainDecl] = {}
+    for i, entry in enumerate(obj):
+        where = f"domains[{i}]"
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"{where}: 期望映射")
+        _reject_unknown(entry, ("name", "description"), where)
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(f"{where}.name: 必须是非空字符串")
+        if name in out:
+            raise ConfigError(f"{where}: 域 '{name}' 重复声明")
+        out[name] = DomainDecl(
+            name=name, description=str(entry.get("description", "")),
+        )
+    if not out:
+        raise ConfigError("domains: 声明了但不能为空列表（要么省略，要么至少一个域）")
+    return out
 
 
 def _load_yaml(path: Path) -> Mapping[str, Any]:
@@ -435,7 +490,8 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
     # 归一化：后续读取凭据要用这个 dict，不能直接用调用方传入的 None
     env = dict(os.environ if env is None else env)
     raw = _load_yaml(resolved)
-    _reject_unknown(raw, ("server", "stores", "policy", "nodes"), f"{resolved.name}")
+    _reject_unknown(raw, ("server", "stores", "policy", "domains", "nodes"),
+                    f"{resolved.name}")
 
     # ---- 节点与角色卡 ----
     raw_nodes = raw.get("nodes")
@@ -444,7 +500,10 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
 
     nodes: dict[str, RoleCard] = {}
     secrets: dict[str, bytes] = {}
-    domains: set[str] = set()
+    #: 从节点卡片推导出的域（旧式配置用）
+    node_domains: set[str] = set()
+    #: 显式声明的域（新式配置用；非空即表示"接受自注册节点"）
+    declared_domains = _parse_domains(raw.get("domains"))
 
     for i, entry in enumerate(raw_nodes):
         where = f"nodes[{i}]"
@@ -465,7 +524,7 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
                 f"{where}: '{OPS_NODE_ID}' 是保留的运维身份，不可作为节点 ID"
             )
         nodes[card.node_id] = card
-        domains.add(card.domain)
+        node_domains.add(card.domain)
 
         # 凭据优先取环境变量；配置文件里的只是开发便利，示例文件用占位符
         env_key = _node_env_var(card.node_id)
@@ -489,11 +548,37 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
     # ---- 策略矩阵引用的域与类型必须真实存在 ----
     policy = PolicyConfig.from_dict(raw.get("policy"))
 
+    # ⭐ 严格模式 vs 自注册模式
+    #
+    # 两项静态校验（域必须存在、类型必须有人提供）的前提是
+    # **"所有节点都写在配置里"**。这个前提在自注册时代不再成立：
+    # 工作电脑上的节点在协调节点启动时并不存在。
+    #
+    # 所以分两级：
+    #   · 没声明 domains（demo / 测试）→ 全部节点都在配置里 → 严格校验
+    #   · 声明了 domains（生产）       → 接受自注册节点 → 域按声明校验，
+    #                                    类型不做静态核对（无法核对）
+    #
+    # 声明 domains 本身就是"这个部署会接纳自注册节点"的表态，
+    # 所以用它作为开关是准确的，不需要再加一个额外的开关。
+    known = set(declared_domains) if declared_domains else node_domains
+    strict = not declared_domains
+
     for dom in policy.auto_approve_domains:
-        if dom not in domains:
+        if dom not in known:
             raise ConfigError(
                 f"policy.auto_approve_domains: 引用了不存在的域 '{dom}'；"
-                f"已定义的域为 {sorted(domains)}"
+                f"已定义的域为 {sorted(known)}"
+            )
+
+    # 声明了域时，节点卡片里的域也必须在声明之列（防配置笔误）
+    if declared_domains:
+        stray = {c.node_id: c.domain for c in nodes.values()
+                 if c.domain not in declared_domains}
+        if stray:
+            raise ConfigError(
+                f"以下节点的域未在 domains 中声明：{stray}；"
+                f"已声明的域为 {sorted(declared_domains)}"
             )
 
     available_types = {t for card in nodes.values() for t in
@@ -501,14 +586,18 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
 
     for i, rule in enumerate(policy.rules):
         for side, dom in (("from_domain", rule.from_domain), ("to_domain", rule.to_domain)):
-            if dom not in domains:
+            if dom not in known:
                 raise ConfigError(
                     f"policy.matrix[{i}].{side}: 引用了不存在的域 '{dom}'；"
-                    f"已定义的域为 {sorted(domains)}"
+                    f"已定义的域为 {sorted(known)}"
                 )
         # 矩阵里写的具体类型必须是某个节点真的能提供的能力。
         # 提前报错比运行时"任务投出去没人接"好排查得多。
         # 通配模式（如 "demo.*"）无法静态核对，跳过。
+        #
+        # 自注册模式下无从核对——那些节点的能力在运行时才出现。
+        if not strict:
+            continue
         for pattern in rule.allow_types:
             if not pattern.endswith(".*") and pattern not in available_types:
                 raise ConfigError(
@@ -520,6 +609,7 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
         server=ServerConfig.from_dict(raw.get("server")),
         stores=StoreConfig.from_dict(raw.get("stores")),
         policy=policy,
+        domains=declared_domains,
         nodes=nodes,
         secrets=secrets,
         source_path=str(resolved),
@@ -532,9 +622,12 @@ __all__ = [
     "DEMO_SECRET_SUFFIX",
     "UNIMPLEMENTED",
     "EXAMPLE_CONFIG_PATH",
+    "ENV_OPS_SECRET",
     "ENV_SECRET_PREFIX",
+    "DomainDecl",
     "MatrixRule",
     "NexusConfig",
+    "OPS_NODE_ID",
     "PolicyConfig",
     "ServerConfig",
     "StoreConfig",

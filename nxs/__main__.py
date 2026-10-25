@@ -276,6 +276,186 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# doctor（部署自检）
+# ---------------------------------------------------------------------------
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """部署前自检。**专门检查那些"能启动但会出事"的配置。**
+
+    与 ``nxs verify`` 的分工：
+    * ``verify`` 查**配置本身**是否自洽（结构、引用、凭据长度）
+    * ``doctor`` 查**这个部署能不能长期稳定运行**（持久化、权限、端口、
+      TLS、运维通道）
+
+    后者要抓的是"跑起来一切正常、出事时才发现"的问题：
+    用 memory 后端跑生产、数据目录不可写、运维通道没开导致故障时进不来、
+    角色卡非确定性导致每次重启批准都失效。
+    """
+    import os
+    import socket
+    from pathlib import Path as _Path
+
+    from .mgmt.config import ENV_OPS_SECRET, MIN_SECRET_LENGTH, OPS_NODE_ID
+
+    production = args.production
+    _info(_color(f"Nexus Mesh {__version__} · 部署自检", "b")
+          + (f"  {_color('（生产模式）', 'warn')}" if production else ""))
+    _info("")
+
+    try:
+        # ⭐ 只加载配置，**不装配存储**。
+        #    doctor 检查的是"部署条件"，不该因为数据目录建不了就放弃所有检查——
+        #    那恰恰是它最该报告的问题。装配存储会把 OSError 提前抛出来，
+        #    让人看不到后面那些同样重要的检查结果。
+        from .mgmt.config import load_config
+
+        resolved = resolve_config_path(args.config)
+        env = demo_env_for(resolved) if is_example_config(resolved) else None
+        cfg = load_config(resolved, env=env)
+    except ConfigError as exc:
+        _err(f"配置校验失败：{exc}")
+        return 2
+    except NexusError as exc:
+        _err(f"初始化失败：{exc}")
+        return 2
+    except OSError as exc:
+        _err(f"无法读取配置：{exc}")
+        return 2
+
+    #: (标签, 状态, 提示)。状态三态：
+    #:   "ok"   通过
+    #:   "warn" 非生产模式下不视为失败，但**必须显式说出来** ——
+    #:          把它显示成 ✓ 会让人以为已经检查过了
+    #:   "fail" 失败
+    checks: list[tuple[str, str, str]] = []
+
+    def add(label: str, status: str, hint: str = "") -> None:
+        checks.append((label, status, hint))
+
+    def check(label: str, ok: bool, hint: str = "",
+              *, warn_when_not_production: bool = False) -> None:
+        """便捷封装：失败项在非生产模式下降级为 warn。"""
+        if ok:
+            add(label, "ok")
+        elif warn_when_not_production and not production:
+            add(label, "warn", hint)
+        else:
+            add(label, "fail", hint)
+
+    # ---- 持久化 ----
+    # ⭐ 这是最容易犯、最难发现的部署错误：memory 后端跑起来完全正常，
+    #    重启之后所有节点注册与在途任务全没，节点得重新注册、重新批准。
+    persistent = (cfg.stores.queue != "memory"
+                  and cfg.stores.registry != "memory")
+    check("存储后端是持久化的（重启不丢节点与任务）", persistent,
+          "queue/registry 用了 memory —— 重启后所有节点注册与在途任务全部丢失。"
+          "生产环境必须用 sqlite",
+          warn_when_not_production=True)
+
+    # ---- 数据目录可写 ----
+    data_dir = _Path(cfg.stores.data_dir)
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        probe = data_dir / ".nxs-doctor-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        add(f"数据目录可写（{data_dir}）", "ok")
+    except OSError as exc:
+        add(f"数据目录可写（{data_dir}）", "fail",
+            f"{type(exc).__name__}: {exc}")
+
+    # ---- 端口可用 ----
+    host, port = cfg.server.host, cfg.server.port
+    if port == 0:
+        check("监听端口为系统分配（仅适合测试）", not production,
+              "生产环境应固定端口")
+    else:
+        try:
+            with socket.socket() as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind((host, port))
+            add(f"端口可用（{host}:{port}）", "ok")
+        except OSError as exc:
+            # 服务正在运行时端口被占是**正常的**，所以只算提示
+            add(f"端口可用（{host}:{port}）", "warn",
+                f"已被占用（若服务正在运行则正常）: {exc}")
+
+    # ---- TLS ----
+    tls_ok = bool(cfg.server.tls_cert and cfg.server.tls_key)
+    if tls_ok:
+        cert_ok = _Path(cfg.server.tls_cert).exists()
+        key_ok = _Path(cfg.server.tls_key).exists()
+        check("TLS 证书文件存在", cert_ok and key_ok,
+              "证书或私钥路径不存在")
+    else:
+        # 若前置代理做 TLS 终止，留空是正确的 —— 所以只提示
+        check("TLS 已配置（或由前置代理终止）", False,
+              "未配置 tls_cert/tls_key。若前面有 Nginx/Caddy 终止 TLS 可忽略；"
+              "否则公网明文传输",
+              warn_when_not_production=True)
+
+    # ---- 运维通道 ----
+    # ⭐ 运维通道没开 = 故障时进不来。这是"平时无感、出事致命"的一项。
+    ops_raw = os.environ.get(ENV_OPS_SECRET, "")
+    ops_ok = len(ops_raw) >= MIN_SECRET_LENGTH
+    check(f"运维通道已启用（{ENV_OPS_SECRET}）", ops_ok,
+          f"未设置 {ENV_OPS_SECRET}（或过短）。故障时无法远程批准/吊销节点，"
+          f"只能改配置重启",
+          warn_when_not_production=True)
+
+    # ---- 自动批准 ----
+    auto = cfg.policy.auto_approve_domains
+    check("未自动批准任何信任域", not auto,
+          f"auto_approve_domains={auto}：该域下所有节点（含未来新接入的）"
+          f"自动获批，跳过了人工审批",
+          warn_when_not_production=True)
+
+    # ---- 节点 ID 保留字 ----
+    reserved = [n for n in cfg.nodes if n == OPS_NODE_ID]
+    check("没有节点占用保留的运维身份", not reserved,
+          f"{reserved} 与运维身份冲突")
+
+    # ---- 角色卡确定性（防止"每次重启批准都失效"）----
+    try:
+        from .mgmt.config import load_config as _reload
+
+        env_for_reload = {
+            f"NXS_SECRET_{k.upper().replace('-', '_')}": v.decode()
+            for k, v in cfg.secrets.items()
+        }
+        again = _reload(_Path(cfg.source_path), env=env_for_reload)
+        stable = all(cfg.nodes[k] == again.nodes.get(k) for k in cfg.nodes)
+        check("角色卡是确定性的（同一配置两次加载一致）", stable,
+              "角色卡含随机/时间内容：每次重启都会被判为「卡片已变更」，"
+              "批准会自动撤销")
+    except (ConfigError, NexusError, OSError):
+        add("角色卡是确定性的（无法复验）", "warn",
+            "配置无法二次加载，跳过该项")
+
+    # ---- 输出 ----
+    failed = [c for c in checks if c[1] == "fail"]
+    warned = [c for c in checks if c[1] == "warn"]
+    marks = {"ok": _color("✓", "ok"), "warn": _color("!", "warn"),
+             "fail": _color("✗", "bad")}
+    for label, status, hint in checks:
+        _info(f"  {marks[status]} {label}"
+              + (f"\n      {_color(hint, 'warn')}" if hint else ""))
+
+    _info("")
+    if failed:
+        _err(f"{len(failed)} 项检查未通过")
+        return 1
+    if warned:
+        if production:
+            _err(f"{len(warned)} 项在生产模式下不可接受")
+            return 1
+        _warn(f"{len(warned)} 项需要关注（非生产模式，不视为失败）")
+        return 0
+    _ok(f"{len(checks)} 项检查全部通过")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # ops（远程运维）
 # ---------------------------------------------------------------------------
 
@@ -402,6 +582,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_status)
 
     sp = sub.add_parser(
+        "doctor", help="部署前自检（持久化 / 权限 / TLS / 运维通道）")
+    add_common(sp)
+    sp.add_argument("--production", action="store_true",
+                    help="按生产标准检查（memory 后端、未配 TLS、无运维通道都会判失败）")
+    sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser(
         "ops", help="远程运维：批准 / 吊销 / 释放租约 / 查节点")
     sp.add_argument("action", choices=["approve", "revoke", "release", "nodes"],
                     help="运维动作")
@@ -426,6 +613,14 @@ def main(argv: list[str] | None = None) -> int:
     except NexusError as exc:
         _err(str(exc))
         return 1
+    except OSError as exc:
+        # 兜底：任何命令都不该把 OSError 的栈直接甩给运维
+        _err(f"文件系统错误：{exc}")
+        return 1
+    except KeyboardInterrupt:
+        _info("")
+        _info("已中断")
+        return 130
 
 
 if __name__ == "__main__":

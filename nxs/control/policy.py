@@ -26,7 +26,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..core.errors import PolicyDenied, RuleId
 from ..core.models import Artifact, Capability, Level, RoleCard, Task
@@ -58,14 +58,37 @@ class DeliveryDecision:
 
 
 class PolicyEngine:
-    """策略裁决器。**无状态**，可安全地在多线程间共享。"""
+    """策略裁决器。**无状态**，可安全地在多线程间共享。
 
-    def __init__(self, config: NexusConfig) -> None:
+    :param card_resolver: 角色卡来源。省略时只从配置取——那意味着
+        **通过 HTTP 自注册的节点对策略层不可见**，它们会被当成"未知节点"。
+
+        ⭐ 装配时应传入 ``registry.card``，让判定以**注册表**为准。
+        这一步是自注册能真正生效的前提：节点注册进去之后，策略层必须
+        能看见它的能力与约束，否则"注册成功但永远无法参与协作"。
+
+        之所以用回调而不是直接依赖 Registry：策略层不该知道注册表的存在，
+        它只需要一个"给我 node_id、还我角色卡"的函数。依赖方向保持在
+        "策略 ← 注册表"之外。
+    :param cards_source: 全部角色卡的枚举源。省略时只枚举配置里的节点。
+
+        与 ``card_resolver`` 是两件事：那个回答"某个节点是什么"，
+        这个回答"现在都有谁"。**类型索引依赖后者**——如果只解析单个节点
+        却用静态的类型表，自注册节点提供的能力仍然不可见（``WL-TYPE-404``）。
+    """
+
+    def __init__(self, config: NexusConfig, *,
+                 card_resolver: Callable[[str], RoleCard | None] | None = None,
+                 cards_source: Callable[[], Sequence[RoleCard]] | None = None) -> None:
         self._cfg = config
-        self._type_providers: dict[str, set[str]] = {}
-        for card in config.nodes.values():
-            for cap in card.capabilities:
-                self._type_providers.setdefault(cap.type, set()).add(card.node_id)
+        self._resolve: Callable[[str], RoleCard | None] = (
+            card_resolver if card_resolver is not None
+            else lambda node_id: config.nodes.get(node_id)
+        )
+        self._all: Callable[[], Sequence[RoleCard]] = (
+            cards_source if cards_source is not None
+            else lambda: tuple(config.nodes.values())
+        )
 
     # ------------------------------------------------------------------
     # 查询辅助
@@ -78,14 +101,22 @@ class PolicyEngine:
         注意：这是"存在哪些能力"，不是"你能用哪些能力"。
         能力清单本身是发现机制的基础，不属于机密；
         机密的是**跨域可达性**，那由矩阵控制。
+
+        **每次现算，不缓存。** 节点数是"少数已知节点"，遍历开销可忽略；
+        缓存反而要处理失效，而漏失效意味着新注册的能力用不了。
         """
-        return frozenset(self._type_providers)
+        return frozenset(
+            cap.type for card in self._all() for cap in card.capabilities
+        )
 
     def providers_of(self, task_type: str) -> frozenset[str]:
-        return frozenset(self._type_providers.get(task_type, ()))
+        return frozenset(
+            card.node_id for card in self._all()
+            if card.capability(task_type) is not None
+        )
 
     def _card(self, node_id: str) -> RoleCard:
-        card = self._cfg.nodes.get(node_id)
+        card = self._resolve(node_id)
         if card is None:
             raise PolicyDenied(RuleId.AU_NODE_UNKNOWN)
         return card
@@ -124,13 +155,13 @@ class PolicyEngine:
         dst = self._card(to_node)
 
         # ---- 类型是否已注册（全局）----
-        if task_type not in self._type_providers:
+        if task_type not in self.registered_types:
             raise PolicyDenied(
                 RuleId.WL_TYPE_NOT_REGISTERED, f"unregistered type {task_type}"
             )
 
         # ---- 目标是否真的提供该能力 ----
-        if to_node not in self._type_providers[task_type]:
+        if to_node not in self.providers_of(task_type):
             # 类型存在，但目标不提供它 → 按"类型不可用"处理，
             # 不暴露"哪个节点提供什么"的完整映射
             raise PolicyDenied(
@@ -197,7 +228,7 @@ class PolicyEngine:
                 f"{node_id} attempted to respond for unregistered type {task.type}",
             )
 
-        src_card = self._cfg.nodes.get(target)
+        src_card = self._resolve(target)
         if src_card is None:
             raise PolicyDenied(RuleId.AU_NODE_UNKNOWN, f"unknown origin {target}")
 

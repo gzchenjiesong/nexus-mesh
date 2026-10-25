@@ -96,7 +96,15 @@ class NexusApp:
         self.stores = stores
 
         self.registry = Registry(stores.registry)
-        self.policy = PolicyEngine(config)
+        # ★ 策略层从**注册表**取角色卡与类型索引，而不是只看配置文件。
+        #   否则通过 HTTP 自注册的节点会被判为"未知节点"（AU-NODE-04）
+        #   或"类型未注册"（WL-TYPE-404）——注册成功却永远无法参与协作。
+        #   这是自注册能真正生效的前提。
+        self.policy = PolicyEngine(
+            config,
+            card_resolver=self.registry.card,
+            cards_source=self.registry.all_cards,
+        )
         self.lifecycle = TaskLifecycle(stores.queue, lease_seconds=lease_seconds,
                                        max_attempts=max_attempts)
         self.mailbox = Mailbox(self.policy, self.registry, self.lifecycle)
