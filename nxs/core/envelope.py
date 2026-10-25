@@ -74,6 +74,35 @@ def parse_iso(value: str) -> datetime:
     return dt
 
 
+def to_utc_iso(value: str) -> str:
+    """把任意时区表示的 ISO 时间规范化成 UTC 字符串。
+
+    ⭐ **为什么必须有这个函数**
+
+    租约到期判断用的是 **ISO 字符串的字典序比较**（内存后端用 ``<=``，
+    SQLite 后端用 ``WHERE lease_expires<=?``）。字符串比较只在
+    **时区表示一致**时才等价于时间比较：
+
+    ```
+    "2026-10-25T12:13:26+08:00"   vs   "2026-10-25T04:13:35+00:00"
+                                    ↑ 字典序判断为"未到期"，
+                                      实际已到期 9 秒
+    ```
+
+    这不是理论问题：云服务器常为 UTC，本地机器常为 +08:00。
+    一旦两侧表示不同，**断电恢复会静默失灵**——任务永不超时回队列，
+    而表面上一切正常。这种 bug 能查三天。
+
+    所以：**存储与比较一律先过这个函数。**
+    """
+    return parse_iso(value).astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def utc_now_iso() -> str:
+    """当前时间的 UTC 规范形式。用于所有需要落盘或比较的时间戳。"""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def new_nonce() -> str:
     return secrets.token_hex(8)
 
@@ -269,4 +298,6 @@ __all__ = [
     "now_iso",
     "parse_iso",
     "task_to_wire",
+    "to_utc_iso",
+    "utc_now_iso",
 ]

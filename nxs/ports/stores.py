@@ -111,6 +111,19 @@ class QueueStore(ABC):
         """更新任务（状态、产物、重试次数等）。"""
 
     @abstractmethod
+    def renew(self, task_id: str, *, lease_seconds: int, now: str) -> bool:
+        """延长任务租约。**返回 False 表示该任务当前没有被持有**。
+
+        长任务必须定期续租，而不是把租约时间调大——
+        调大意味着"断电后要等更久才恢复"，那是把可靠性换成便利性。
+
+        返回 ``False`` 有两种情形，实现**不需要区分**（也无法可靠区分）：
+        任务已落终态、或租约已过期被释放。两种情况调用方的动作相同：
+        **停止执行并放弃回传**，因为任务已经回到队列、
+        可能已被别人领走，再回传就会产生重复。
+        """
+
+    @abstractmethod
     def get(self, task_id: str) -> Task | None:
         """按 ID 读取任务。"""
 

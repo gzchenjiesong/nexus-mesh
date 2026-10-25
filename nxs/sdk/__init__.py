@@ -24,17 +24,98 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from ..core.errors import PolicyDenied
 from ..core.models import Artifact, Level, RoleCard, Task, TaskStatus
+from ..data.boundary import LocalBoundary
 
 log = logging.getLogger("nxs.sdk")
 
 #: 处理函数签名：接收任务参数，返回产出数据。
 Handler = Callable[[Mapping[str, Any]], Any]
+
+
+class _LeaseKeeper:
+    """执行期间的租约看护者。
+
+    为什么需要它
+    ------------
+    租约默认 15 秒。公司电脑上跑的检索、整理、读文件类任务很容易超过 ——
+    一旦超时，任务自动回到队列，可能被**别的节点领走**，
+    而本节点还在慢慢算。算完再回传就是重复副作用。
+
+    为什么不是"调大租约时间"
+    ------------------------
+    租约有第二个作用：多久没交活就判它死了。调大等于延长断电恢复的等待，
+    是拿可靠性换省事。**正确做法是长任务主动续租。**
+
+    ⭐ 一个必须说清的局限
+    --------------------
+    Python **无法干净地中断**一个正在执行的同步函数。所以本类不做
+    "中断执行"，只做"记录是否失去租约"。执行照常跑完，
+    但 :attr:`lost` 为真时**调用方必须丢弃产出、不回传**。
+
+    这个取舍是刻意的：中断不了，那就别采纳它的结果。
+    比起"试图 kill 线程但可能留下半写状态"，丢弃结果要安全得多。
+    """
+
+    def __init__(self, transport: Any, task_id: str, interval: float,
+                 logger: logging.Logger) -> None:
+        self._transport = transport
+        self._task_id = task_id
+        self._interval = interval
+        self._log = logger
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lost = False
+
+    @property
+    def lost(self) -> bool:
+        """是否曾经续租失败（= 已失去该任务）。"""
+        return self._lost
+
+    def start(self) -> "_LeaseKeeper":
+        if self._interval <= 0:
+            return self
+        renew = getattr(self._transport, "renew", None)
+        if renew is None:
+            # 同进程传输与测试替身没有网络租约概念，跳过即可
+            self._log.debug("传输不支持 renew，跳过续租")
+            return self
+        self._thread = threading.Thread(
+            target=self._run, args=(renew,),
+            name="nxs-lease", daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def _run(self, renew: Callable[[str], Any]) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                renew(self._task_id)
+            except PolicyDenied as denied:
+                # ⚠ 不是"警告"，是"你手上这个任务已经不属于你了"
+                self._lost = True
+                self._log.error(
+                    "[%s] 续租失败（%s）——已失去该任务，产出将被丢弃",
+                    self._task_id, denied.rule_id.value,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 - 网络抖动不该拖垮执行
+                # 网络问题不判定为"失去任务"：租约可能仍然有效，
+                # 下一轮再试。真正的失去由 PolicyDenied 表达。
+                self._log.warning("[%s] 续租请求出错（将重试）：%s",
+                                  self._task_id, exc)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
 
 
 @dataclass
@@ -58,6 +139,12 @@ class NodeConfig:
     #: 心跳/重注册间隔（秒）。``0`` 表示不做心跳。
     #: 心跳复用注册接口，所以它同时也是"我的能力有没有变"的上报。
     heartbeat_interval: float = 60.0
+    #: 执行期间的续租间隔（秒）。``0`` 表示不续租（仅适合快任务）。
+    #:
+    #: 默认 5 秒 —— 比默认 15 秒租约小得多，留足了重试余地。
+    #: **不要靠调大租约时间来适配长任务**：租约同时是"多久没交活就判死"
+    #: 的判据，调大等于延长断电恢复的等待。
+    renew_interval: float = 5.0
 
     def __post_init__(self) -> None:
         missing = set(self.handlers) - set(self.levels)
@@ -97,6 +184,17 @@ class NodeClient:
         #: 最近一次注册的结果（含是否已批准）。None 表示还没注册过。
         self.registration: dict[str, Any] | None = None
         self._last_heartbeat = 0.0
+        #: 节点侧应答边界。**数据在离开节点之前先经过它。**
+        self._local_boundary = LocalBoundary(
+            config.card, levels=config.levels,
+        )
+        if self._local_boundary.degraded:
+            self._log.warning(
+                "[%s] 未提供角色卡，节点侧边界**降级**运行：只能校验产出等级，"
+                "无法校验应答字段白名单。若要完整防护，请在 NodeConfig.card "
+                "里给出角色卡。",
+                config.node_id,
+            )
 
     # ------------------------------------------------------------------
     # 注册与心跳
@@ -174,10 +272,15 @@ class NodeClient:
         """执行一个已领取的任务并回传。
 
         三条路径：
-        * 有处理器 → 执行 → 包装产物 → 回传（可能被边界拒绝）
+        * 有处理器 → 执行 → **节点侧边界裁剪** → 包装产物 → 回传
         * 无处理器 → 上报失败（**不该发生**：策略层已保证类型可达，
           走到这里说明角色卡声明与实际实现不一致）
         * 处理器抛异常 → 上报失败，原因写入任务
+
+        ⭐ **节点侧边界在回传之前执行**，这是本系统安全模型的关键位置：
+        数据在离开节点之前就已经被裁剪到"自己声明的范围"。
+        协调节点侧还有一道权威校验，但那一道在 hub 被攻破时不可信——
+        真正保护原始数据的是这一道。
         """
         handler = self.config.handlers.get(task.type)
         if handler is None:
@@ -191,16 +294,52 @@ class NodeClient:
                 f"no handler registered for {task.type}",
             )
 
+        # ★ 执行期间自动续租：长任务不能靠调大租约时间
+        keeper = _LeaseKeeper(
+            self._transport, task.id,
+            interval=max(1.0, self.config.renew_interval),
+            logger=self._log,
+        ).start()
         try:
             data = handler(dict(task.params))
         except Exception as exc:  # noqa: BLE001 - 处理器是外部代码，必须兜底
+            keeper.stop()
             self.failed += 1
             self._log.exception("[%s] 处理器异常: %s", self.config.node_id, task.type)
             return self._transport.fail(
                 self.config.node_id, task, f"{type(exc).__name__}: {exc}"
             )
+        finally:
+            keeper.stop()
+
+        if keeper.lost:
+            # 执行期间失去了租约：任务已回队列、可能已被别人领走。
+            # **不回传、也不上报失败** —— 上报失败会干扰现在持有它的那个节点。
+            # 让它自己的租约机制照常运行即可。
+            self._log.error(
+                "[%s] 任务 %s 执行期间失去租约，产出已丢弃（不占用重试次数）",
+                self.config.node_id, task.id,
+            )
+            return task
 
         artifact = self._wrap(task, data)
+
+        # ★ 节点侧边界：不通过就**根本不发送**
+        try:
+            artifact = self._local_boundary.check(task, artifact)
+        except PolicyDenied as denied:
+            self.denied += 1
+            self._log.error(
+                "[%s] 产出被**节点侧**边界拦下（未发送）: %s — %s",
+                self.config.node_id, denied.rule_id.value, denied.detail,
+            )
+            # 上报失败而不是完成：任务已经执行了但产出不能给，
+            # 让中心侧知道"这个任务不会再有结果"，不必等租约超时
+            return self._transport.fail(
+                self.config.node_id, task,
+                f"local boundary rejected: {denied.rule_id.value}",
+            )
+
         try:
             done = self._transport.complete(self.config.node_id, task, [artifact])
             self.processed += 1
@@ -209,7 +348,7 @@ class NodeClient:
             # 边界拒绝了产出——这是**设计要生效**的场景，不是异常情况
             self.denied += 1
             self._log.warning(
-                "[%s] 回传被边界拒绝: %s（产出被丢弃）",
+                "[%s] 回传被中心侧边界拒绝: %s（产出被丢弃）",
                 self.config.node_id, denied.rule_id.value,
             )
             raise

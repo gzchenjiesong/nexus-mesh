@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
+from ...core.envelope import parse_iso, to_utc_iso
 from ...core.models import Artifact, RoleCard, Task
 from ...ports.stores import NodeRecord, QueueStore, RegistryStore
 
@@ -77,9 +78,18 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def _lease_deadline(seconds: int) -> str:
-    return (datetime.now(timezone.utc)
-            + timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
+def _lease_deadline(seconds: int, *, now: str | None = None) -> str:
+    """租约到期时间。**统一存 UTC**，否则跨时区比较会静默失效。
+
+    SQLite 里租约是 TEXT 列，比较用 ``WHERE lease_expires<=?`` —— 那也是
+    字典序比较，与时区表示不一致时同样会判错。所以存与查都必须归一化
+    （见 :func:`nxs.core.envelope.to_utc_iso`）。
+
+    :param now: 基准时刻。省略时取真实时钟；**调用方给了就必须用**，
+        否则注入时间（测试、时钟校正）失效。
+    """
+    base = parse_iso(to_utc_iso(now)) if now else datetime.now(timezone.utc)
+    return (base + timedelta(seconds=seconds)).isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------
@@ -234,12 +244,16 @@ class SqliteQueueStore(QueueStore):
 
     def _release_expired_locked(self, *, now: str,
                                 node_id: str | None = None) -> list[sqlite3.Row]:
+        # ★ 查询前把 now 归一化成 UTC —— 库里存的是 UTC，
+        #   而调用方传的可能是任意时区表示。字符串比较只在
+        #   时区表示一致时才等价于时间比较。
+        ref = to_utc_iso(now)
         if node_id is None:
-            where, args = "lease_expires IS NOT NULL AND lease_expires<=?", (now,)
+            where, args = "lease_expires IS NOT NULL AND lease_expires<=?", (ref,)
         else:
             where = ("to_node=? AND lease_expires IS NOT NULL"
                      " AND lease_expires<=?")
-            args = (node_id, now)
+            args = (node_id, ref)
 
         rows = self._conn.execute(
             f"SELECT * FROM tasks WHERE {where}", args
@@ -279,7 +293,7 @@ class SqliteQueueStore(QueueStore):
             )
 
     def claim(self, node_id: str, *, lease_seconds: int, now: str) -> Task | None:
-        deadline = _lease_deadline(lease_seconds)
+        deadline = _lease_deadline(lease_seconds, now=now)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -329,6 +343,23 @@ class SqliteQueueStore(QueueStore):
                     (task.status, params, arts, task.semantics, task.attempt,
                      task.ttl, task.id),
                 )
+
+    def renew(self, task_id: str, *, lease_seconds: int, now: str) -> bool:
+        """延长租约。只对"当前仍被持有且未落终态"的任务生效。
+
+        用 ``UPDATE ... WHERE`` 的返回行数判断，而不是"先查再改"——
+        后者在多进程下有竞态：查到持有、改之前被释放，就会错误地"续活"
+        一个已经回队列的任务。
+        """
+        deadline = _lease_deadline(lease_seconds, now=now)
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE tasks SET lease_expires=? WHERE id=? AND lease_expires IS NOT NULL"
+                " AND status NOT IN ('completed','failed','canceled')",
+                (deadline, task_id),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
 
     def get(self, task_id: str) -> Task | None:
         with self._lock:

@@ -28,8 +28,13 @@ from dataclasses import replace
 from typing import Any, Iterable, Mapping
 
 from ..core.errors import PolicyDenied, RuleId
-from ..core.models import Artifact, Capability, Level, Semantics, Task
-from ..control.policy import PolicyEngine, MAX_FREETEXT_BYTES
+from ..core.models import Artifact, Capability, Level, RoleCard, Semantics, Task
+from ..control.policy import (  # noqa: PLC2701 - 同包内复用判定细节，避免两处各写一份
+    MAX_FREETEXT_BYTES,
+    PolicyEngine,
+    _extract_fields,
+    _get_field,
+)
 
 #: 控制字符（保留换行与制表符，它们在正常文本里合法）。
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -106,35 +111,8 @@ class ResponseBoundary:
 
     def _sanitize(self, node_id: str, cap: Capability,
                   art: Artifact) -> Artifact:
-        """规范化单个产物。
-
-        * 自由文本字段：剥控制字符、剥指令性前缀、按字节截断
-        * 其余字段：原样透传（结构化字段由白名单控制，不需要内容处理）
-        """
-        if not cap.freetext_fields:
-            return art
-
-        if not isinstance(art.data, Mapping):
-            return art
-
-        cleaned = dict(art.data)
-        touched = False
-        for fname in cap.freetext_fields:
-            value = cleaned.get(fname)
-            if not isinstance(value, str):
-                continue
-            new_value = self.sanitize_freetext(value)
-            if new_value != value:
-                cleaned[fname] = new_value
-                touched = True
-
-        if not touched:
-            return art
-
-        # 记录"这段内容被处理过"——接收方据此知道它不可原样信任
-        prov = dict(art.provenance)
-        prov["sanitized"] = True
-        return replace(art, data=cleaned, provenance=prov)
+        """规范化单个产物。委托给模块级函数，与节点侧边界共用同一实现。"""
+        return sanitize_artifact(cap, art)
 
     @staticmethod
     def sanitize_freetext(value: str) -> str:
@@ -189,6 +167,183 @@ class ResponseBoundary:
         }
 
 
+# ---------------------------------------------------------------------------
+# 自由文本规范化（两层边界共用同一实现）
+# ---------------------------------------------------------------------------
+
+def sanitize_artifact(cap: Capability, art: Artifact) -> Artifact:
+    """规范化一个产物里声明的自由文本字段。
+
+    * 自由文本字段：剥控制字符、剥指令性前缀、按字节截断
+    * 其余字段：原样透传（结构化字段由白名单控制，不需要内容处理）
+
+    提到模块级是为了让**节点侧与 hub 侧用同一份逻辑**。
+    两份实现迟早会分叉，而分叉的那一侧就是绕过口。
+    """
+    if not cap.freetext_fields:
+        return art
+
+    if not isinstance(art.data, Mapping):
+        return art
+
+    cleaned = dict(art.data)
+    touched = False
+    for fname in cap.freetext_fields:
+        value = cleaned.get(fname)
+        if not isinstance(value, str):
+            continue
+        new_value = ResponseBoundary.sanitize_freetext(value)
+        if new_value != value:
+            cleaned[fname] = new_value
+            touched = True
+
+    if not touched:
+        return art
+
+    # 记录"这段内容被处理过"——接收方据此知道它不可原样信任
+    prov = dict(art.provenance)
+    prov["sanitized"] = True
+    return replace(art, data=cleaned, provenance=prov)
+
+
+# ---------------------------------------------------------------------------
+# 节点侧边界
+# ---------------------------------------------------------------------------
+
+class LocalBoundary:
+    """**节点侧**应答边界 —— 数据离开节点之前先裁剪。
+
+    为什么需要第二道边界
+    --------------------
+    :class:`ResponseBoundary` 跑在协调节点（hub）上。但本系统的核心威胁模型
+    是"**hub 被攻破**"——那时 hub 上的任何检查都形同虚设，因为攻击者可以
+    直接改代码跳过它。
+
+    所以真正能保护数据的是**数据离开节点之前**的那一次裁剪。
+    本类就做这件事：它不依赖任何中心侧配置，只用节点**自己声明的角色卡**。
+
+    ⭐ 两层的分工（不重复，也不冲突）
+    ---------------------------------
+    ==============  ==================================  ==============================
+    层              回答的问题                          需要的输入
+    ==============  ==================================  ==============================
+    节点侧（本类）  **我能承诺什么**                    自己的角色卡
+    hub 侧           **你能得到什么**                    域 × 类型矩阵 + 全部角色卡
+    ==============  ==================================  ==============================
+
+    节点侧检查不出"域矩阵只允许 metadata"——那需要知道对方是谁，
+    而节点不该知道全网拓扑。它只管一件事：**不产出超出自己声明的东西**。
+
+    这正是"声明即承诺"的执行点：能力注册时声明 level=summary，
+    实现就必须真的只产出 summary。**在数据离开节点前就裁剪，
+    而不是让 hub 事后拦。**
+
+    上限怎么算
+    ----------
+    ``ceiling = min(角色卡的数据等级上限, 该能力声明的等级)``
+
+    hub 侧的上限是 ``min(矩阵上限, 节点上限, 能力等级)``，比这里更严格。
+    **两级取最小，最终结果与单级三者取最小完全等价**，
+    所以节点侧不会放宽任何东西——它只是把裁剪提前了。
+    """
+
+    def __init__(self, card: RoleCard | None, *,
+                 levels: Mapping[str, Level] | None = None) -> None:
+        """
+        :param card: 节点自己的角色卡。为 ``None`` 时进入**降级模式**：
+            只能用 ``levels`` 检查产出等级，无法检查字段白名单
+            （因为不知道声明了哪些字段）。降级模式会由 SDK 记一条警告。
+        :param levels: 任务类型 → 产出等级。降级模式下唯一可用的约束。
+        """
+        self._card = card
+        self._levels = dict(levels or {})
+
+    @property
+    def degraded(self) -> bool:
+        """是否处于降级模式（没有角色卡，只有等级约束）。"""
+        return self._card is None
+
+    def check(self, task: Task, artifact: Artifact) -> Artifact:
+        """校验并裁剪一条产物。返回**可以直接发送**的产物。
+
+        失败抛 :class:`PolicyDenied`，且**绝不发送部分结果**。
+        """
+        cap = self._capability(task.type)
+        ceiling = self._ceiling(task.type, cap)
+
+        # -- ① 等级 --
+        if artifact.level > ceiling:
+            raise PolicyDenied(
+                RuleId.WL_LEVEL_EXCEEDED,
+                f"local boundary: artifact level={artifact.level} "
+                f"ceiling={ceiling}",
+            )
+
+        # -- ② 自由文本清洗（在字段检查之前做，因为清洗会改值不改键） --
+        if cap is not None:
+            artifact = sanitize_artifact(cap, artifact)
+
+        # -- ③ 字段白名单（降级模式下无从判断，跳过） --
+        if cap is not None:
+            allowed = set(cap.response_fields)
+            stray = _extract_fields(artifact.data) - allowed
+            if stray:
+                # 只报数量不报字段名 —— 与 hub 侧一致，字段名本身可能带信息
+                raise PolicyDenied(
+                    RuleId.WL_FIELD_NOT_ALLOWED,
+                    f"local boundary: {len(stray)} field(s) outside allow-list",
+                )
+
+            # -- ④ 自由文本长度 --
+            for fname in cap.freetext_fields:
+                value = _get_field(artifact.data, fname)
+                if value is None:
+                    continue
+                if not isinstance(value, str):
+                    raise PolicyDenied(
+                        RuleId.WL_FREETEXT_NOT_ALLOWED,
+                        f"local boundary: {fname} must be a string",
+                    )
+                size = len(value.encode("utf-8"))
+                if size > MAX_FREETEXT_BYTES:
+                    raise PolicyDenied(
+                        RuleId.WL_FREETEXT_NOT_ALLOWED,
+                        f"local boundary: {fname} size={size}",
+                    )
+
+        # -- ⑤ 语义：产出永远是数据 --
+        prov = dict(artifact.provenance)
+        prov.setdefault("local_boundary", "passed")
+        return replace(artifact, provenance=prov)
+
+    # ------------------------------------------------------------------
+    # 内部
+    # ------------------------------------------------------------------
+
+    def _capability(self, task_type: str) -> Capability | None:
+        if self._card is None:
+            return None
+        cap = self._card.capability(task_type)
+        if cap is None:
+            # 自己没声明这个能力却在产出 —— 说明实现在做角色卡没承认的事
+            raise PolicyDenied(
+                RuleId.WL_TYPE_NOT_REGISTERED,
+                f"local boundary: {task_type} not declared in role card",
+            )
+        return cap
+
+    def _ceiling(self, task_type: str, cap: Capability | None) -> Level:
+        """本次产出的等级上限。
+
+        有角色卡：``min(卡片数据等级上限, 能力声明等级)``。
+        降级模式：只能取 ``levels`` 里为该类型声明的等级；
+        连它也没有时退到最保守的 ``metadata`` —— **未知一律最严**。
+        """
+        if cap is not None and self._card is not None:
+            return min(self._card.constraints.max_response_level, cap.level)
+        return self._levels.get(task_type, Level.METADATA)
+
+
 def _truncate_utf8(text: str, max_bytes: int) -> str:
     """按字节上限截断，保证不切碎 UTF-8 字符。
 
@@ -209,4 +364,4 @@ def _truncate_utf8(text: str, max_bytes: int) -> str:
     return "".join(out)
 
 
-__all__ = ["ResponseBoundary"]
+__all__ = ["LocalBoundary", "ResponseBoundary"]

@@ -173,6 +173,19 @@ class HttpTransport:
         payload = self._post("/fail", envelope)
         return Task.from_dict(payload["task"], "response.task")
 
+    def renew(self, task_id: str) -> int:
+        """续租。返回服务端建议的下次续租间隔（秒）。
+
+        抛 :class:`PolicyDenied` 表示**你已失去这个任务**：
+        租约过期后任务回到队列，可能已被别人领走。此时必须停止执行，
+        不能继续算下去再回传——那会产生重复副作用。
+        """
+        body = json.dumps({"task_id": task_id}).encode("utf-8")
+        _, payload = self._request("POST", "/ack", body=body)
+        if payload is None:  # pragma: no cover
+            raise ConfigError("/ack: 响应为空")
+        return int(payload.get("lease_seconds", 15))
+
     # ------------------------------------------------------------------
     # 事件订阅（推送）
     # ------------------------------------------------------------------

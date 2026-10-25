@@ -703,6 +703,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._handle_fail(full_path)
                 elif path == f"{PREFIX}/register" and method == "POST":
                     self._handle_register(full_path)
+                elif path == f"{PREFIX}/ack" and method == "POST":
+                    self._handle_ack(full_path)
                 elif path in _KNOWN_PATHS:
                     self._reject_status(405, "method not allowed")
                 else:
@@ -1055,6 +1057,36 @@ class _Handler(BaseHTTPRequestHandler):
         })
 
     # ------------------------------------------------------------------
+    # 端点：ack（续租）
+    # ------------------------------------------------------------------
+
+    def _handle_ack(self, full_path: str) -> None:
+        """续租。长任务在执行期间定期调用。
+
+        用**请求签名**（不是信封签名）：这是一个不携带任务内容的调用，
+        它只需要证明"我是持有这个任务的那个节点"。
+
+        返回里带 ``lease_seconds``，让节点知道该多久续一次——
+        把间隔写死在节点代码里，一旦中心侧调整租约就会失配。
+        """
+        body = self._read_body()
+        sender = self._authenticate(full_path, body=body)
+        payload = self._parse_json(body)
+
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise _Reject(400, RuleId.FM_ENVELOPE_INVALID, "missing task_id")
+
+        # 权限与归属校验都在 lifecycle 里 —— 传输层不重复实现业务判断
+        task = self.gw.app.lifecycle.renew(sender, task_id)
+        self._send_json(200, {
+            "task_id": task.id,
+            "status": task.status,
+            "attempt": task.attempt,
+            "lease_seconds": self.gw.app.lifecycle.lease_seconds,
+        })
+
+    # ------------------------------------------------------------------
     # 请求体
     # ------------------------------------------------------------------
 
@@ -1113,7 +1145,7 @@ class _Handler(BaseHTTPRequestHandler):
 _KNOWN_PATHS = frozenset({
     f"{PREFIX}/poll", f"{PREFIX}/events", f"{PREFIX}/publish",
     f"{PREFIX}/result", f"{PREFIX}/fail", f"{PREFIX}/health",
-    f"{PREFIX}/register",
+    f"{PREFIX}/register", f"{PREFIX}/ack",
 })
 
 

@@ -199,6 +199,45 @@ class TaskLifecycle:
                 + timedelta(seconds=self._lease_seconds)).astimezone().isoformat(
             timespec="seconds")
 
+    def renew(self, node_id: str, task_id: str, *,
+              now: str | None = None) -> Task:
+        """续租。长任务在执行期间应定期调用，而不是靠调大租约时间。
+
+        **为什么不能调大租约时间**：租约同时是"多久没交活就判它死了"的判据。
+        调大等于延长断电恢复的等待时间——那是拿可靠性换省事。
+
+        失败语义很重要，调用方必须据此**放弃执行**：
+
+        * 任务不存在，或不属于调用方 → ``MX-RECEIVE-03``
+          （两种情况返回同一个码，避免用来枚举别人的任务）
+        * 任务已落终态（别人已完成/已失败）→ ``LF-STATE-03``
+        * 租约已过期、任务已回队列 → ``LF-EXPIRE-02``
+
+        最后一种最关键：**此时任务可能已被别人领走**，
+        继续执行并回传会造成重复副作用。所以续租失败不是"警告"，
+        是"你手上这个任务已经不属于你了"。
+        """
+        task = self._store.get(task_id)
+        if task is None or task.to_node != node_id:
+            raise PolicyDenied(
+                RuleId.MX_RECEIVE_NOT_ALLOWED,
+                f"{node_id} tried to renew {task_id!r}",
+            )
+        if task.is_terminal:
+            raise PolicyDenied(
+                RuleId.LF_INVALID_TRANSITION,
+                f"task {task_id} already {task.status}",
+            )
+        ref = now or now_iso()
+        if not self._store.renew(task_id, lease_seconds=self._lease_seconds,
+                                 now=ref):
+            # 存储侧说"当前没被持有"——租约已过期并释放
+            raise PolicyDenied(
+                RuleId.LF_TASK_EXPIRED,
+                f"lease for {task_id} already released; task is back in queue",
+            )
+        return task
+
     # ------------------------------------------------------------------
     # 查询
     # ------------------------------------------------------------------

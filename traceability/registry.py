@@ -353,6 +353,15 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M7.F8", "持久化（重启后队列仍在）",
             "nxs/backends/sqlite/*",
             ("G1",), "P0"),
+    Feature("M7.F9", "续租端点 /nxs/ack（只允许持有者续自己的租约）",
+            "nxs/edge/gateway.py:_Handler._handle_ack",
+            ("G1", "G2"), "P0"),
+    Feature("M7.F10", "续租的归属与状态校验（失败即『已失去任务』）",
+            "nxs/data/task.py:TaskLifecycle.renew",
+            ("G2",), "P0"),
+    Feature("M7.F11", "SDK 执行期间自动续租（失去租约则丢弃产出）",
+            "nxs/sdk/__init__.py:_LeaseKeeper",
+            ("G1",), "P0"),
 
     # ---------------- M8 会话 ----------------
     Feature("M8.F1", "会话视图（按 session 聚合状态）",
@@ -372,6 +381,12 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M10.F4", "来源标注（trust_hint ＋ provenance）",
             "nxs/data/boundary.py:ResponseBoundary.trust_hint",
             ("G2", "G3"), "P1"),
+    Feature("M10.F5", "节点侧应答边界（数据离节点前裁剪到自身声明范围）",
+            "nxs/data/boundary.py:LocalBoundary.check",
+            ("G2",), "P0", ("S2", "S14")),
+    Feature("M10.F6", "自由文本规范化两层共用同一实现（防逻辑分叉）",
+            "nxs/data/boundary.py:sanitize_artifact",
+            ("G2",), "P1", ("S8",)),
 
     # ---------------- M11 配置中心 ----------------
     Feature("M11.F1", "配置加载与严格校验（非法即拒绝启动）",
@@ -502,6 +517,11 @@ REQUIREMENTS: tuple[Requirement, ...] = (
         realized_by=("M7.F2", "M7.F7"), goals=("G3",), priority="P0",
     ),
     Requirement(
+        "M7.R4", "长任务靠续租而非调大租约——租约同时是断电恢复的判据",
+        realized_by=("M7.F9", "M7.F10", "M7.F11"), goals=("G1", "G2"),
+        priority="P0",
+    ),
+    Requirement(
         "M10.R1", "产出等级由产出方标注，发起方无法指定",
         realized_by=("M10.F1", "M10.F2"), goals=("G2",),
         priority="P0", security=("S6",),
@@ -588,6 +608,7 @@ SECURITY: tuple[SecurityReq, ...] = (
     SecurityReq("S11", "回传时以服务端持有的任务为准，节点无法冒领他人的任务"),
     SecurityReq("S12", "节点自注册不能带来批准，角色卡一经变更批准立即撤销"),
     SecurityReq("S13", "信任域由运维配置裁定，节点无法通过自报域获得更多权限"),
+    SecurityReq("S14", "节点侧边界先于传输执行——数据离开节点时已裁剪到自身声明范围"),
 )
 
 

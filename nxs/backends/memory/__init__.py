@@ -13,13 +13,27 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
+from ...core.envelope import parse_iso, to_utc_iso, utc_now_iso
 from ...core.models import Task, TaskStatus
 from ...ports.stores import AuditStore, NodeRecord, QueueStore, RegistryStore
 
 
 def _lease_deadline(seconds: int) -> str:
-    return (datetime.now(timezone.utc)
-            + timedelta(seconds=seconds)).astimezone().isoformat(timespec="seconds")
+    """租约到期时间。**统一存 UTC**，否则跨时区比较会静默失效（见 to_utc_iso）。"""
+    return _deadline_from(utc_now_iso(), seconds)
+
+
+def _deadline_from(now: str, seconds: int) -> str:
+    """从给定的"当前时刻"推算到期时间。
+
+    ⭐ **必须用调用方传入的 now，而不是内部读时钟。**
+    否则注入时间（测试、回放、时钟校正）会失效 ——
+    表现为"明明把时间推到了未来，租约却还是按真实时钟算"。
+
+    这也是 claim/renew 都接收 ``now`` 参数的意义所在。
+    """
+    base = parse_iso(to_utc_iso(now))
+    return (base + timedelta(seconds=seconds)).isoformat(timespec="seconds")
 
 
 class MemoryRegistryStore(RegistryStore):
@@ -68,7 +82,14 @@ class MemoryQueueStore(QueueStore):
     # ---- 内部 ----
 
     def _expired_ids(self, *, now: str) -> list[str]:
-        return [tid for tid, exp in self._leases.items() if exp and exp <= now]
+        """租约已过期的任务 ID。
+
+        **比较前先把 ``now`` 规范化成 UTC** —— 租约本身存的是 UTC，
+        而调用方传进来的可能是任意时区表示（例如 +08:00）。
+        直接做字符串比较会在时区不同时静默判错，导致租约永不过期。
+        """
+        ref = to_utc_iso(now)
+        return [tid for tid, exp in self._leases.items() if exp and exp <= ref]
 
     def _release_locked(self, task_id: str) -> None:
         """释放租约（调用方须持锁）。不改任务状态——见 release_expired 说明。"""
@@ -97,7 +118,7 @@ class MemoryQueueStore(QueueStore):
                     continue
                 task.status = TaskStatus.WORKING
                 task.attempt += 1
-                self._leases[tid] = _lease_deadline(lease_seconds)
+                self._leases[tid] = _deadline_from(now, lease_seconds)
                 self._claimed_by[tid] = node_id
                 return task
             return None
@@ -107,6 +128,16 @@ class MemoryQueueStore(QueueStore):
             self._tasks[task.id] = task
             if task.is_terminal:
                 self._release_locked(task.id)
+
+    def renew(self, task_id: str, *, lease_seconds: int, now: str) -> bool:
+        with self._lock:
+            if task_id not in self._leases:
+                return False        # 没被持有：已释放或从未领取
+            task = self._tasks.get(task_id)
+            if task is None or task.is_terminal:
+                return False
+            self._leases[task_id] = _deadline_from(now, lease_seconds)
+            return True
 
     def get(self, task_id: str) -> Task | None:
         with self._lock:
