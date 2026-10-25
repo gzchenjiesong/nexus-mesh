@@ -179,7 +179,9 @@ MODULES: tuple[Module, ...] = (
     Module("M11", "配置中心", "管理面", "nxs/mgmt/config.py", "已实现", ("G4", "G5")),
     Module("M12", "审计留痕", "管理面", "nxs/mgmt/audit.py", "已实现", ("G3",)),
     Module("M13", "可观测", "管理面", "nxs/mgmt/observ（未建）", "未实现", ("G3",)),
-    Module("M14", "运维接口", "管理面", "nxs/mgmt/ops（未建）", "未实现", ("G3",)),
+    Module("M14", "运维接口", "管理面",
+           "nxs/edge/gateway.py（ops 端点）· nxs/edge/client.py:OpsClient",
+           "已实现", ("G3",)),
 )
 
 
@@ -265,6 +267,23 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M3.F7", "角色卡持久化（重启后注册表仍在）",
             "nxs/backends/sqlite/SqliteRegistryStore",
             ("G1", "G5"), "P0"),
+
+    # ---- v0.3 自注册（部署必需）新增 ----
+    Feature("M3.F8", "节点自注册（不可信入口，永不带来批准）",
+            "nxs/control/registry.py:Registry.register_from_node",
+            ("G1", "G5"), "P0", ("S9", "S12")),
+    Feature("M3.F9", "注册身份一致性（卡片 node_id 必须等于签名身份）",
+            "nxs/edge/gateway.py:_Handler._handle_register",
+            ("G2",), "P0", ("S12",)),
+    Feature("M3.F10", "信任域由配置裁定（自报域不足以改变归属）",
+            "nxs/edge/gateway.py:Gateway.resolve_domain",
+            ("G2", "G5"), "P0", ("S13",)),
+    Feature("M3.F11", "注册兼作心跳（卡片不变只刷新存活）",
+            "nxs/control/registry.py:Registry.register_from_node（unchanged 路径）",
+            ("G1",), "P1"),
+    Feature("M3.F12", "注册事件审计（只记结果与版本，不记卡片内容）",
+            "nxs/edge/gateway.py:Gateway.record_registration",
+            ("G3",), "P1"),
 
     # ---------------- M5 策略执行点 ----------------
     Feature("M5.F1", "任务类型白名单",
@@ -387,6 +406,29 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M12.F4", "汇总统计（按规则分组）",
             "nxs/mgmt/audit.py:FileAuditStore.summary",
             ("G3",), "P1"),
+
+    # ---------------- M14 运维接口（v0.3） ----------------
+    Feature("M14.F1", "运维身份与端点开关（未配密钥则整体不存在）",
+            "nxs/edge/gateway.py:Gateway.ops_enabled/_ops_secret_from_env",
+            ("G3", "G2"), "P0"),
+    Feature("M14.F2", "远程批准节点（绑定当前那张角色卡）",
+            "nxs/edge/gateway.py:_Handler._handle_ops（approve）",
+            ("G3",), "P0"),
+    Feature("M14.F3", "远程吊销（注册表与认证层同时生效）",
+            "nxs/edge/gateway.py:_Handler._handle_ops（revoke）",
+            ("G3",), "P0", ("S10",)),
+    Feature("M14.F4", "远程释放过期租约",
+            "nxs/edge/gateway.py:_Handler._handle_ops（release）",
+            ("G3",), "P1"),
+    Feature("M14.F5", "节点状态查询（含未批准节点）",
+            "nxs/edge/gateway.py:_Handler._handle_ops（nodes）",
+            ("G3",), "P1"),
+    Feature("M14.F6", "运维动作审计（谁在何时给谁放了行）",
+            "nxs/edge/gateway.py:Gateway.record_ops",
+            ("G3",), "P0"),
+    Feature("M14.F7", "运维 CLI（nxs ops）",
+            "nxs/__main__.py:cmd_ops",
+            ("G3",), "P1"),
 )
 
 
@@ -416,6 +458,18 @@ REQUIREMENTS: tuple[Requirement, ...] = (
     Requirement(
         "M3.R2", "吊销不删除记录（须能回答「当时是否在线、是否被吊销」）",
         realized_by=("M3.F3", "M3.F4"), goals=("G3",), priority="P0", security=("S10",),
+    ),
+    Requirement(
+        "M3.R3", "审批针对「那张角色卡」而非 node_id——卡片一变批准即失效",
+        realized_by=("M3.F8",), goals=("G2",), priority="P0", security=("S12",),
+    ),
+    Requirement(
+        "M14.R1", "运维通道不与节点共享配额——故障时运维必须进得来",
+        realized_by=("M14.F1", "M14.F2", "M14.F3"), goals=("G3",), priority="P0",
+    ),
+    Requirement(
+        "M14.R2", "被管理者不能给自己批条子：节点密钥无法调用运维接口",
+        realized_by=("M14.F2",), goals=("G2", "G3"), priority="P0",
     ),
     Requirement(
         "M5.R1", "默认拒绝——没有显式允许的即拒绝",
@@ -532,6 +586,8 @@ SECURITY: tuple[SecurityReq, ...] = (
     SecurityReq("S9", "新节点不能自行加入——注册后需人工批准"),
     SecurityReq("S10", "凭据吊销立即生效，不等过期"),
     SecurityReq("S11", "回传时以服务端持有的任务为准，节点无法冒领他人的任务"),
+    SecurityReq("S12", "节点自注册不能带来批准，角色卡一经变更批准立即撤销"),
+    SecurityReq("S13", "信任域由运维配置裁定，节点无法通过自报域获得更多权限"),
 )
 
 

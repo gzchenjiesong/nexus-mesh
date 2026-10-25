@@ -411,7 +411,11 @@ class RoleCard:
         return None
 
     def to_public_dict(self) -> dict[str, Any]:
-        """对外呈现用的摘要。不含配额等内部约束细节。"""
+        """对外呈现用的摘要。不含配额等内部约束细节。
+
+        **不要用它做注册序列化** —— 那样会把约束丢掉，
+        服务端收到的卡片与节点真实意图不一致。注册请用 :meth:`to_dict`。
+        """
         return {
             "node_id": self.node_id,
             "display_name": self.display_name,
@@ -426,6 +430,54 @@ class RoleCard:
                 for c in self.capabilities
             ],
             "max_response_level": str(self.constraints.max_response_level),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        """完整序列化，**可被 :meth:`from_dict` 原样读回**。
+
+        与 :meth:`to_public_dict` 的分工：
+        这个是"如实转述"，用于注册与落盘；那个是"对外摘要"，
+        用于给人看和跨系统交换。**故意传配额出去是不必要的暴露**，
+        所以两者不能合并——一台节点的每日额度跟对方没关系。
+        """
+        return {
+            "card_version": self.card_version,
+            "node_id": self.node_id,
+            "display_name": self.display_name,
+            "domain": self.domain,
+            "reachability": self.reachability,
+            "heartbeat_interval": self.heartbeat_interval,
+            "roles": {
+                "issuer": self.roles.issuer,
+                "executor": self.roles.executor,
+                "relay": self.roles.relay,
+                "observer": self.roles.observer,
+                "human_interface": self.roles.human_interface,
+            },
+            "capabilities": [
+                {
+                    "type": c.type,
+                    "level": str(c.level),
+                    "mode": c.mode,
+                    "description": c.description,
+                    "params_schema": dict(c.params_schema),
+                    "response_fields": list(c.response_fields),
+                    "freetext_fields": list(c.freetext_fields),
+                }
+                for c in self.capabilities
+            ],
+            "constraints": {
+                "max_response_level": str(self.constraints.max_response_level),
+                "can_issue_types": list(self.constraints.can_issue_types),
+                "can_receive_from": list(self.constraints.can_receive_from),
+                "can_delegate_to": list(self.constraints.can_delegate_to),
+                "quota": {
+                    "tasks_per_day": self.constraints.quota.tasks_per_day,
+                    "bytes_per_response": self.constraints.quota.bytes_per_response,
+                    "bytes_per_day": self.constraints.quota.bytes_per_day,
+                    "concurrent_tasks": self.constraints.quota.concurrent_tasks,
+                },
+            },
         }
 
 

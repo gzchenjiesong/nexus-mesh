@@ -39,7 +39,8 @@ from typing import Any, Callable, Mapping
 from ..app import DeliveryResult
 from ..core.envelope import Envelope, envelope_for, task_to_wire
 from ..core.errors import ConfigError, PolicyDenied, RuleId
-from ..core.models import Artifact, Task, TaskStatus
+from ..core.models import Artifact, RoleCard, Task, TaskStatus
+from ..mgmt.config import OPS_NODE_ID
 from . import httpsig
 
 log = logging.getLogger("nxs.edge.client")
@@ -79,6 +80,32 @@ class HttpTransport:
         self.node_id = node_id
         self._secret = secret
         self.timeout = timeout
+
+    # ------------------------------------------------------------------
+    # 注册与心跳
+    # ------------------------------------------------------------------
+
+    def register(self, card: RoleCard) -> dict:
+        """提交（或刷新）自己的角色卡。兼作心跳。
+
+        **必须由节点的真实密钥签名**——服务端会校验卡片里的 ``node_id``
+        与签名身份一致，所以一个节点无法替另一个节点注册。
+
+        :return: 服务端的响应，含 ``outcome`` / ``approved`` / ``revision``。
+            节点应检查 ``approved``：为 ``False`` 说明还在等运维批准。
+        """
+        if card.node_id != self.node_id:
+            raise ConfigError(
+                f"角色卡的 node_id={card.node_id!r} 与客户端身份 "
+                f"{self.node_id!r} 不符——服务端会拒绝，不必发送"
+            )
+        payload = json.dumps(
+            {"card": card.to_dict()}, ensure_ascii=False
+        ).encode("utf-8")
+        status, body = self._request("POST", "/register", body=payload)
+        if body is None:  # pragma: no cover - 服务端契约保证有体
+            raise ConfigError("/register: 响应为空")
+        return dict(body)
 
     # ------------------------------------------------------------------
     # Transport 协议
@@ -288,4 +315,75 @@ def _sleep(seconds: float, should_stop: Callable[[], bool] | None) -> None:
         time.sleep(min(0.1, deadline - time.monotonic()))
 
 
-__all__ = ["DEFAULT_TIMEOUT_SECONDS", "HttpTransport"]
+# ---------------------------------------------------------------------------
+# 运维客户端
+# ---------------------------------------------------------------------------
+
+class OpsClient:
+    """运维通道客户端（M14）。
+
+    与 :class:`HttpTransport` 的区别：
+
+    * 身份是保留的 ``__ops__``，**不是**任何节点
+    * 走的是运维端点，不经节点速率限制与并发配额
+    * 只做四件事：批准、吊销、释放租约、查节点
+
+    为什么运维要单独一个类而不是给 HttpTransport 加参数：
+    两者的权限模型完全不同（一个是"被管理者"，一个是"管理者"）。
+    合成一个类就必须在每个方法里判"我这次是哪种身份"，
+    而那正是最容易判错的地方。
+    """
+
+    def __init__(self, base_url: str, *, secret: bytes,
+                 timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+        if not base_url.rstrip("/").endswith("/nxs"):
+            raise ConfigError(f"base_url 必须以 /nxs 结尾: {base_url!r}")
+        self.base_url = base_url.rstrip("/")
+        self._secret = secret
+        self.timeout = timeout
+
+    def _post(self, action: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        body = json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
+        # 签名路径必须与网关实际收到的完整路径一致
+        marker = self.base_url.find("/nxs")
+        prefix = self.base_url[marker:]
+        path = f"{prefix}/ops/{action}"
+        headers = httpsig.sign_request(
+            self._secret, method="POST", path=path,
+            node_id=OPS_NODE_ID, body=body,
+        )
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "application/json"
+        request = urllib.request.Request(
+            f"{self.base_url}/ops/{action}", data=body, method="POST",
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                parsed = _decode(response.read())
+                return dict(parsed or {})
+        except urllib.error.HTTPError as err:
+            parsed = _decode(err.read()) or {}
+            raise ConfigError(
+                f"运维动作 {action} 失败（HTTP {err.code}）："
+                f"{parsed.get('message', '')} {parsed.get('rule_id', '')}".strip()
+            ) from err
+
+    def approve(self, node_id: str) -> Mapping[str, Any]:
+        """批准节点。**批准的是它当前那张角色卡**，卡片一变即失效。"""
+        return self._post("approve", {"node_id": node_id})
+
+    def revoke(self, node_id: str) -> Mapping[str, Any]:
+        """吊销节点。立即生效，不等到凭据过期。"""
+        return self._post("revoke", {"node_id": node_id})
+
+    def release(self) -> Mapping[str, Any]:
+        """主动释放过期租约（断电恢复不及时时的兜底手段）。"""
+        return self._post("release", {})
+
+    def nodes(self) -> list[Mapping[str, Any]]:
+        """列出所有节点及其状态。"""
+        return list(self._post("nodes", {}).get("nodes", []))
+
+
+__all__ = ["DEFAULT_TIMEOUT_SECONDS", "HttpTransport", "OpsClient"]

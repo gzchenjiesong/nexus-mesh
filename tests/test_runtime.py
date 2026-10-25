@@ -283,15 +283,39 @@ class TestRegistry:
         assert reg.record("node-a").routable
 
     @covers("M3.F1")
-    def test_card_update_keeps_approval(self, stack):
-        """更新能力不应导致需要重新审批。"""
+    def test_identical_card_refresh_keeps_approval_and_revision(self, stack):
+        """**卡片内容相同**的重复注册 = 心跳，不算修订。
+
+        v0.1 的断言是 ``revision == 2``（每次注册都算一次修订）。
+        v0.2 改了：revision 表示**角色卡的修订号**，内容没变就不该前进——
+        否则节点每次上报心跳都会让"这张卡是第几版"失去意义。
+        批准状态在这一路径上保持不变，节点可以放心频繁上报。
+        """
         reg = stack["registry"]
         before = reg.record("node-a")
         assert before.approved and before.revision == 1
         reg.register(reg.require_card("node-a"), approved=False)
         after = reg.record("node-a")
-        assert after.approved, "更新卡片不应清掉批准状态"
+        assert after.approved, "内容未变的注册不应清掉批准状态"
+        assert after.revision == 1, "内容未变不该前进 revision"
+
+    @covers("M3.F1")
+    def test_card_change_advances_revision(self, stack):
+        """卡片**内容变了**才前进 revision。"""
+        from dataclasses import replace
+
+        from nxs.core.models import Level
+
+        reg = stack["registry"]
+        original = reg.require_card("node-a")
+        # node-a 原本 max_response_level=summary，改成 metadata（收紧一档）
+        tightened = replace(original, constraints=replace(
+            original.constraints, max_response_level=Level.METADATA))
+        assert tightened != original, "测试自身要求两张卡片必须不同"
+        reg.register(tightened, approved=True)
+        after = reg.record("node-a")
         assert after.revision == 2
+        assert after.card == tightened
 
 
 # ---------------------------------------------------------------------------

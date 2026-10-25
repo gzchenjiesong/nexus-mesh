@@ -66,8 +66,8 @@ from ..core.errors import (
     RuleId,
     safe_message,
 )
-from ..core.models import Artifact, Task, TaskStatus
-from ..mgmt.config import ServerConfig
+from ..core.models import Artifact, RoleCard, Task, TaskStatus
+from ..mgmt.config import ENV_OPS_SECRET, MIN_SECRET_LENGTH, OPS_NODE_ID, ServerConfig
 from ..mgmt.audit import AuditError, make_record
 from . import httpsig
 from .auth import Authenticator
@@ -255,6 +255,33 @@ def status_for(rule_id: RuleId) -> int:
     return _STATUS_BY_RULE.get(rule_id, 400)
 
 
+def _ops_secret_from_env() -> bytes | None:
+    """从环境变量取运维密钥。
+
+    **过短的一律视为未配置**——半个密钥比没有密钥更危险，
+    因为它会让人以为运维面是受保护的。
+    """
+    import os
+
+    raw = os.environ.get(ENV_OPS_SECRET, "")
+    if len(raw) < MIN_SECRET_LENGTH:
+        if raw:
+            log.warning(
+                "%s 太短（<%d 字节），运维接口未启用",
+                ENV_OPS_SECRET, MIN_SECRET_LENGTH,
+            )
+        return None
+    return raw.encode()
+
+
+def _require_node_id(payload: Mapping[str, Any]) -> str:
+    """从请求体取 ``node_id``，缺失即拒。"""
+    node_id = payload.get("node_id")
+    if not isinstance(node_id, str) or not node_id:
+        raise _Reject(400, RuleId.FM_CARDCARD_INVALID, "missing node_id")
+    return node_id
+
+
 # ---------------------------------------------------------------------------
 # 网关
 # ---------------------------------------------------------------------------
@@ -290,7 +317,8 @@ class Gateway:
                  server_config: ServerConfig | None = None,
                  authenticator: Authenticator | None = None,
                  transport: InProcessTransport | None = None,
-                 event_hub: EventHub | None = None) -> None:
+                 event_hub: EventHub | None = None,
+                 ops_secret: bytes | None = None) -> None:
         self.app = app
         self.server_config = server_config or app.config.server
         self.transport = transport or app.transport
@@ -300,6 +328,14 @@ class Gateway:
         )
         self.rate_limiter = RateLimiter(app.config.policy.rate_limit_per_second)
         self.stats = GatewayStats()
+
+        # 运维面：**默认关闭**。没配密钥时 /nxs/ops/* 返回 501，
+        # 攻击面上就不存在这个端点，而不是"存在但拒绝"。
+        if ops_secret is None:
+            ops_secret = _ops_secret_from_env()
+        self.ops_enabled = bool(ops_secret)
+        if ops_secret:
+            self.authenticator.set_secret(OPS_NODE_ID, ops_secret)
 
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -441,6 +477,73 @@ class Gateway:
             return self._stream_gen.get(node_id, 0) == gen
 
     # ------------------------------------------------------------------
+    # 注册：域裁定与审计
+    # ------------------------------------------------------------------
+
+    def resolve_domain(self, card: RoleCard) -> RoleCard:
+        """裁定节点最终归属的信任域。
+
+        ⭐ **配置优先于节点自报。** 这个顺序不能反。
+
+        为什么：``domain`` 决定这个节点适用哪一组「域 × 类型」矩阵规则。
+        如果让节点自己决定，它可以声称 ``domain="hub"``——
+        而 hub 域通常拥有发布权（``hub → zone-a`` 可以派任务）。
+        运维批准时如果没细看，就等于给了一个可发任务的节点。
+
+        **信任域是运维划的边界，不是节点自己挑的房间。**
+
+        配置里没有该节点时（纯自注册的新节点），才采信它自报的域——
+        那时它一定处于未批准状态，运维能在 ``nxs status`` 里看到
+        它自称属于哪个域，再决定批不批。
+        """
+        from dataclasses import replace as _replace
+
+        configured = self.app.config.nodes.get(card.node_id)
+        if configured is None:
+            return card
+        if configured.domain == card.domain:
+            return card
+        log.info(
+            "节点 %s 自报域 %r 被配置覆盖为 %r",
+            card.node_id, card.domain, configured.domain,
+        )
+        return _replace(card, domain=configured.domain)
+
+    def record_registration(self, node_id: str, outcome: str, record: Any) -> None:
+        """记录一次注册事件。
+
+        注册是安全相关的运维事件（等于"一个节点声明了它能做什么"），
+        必须留痕。**但不记录角色卡内容**——能力描述是节点自己写的文本，
+        记进审计等于让未验证的输入进入唯一的追溯依据。
+
+        只记：谁、什么结果、第几版、是否已批准。
+        """
+        try:
+            self.app.audit.append(make_record(
+                outcome=f"register:{outcome}",
+                from_node=node_id, to_node=node_id,
+                revision=record.revision,
+                approved=str(record.approved),
+                domain=record.card.domain,
+            ))
+        except AuditError as exc:  # pragma: no cover - 磁盘故障
+            log.warning("审计写入失败，注册事件未记录: %s", exc)
+
+    def record_ops(self, action: str, target: str) -> None:
+        """记录一次运维动作。
+
+        运维动作直接改变权限（批准/吊销），**必须留痕**——
+        否则"谁在什么时候给谁放了行"将无法回答。
+        """
+        try:
+            self.app.audit.append(make_record(
+                outcome=f"ops:{action}",
+                from_node=OPS_NODE_ID, to_node=target,
+            ))
+        except AuditError as exc:  # pragma: no cover - 磁盘故障
+            log.warning("审计写入失败，运维动作未记录: %s", exc)
+
+    # ------------------------------------------------------------------
     # 审计
     # ------------------------------------------------------------------
 
@@ -580,6 +683,13 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_events(full_path)
                 return
 
+            # ★ 运维面也在请求槽之外，且**不限流**。
+            #   理由：节点流量洪水时正是最需要运维介入的时候。
+            #   若运维通道与节点共用配额，故障时就会被自己的保护机制锁在门外。
+            if path.startswith(f"{PREFIX}/ops/"):
+                self._handle_ops(path[len(f"{PREFIX}/ops/"):], method, full_path)
+                return
+
             if not gw.acquire_request_slot():
                 raise _Reject(503, RuleId.QT_CONNECTION_LIMIT, "too many concurrent requests")
             try:
@@ -591,6 +701,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._handle_result(full_path)
                 elif path == f"{PREFIX}/fail" and method == "POST":
                     self._handle_fail(full_path)
+                elif path == f"{PREFIX}/register" and method == "POST":
+                    self._handle_register(full_path)
                 elif path in _KNOWN_PATHS:
                     self._reject_status(405, "method not allowed")
                 else:
@@ -798,6 +910,151 @@ class _Handler(BaseHTTPRequestHandler):
         return actual
 
     # ------------------------------------------------------------------
+    # 端点：运维（M14）
+    # ------------------------------------------------------------------
+
+    def _handle_ops(self, action: str, method: str, full_path: str) -> None:
+        """运维动作。**必须由运维身份签名**，且不经节点配额。
+
+        四个动作：
+        * ``approve`` —— 批准某节点（审批针对的是它当前那张角色卡）
+        * ``revoke`` —— 吊销某节点，立即生效
+        * ``release`` —— 释放过期租约（断电恢复不及时时的兜底）
+        * ``nodes`` —— 列出所有节点及其状态
+
+        **为什么这些动作不做限流、不占并发槽**：节点流量洪水时正是最需要
+        运维介入的时候。若运维通道与节点共用配额，故障时运维会被自己的
+        保护机制锁在门外——那是最糟的失败模式。
+        """
+        if not self.gw.ops_enabled:
+            self._reject_status(
+                501, "ops endpoints disabled (set NXS_OPS_SECRET to enable)")
+            return
+        if method != "POST":
+            self._reject_status(405, "method not allowed")
+            return
+
+        body = self._read_body()
+        self._authenticate_ops(full_path, body)
+        payload = self._parse_json(body) if body else {}
+
+        if action == "approve":
+            node_id = _require_node_id(payload)
+            record = self.gw.app.registry.approve(node_id)
+            self.gw.record_ops("approve", node_id)
+            self._send_json(200, {
+                "node_id": node_id, "approved": record.approved,
+                "revision": record.revision, "state": record.state,
+                "domain": record.card.domain,
+            })
+        elif action == "revoke":
+            node_id = _require_node_id(payload)
+            record = self.gw.app.registry.revoke(node_id)
+            # 吊销必须同时作用于认证层，否则旧凭据还能继续签名通过
+            self.gw.authenticator.revoke(node_id)
+            self.gw.record_ops("revoke", node_id)
+            self._send_json(200, {
+                "node_id": node_id, "approved": record.approved,
+                "state": record.state,
+            })
+        elif action == "release":
+            result = self.gw.app.sweep()
+            self.gw.record_ops("release", "")
+            self._send_json(200, result)
+        elif action == "nodes":
+            self._send_json(200, {"nodes": [
+                {
+                    "node_id": rec.card.node_id,
+                    "domain": rec.card.domain,
+                    "state": rec.state,
+                    "approved": rec.approved,
+                    "revision": rec.revision,
+                    "last_seen": rec.last_seen,
+                    "capabilities": [c.type for c in rec.card.capabilities],
+                    "max_response_level": str(rec.card.constraints.max_response_level),
+                }
+                for rec in self.gw.app.registry.all_records()
+            ]})
+        else:
+            self._reject_status(501, f"unknown ops action: {action}")
+
+    def _authenticate_ops(self, full_path: str, body: bytes) -> str:
+        """校验运维身份。
+
+        与节点认证的区别：**不查批准状态、不计速率**，但必须是以
+        ``__ops__`` 身份签名的请求。用节点密钥签名调用运维接口会被拒——
+        这正是"被管理者不能给自己批条子"。
+        """
+        headers = {name: self.headers.get(name, "")
+                   for name in httpsig.SIGNATURE_HEADERS}
+        sender = self.gw.authenticator.verify_request(
+            method=self.command, path=full_path, headers=headers, body=body,
+        )
+        if sender != OPS_NODE_ID:
+            # 用 PolicyDenied 的固定措辞，不说明"你身份不对"还是"你没权限"——
+            # 两者都不该让调用方区分
+            raise _Reject(403, RuleId.MX_ISSUER_NOT_ALLOWED,
+                          f"ops action by non-ops identity {sender!r}")
+        return sender
+
+    # ------------------------------------------------------------------
+    # 端点：register（自注册 + 心跳）
+    # ------------------------------------------------------------------
+
+    def _handle_register(self, full_path: str) -> None:
+        """节点自注册。兼作心跳。
+
+        三道校验，顺序有意义：
+
+        ① **签名** —— 你是谁（请求签名，因为这里没有 Task 可签）
+        ② **身份一致** —— 卡片里的 ``node_id`` 必须等于签名身份。
+           否则 node-b 签个名就能提交一张 ``node_id=node-a`` 的卡片，
+           直接覆盖 node-a 的注册。
+        ③ **域由配置裁定** —— 见 :meth:`Gateway._domain_for`
+
+        之后交给 ``registry.register_from_node``（不可信入口）：
+        它保证**自注册永远不带来批准**，且卡片一变就撤销批准。
+
+        为什么 register 兼作心跳而不是单独开一个端点：
+        节点上报角色卡本来就是"我还活着，这是我当前的能力"，
+        分开会让两者可能不一致。协议 §10 也是这么定的。
+        """
+        body = self._read_body()
+        sender = self._authenticate(full_path, body=body)   # ① 签名
+        payload = self._parse_json(body)
+
+        raw_card = payload.get("card")
+        if not isinstance(raw_card, Mapping):
+            raise _Reject(400, RuleId.FM_CARDCARD_INVALID, "missing card")
+        try:
+            card = RoleCard.from_dict(raw_card, "register.card")
+        except ConfigError as exc:
+            # 角色卡非法要报 FM-CARD-03，不能与"信封格式非法"混用同一个码——
+            # 运维看错误码就该知道是卡片写错了还是报文写错了
+            raise _Reject(400, RuleId.FM_CARDCARD_INVALID, str(exc)) from exc
+
+        if card.node_id != sender:                          # ② 身份一致
+            # 报"角色卡非法"而不是"冒充"，与既有拒绝体保持一致：
+            # 具体是哪种不符不对外说明
+            raise _Reject(403, RuleId.FM_CARDCARD_INVALID,
+                          f"card.node_id={card.node_id!r} != signer={sender!r}")
+
+        card = self.gw.resolve_domain(card)                 # ③ 域由配置裁定
+        record, outcome = self.gw.app.registry.register_from_node(card)
+
+        self.gw.record_registration(sender, outcome, record)
+        self._send_json(200, {
+            "outcome": outcome,
+            "approved": record.approved,
+            "revision": record.revision,
+            "state": record.state,
+            "domain": record.card.domain,
+            # 明确告诉节点"待批准"该怎么做——否则它只能盲目重试
+            "hint": ("waiting for operator approval"
+                     if not record.approved else "ready"),
+        })
+
+    # ------------------------------------------------------------------
     # 请求体
     # ------------------------------------------------------------------
 
@@ -856,6 +1113,7 @@ class _Handler(BaseHTTPRequestHandler):
 _KNOWN_PATHS = frozenset({
     f"{PREFIX}/poll", f"{PREFIX}/events", f"{PREFIX}/publish",
     f"{PREFIX}/result", f"{PREFIX}/fail", f"{PREFIX}/health",
+    f"{PREFIX}/register",
 })
 
 

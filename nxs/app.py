@@ -43,6 +43,13 @@ class Transport(Protocol):
     同进程运行，也能在真实部署里走 HTTP。
     """
 
+    def register(self, card: RoleCard) -> dict:
+        """注册（或刷新）自己的角色卡。兼作心跳。
+
+        返回至少包含 ``outcome`` 与 ``approved`` 两个键——
+        节点需要知道"我到底被批准了没有"，否则它只能盲目重试。
+        """
+
     def publish(self, *, from_node: str, to_node: str, task_type: str,
                 params: dict, session_id: str = "",
                 idempotency_key: str | None = None) -> DeliveryResult:
@@ -190,6 +197,25 @@ class InProcessTransport:
 
     def __init__(self, app: NexusApp) -> None:
         self._app = app
+
+    # -- 注册 --
+
+    def register(self, card: RoleCard) -> dict:
+        """同进程注册：走**可信**入口。
+
+        这里没有"节点自己说了算"的问题——调用方与 hub 在同一个进程里，
+        中间不存在信任边界。真实部署走 HTTP，那条路径由网关用
+        ``registry.register_from_node``（不可信入口）处理。
+        """
+        app = self._app
+        record = app.registry.register(
+            card, approved=card.domain in app._approved_domains,
+        )
+        return {
+            "outcome": "registered",
+            "approved": record.approved,
+            "revision": record.revision,
+        }
 
     # -- 投递 --
 

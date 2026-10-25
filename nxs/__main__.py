@@ -217,6 +217,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
           f" · 心跳 {cfg.sse_keepalive_seconds}s")
     _info(f"  限额      : 体 {cfg.max_body_bytes}B · "
           f"并发 {cfg.max_concurrent_requests} · 流 {cfg.max_sse_streams}")
+    _info(f"  运维接口  : "
+          + (_color("启用", "ok") if gateway.ops_enabled
+             else _color("未启用（未设置 NXS_OPS_SECRET）", "warn")))
     _info("")
     _info(_color(f"开始常驻（Ctrl-C 退出）", "dim"))
 
@@ -273,6 +276,78 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# ops（远程运维）
+# ---------------------------------------------------------------------------
+
+def cmd_ops(args: argparse.Namespace) -> int:
+    """运维动作：批准 / 吊销 / 释放租约 / 查节点。
+
+    **通过 HTTP 打到运行中的 hub**，所以不需要停服务、不需要碰它的数据库。
+    凭据来自环境变量 ``NXS_OPS_SECRET``；未配置时 hub 的运维端点整体关闭。
+    """
+    import os
+
+    from .edge.client import OpsClient
+    from .mgmt.config import ENV_OPS_SECRET, MIN_SECRET_LENGTH
+
+    url = args.url or os.environ.get("NXS_HUB_URL", "")
+    if not url:
+        _err("缺少 hub 地址：用 --url 指定，或设置环境变量 NXS_HUB_URL")
+        _err("例如：--url https://nxs.example.com/nxs")
+        return 2
+
+    raw_secret = os.environ.get(ENV_OPS_SECRET, "")
+    if len(raw_secret) < MIN_SECRET_LENGTH:
+        _err(f"缺少运维凭据：环境变量 {ENV_OPS_SECRET} 未设置或过短"
+             f"（需 ≥{MIN_SECRET_LENGTH} 字节）")
+        _err("hub 端必须用**同一个值**启动，否则运维端点不会开启")
+        return 2
+
+    try:
+        ops = OpsClient(url, secret=raw_secret.encode())
+        if args.action == "nodes":
+            rows = ops.nodes()
+            if not rows:
+                _info(_color("（注册表为空）", "dim"))
+                return 0
+            _info(_color(f"{'节点':<14}{'域':<12}{'状态':<10}{'批准':<6}"
+                         f"{'版本':<6}能力", "b"))
+            for r in rows:
+                mark = _color("✓", "ok") if r["approved"] else _color("·", "warn")
+                caps = ",".join(r["capabilities"]) or "-"
+                _info(f"{r['node_id']:<14}{r['domain']:<12}{r['state']:<10}"
+                      f"{mark:<6}{r['revision']:<6}{caps}")
+            return 0
+
+        if args.action in ("approve", "revoke"):
+            if not args.node:
+                _err(f"{args.action} 需要节点 ID")
+                return 2
+            result = (ops.approve(args.node) if args.action == "approve"
+                      else ops.revoke(args.node))
+            verb = "已批准" if args.action == "approve" else "已吊销"
+            _ok(f"{verb} {result['node_id']}  "
+                f"state={result['state']} approved={result['approved']}")
+            if args.action == "approve":
+                _info(_color(
+                    "⚠ 批准绑定的是它**当前那张角色卡**——"
+                    "若节点之后改了卡片，批准会自动撤销，需要重新批准。", "dim"))
+            return 0
+
+        if args.action == "release":
+            result = ops.release()
+            _ok(f"已执行维护：标记 stale {result.get('marked_stale', 0)} 个 · "
+                f"释放过期租约 {result.get('released', 0)} 个")
+            return 0
+
+        _err(f"未知动作 {args.action}")
+        return 2
+    except NexusError as exc:
+        _err(str(exc))
+        return 1
+
+
+# ---------------------------------------------------------------------------
 # 参数解析
 # ---------------------------------------------------------------------------
 
@@ -325,6 +400,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("status", help="查看节点状态与审计摘要")
     add_common(sp)
     sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser(
+        "ops", help="远程运维：批准 / 吊销 / 释放租约 / 查节点")
+    sp.add_argument("action", choices=["approve", "revoke", "release", "nodes"],
+                    help="运维动作")
+    sp.add_argument("node", nargs="?", default=None,
+                    help="节点 ID（approve / revoke 需要）")
+    sp.add_argument("--url", default=None,
+                    help="hub 地址，如 https://nxs.example.com/nxs"
+                         "（也可用环境变量 NXS_HUB_URL）")
+    sp.set_defaults(func=cmd_ops)
 
     return p
 

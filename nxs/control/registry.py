@@ -7,10 +7,28 @@
 三条设计约束
 ------------
 1. **新节点不能自行加入。** 注册后 ``approved=False``，需人工批准
-   （v0.1 通过配置文件里的 ``approved`` 字段或运维命令完成）。
-   这与"已知的少数节点 + 预配置信任"这个前提一致。
+   （配置里的域白名单，或运维接口）。这与"已知的少数节点 + 预配置信任"
+   这个前提一致。
 2. **stale 不删除，只标记。** 查不到历史状态就没法回答"当时它在线吗"。
 3. **能力索引来自配置，不来自代码。** 节点集合变化不应触发任何代码修改。
+
+⭐ 两个注册入口，语义必须分开
+------------------------------
+============================  ==========================================
+方法                          来源与信任
+============================  ==========================================
+:meth:`register`             **可信**：配置文件或运维动作
+:meth:`register_from_node`   **不可信**：节点经 HTTP 自报
+============================  ==========================================
+
+分开的理由是一个具体的提权路径：v0.1 的 ``register`` 里写着
+``approved = existing.approved or approved``——**已批准的节点重发一次
+注册就能改自己的角色卡而保留批准**。在"只有运维能改配置"的年代这没问题，
+但一旦开放自注册，任何已批准节点都能把 ``max_response_level``
+从 summary 抬到 full_text，一次 HTTP 请求完成提权。
+
+所以：**节点自注册永远不带来批准；卡片一有变化，批准立即撤销。**
+审批是对"这张卡片"的批准，不是对这个节点 ID 的终身授权。
 """
 
 from __future__ import annotations
@@ -22,6 +40,11 @@ from ..core.models import RoleCard
 from ..core.models import Level
 from ..ports.stores import NodeRecord, NodeState, RegistryStore
 from ..core.envelope import now_iso, parse_iso
+
+#: :meth:`Registry.register_from_node` 的三种结果。
+REGISTER_CREATED = "created"          # 首次注册，待批准
+REGISTER_UNCHANGED = "unchanged"      # 卡片未变，仅刷新心跳
+REGISTER_CARD_CHANGED = "card_changed"  # 卡片变了，批准已撤销
 
 
 class Registry:
@@ -42,10 +65,13 @@ class Registry:
     # ------------------------------------------------------------------
 
     def register(self, card: RoleCard, *, approved: bool = False) -> NodeRecord:
-        """注册或更新一个节点。
+        """注册或更新一个节点 —— **可信来源**（配置 / 运维动作）。
 
-        **默认不批准。** 首次注册需要显式 ``approved=True``
-        （通常由运维动作或配置声明给出），这保证了"新节点不能自行加入"。
+        与 :meth:`register_from_node` 的区别仅在"卡片变化时怎么处理批准"：
+        这里是运维改的，按运维给的 ``approved`` 走；那里是节点自己说的，
+        一律撤销批准。
+
+        **不要用本方法处理 HTTP 入站的注册请求** —— 那会让节点能自行提权。
         """
         existing = self._store.get(card.node_id)
         if existing is None:
@@ -54,17 +80,64 @@ class Registry:
                 revision=1, approved=approved,
             )
         else:
+            card_changed = existing.card != card
             record = replace(
                 existing,
                 card=card,
                 state=NodeState.ALIVE,
                 last_seen=now_iso(),
-                revision=existing.revision + 1,
-                # 已批准的节点更新卡片时保持批准状态——否则每次改能力都要重新审批
-                approved=existing.approved or approved,
+                revision=existing.revision + 1 if card_changed else existing.revision,
+                approved=approved if card_changed else (existing.approved or approved),
             )
         self._store.put(record)
         return record
+
+    def register_from_node(self, card: RoleCard) -> tuple[NodeRecord, str]:
+        """节点自注册 —— **不可信来源**。返回 ``(记录, 结果)``。
+
+        三条规则：
+
+        * **首次注册**：``approved=False``，等运维批准
+        * **卡片未变**：只刷新心跳与存活状态，批准状态不动
+          （这让节点可以频繁上报，不必担心掉批准）
+        * **卡片有变化**：``approved=False`` —— **即使该节点原本已批准**
+
+        第三条是安全的支点：审批的对象是**那张卡片**，不是那个 node_id。
+        节点想扩大自己的能力或数据等级，就得重新走一次审批。
+
+        为什么不判断"这次变更是收紧还是放宽"：那需要一套权限偏序比较，
+        而任何比较逻辑写错都直接变成提权漏洞。**宁可让"自我降级"也走一次
+        审批，也不留一个可能判错的自动放行。** 换取的是实现上不可能出错。
+        """
+        existing = self._store.get(card.node_id)
+
+        if existing is None:
+            record = NodeRecord(
+                card=card, state=NodeState.ALIVE, last_seen=now_iso(),
+                revision=1, approved=False,     # ★ 自注册永不带来批准
+            )
+            self._store.put(record)
+            return record, REGISTER_CREATED
+
+        if existing.card == card:
+            # 卡片没变：按心跳处理。保留批准状态与 revision。
+            record = replace(
+                existing, state=NodeState.ALIVE, last_seen=now_iso(),
+            )
+            self._store.put(record)
+            return record, REGISTER_UNCHANGED
+
+        # 卡片变了：撤销批准，revision 前进
+        record = replace(
+            existing,
+            card=card,
+            state=NodeState.ALIVE,
+            last_seen=now_iso(),
+            revision=existing.revision + 1,
+            approved=False,                 # ★ 关键：不继承旧批准
+        )
+        self._store.put(record)
+        return record, REGISTER_CARD_CHANGED
 
     def approve(self, node_id: str) -> NodeRecord:
         """人工批准一个节点接入。"""

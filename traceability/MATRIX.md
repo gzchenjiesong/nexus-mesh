@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **196** 个测试方法（已声明覆盖）· **77** 个纵向编号项（60 功能点 + 17 模块需求）
+共 **232** 个测试方法（已声明覆盖）· **92** 个纵向编号项（72 功能点 + 20 模块需求）
 
 ## 设计目标
 
@@ -56,15 +56,21 @@ _（未实现，暂无功能点）_
 
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
-| **M3.F1** | 角色卡注册（默认不批准） | `nxs/control/registry.py:Registry.register` | G1,G5 | P0 | S9 | 2 |
+| **M3.F1** | 角色卡注册（默认不批准） | `nxs/control/registry.py:Registry.register` | G1,G5 | P0 | S9 | 3 |
 | **M3.F2** | 人工批准 | `nxs/control/registry.py:Registry.approve` | G1,G5 | P0 | S9 | 2 |
 | **M3.F3** | 凭据吊销（保留记录） | `nxs/control/registry.py:Registry.revoke` | G2 | P0 | S10 | 2 |
 | **M3.F4** | 心跳与三档存活状态 | `nxs/control/registry.py:Registry.heartbeat/sweep/resurrect` | G1 | P1 | — | 1 |
 | **M3.F5** | 能力索引（只含可路由节点） | `nxs/control/registry.py:Registry.capability_index` | G1,G5 | P1 | — | 1 |
 | **M3.F6** | 可路由性检查 | `nxs/control/registry.py:Registry.require_routable` | G3 | P0 | — | 1 |
 | **M3.F7** | 角色卡持久化（重启后注册表仍在） | `nxs/backends/sqlite/SqliteRegistryStore` | G1,G5 | P0 | — | 2 |
-| **M3.R1** | 新节点不能自行加入——注册后需人工批准才可参与 | （由 M3.F1, M3.F2, M3.F6 实现） | G2,G5 | P0 | S9 | 3 |
+| **M3.F8** | 节点自注册（不可信入口，永不带来批准） | `nxs/control/registry.py:Registry.register_from_node` | G1,G5 | P0 | S9,S12 | 9 |
+| **M3.F9** | 注册身份一致性（卡片 node_id 必须等于签名身份） | `nxs/edge/gateway.py:_Handler._handle_register` | G2 | P0 | S12 | 2 |
+| **M3.F10** | 信任域由配置裁定（自报域不足以改变归属） | `nxs/edge/gateway.py:Gateway.resolve_domain` | G2,G5 | P0 | S13 | 2 |
+| **M3.F11** | 注册兼作心跳（卡片不变只刷新存活） | `nxs/control/registry.py:Registry.register_from_node（unchanged 路径）` | G1 | P1 | — | 1 |
+| **M3.F12** | 注册事件审计（只记结果与版本，不记卡片内容） | `nxs/edge/gateway.py:Gateway.record_registration` | G3 | P1 | — | 1 |
+| **M3.R1** | 新节点不能自行加入——注册后需人工批准才可参与 | （由 M3.F1, M3.F2, M3.F6 实现） | G2,G5 | P0 | S9 | 4 |
 | **M3.R2** | 吊销不删除记录（须能回答「当时是否在线、是否被吊销」） | （由 M3.F3, M3.F4 实现） | G3 | P0 | S10 | 1 |
+| **M3.R3** | 审批针对「那张角色卡」而非 node_id——卡片一变批准即失效 | （由 M3.F8 实现） | G2 | P0 | S12 | 1 |
 
 ### M4 匹配器
 
@@ -183,9 +189,19 @@ _（未实现，暂无功能点）_
 
 ### M14 运维接口
 
-平面 `管理面` · 实现 `nxs/mgmt/ops（未建）` · 状态 **未实现**
+平面 `管理面` · 实现 `nxs/edge/gateway.py（ops 端点）· nxs/edge/client.py:OpsClient` · 状态 **已实现**
 
-_（未实现，暂无功能点）_
+| 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
+|---|---|---|---|---|---|---|
+| **M14.F1** | 运维身份与端点开关（未配密钥则整体不存在） | `nxs/edge/gateway.py:Gateway.ops_enabled/_ops_secret_from_env` | G3,G2 | P0 | — | 5 |
+| **M14.F2** | 远程批准节点（绑定当前那张角色卡） | `nxs/edge/gateway.py:_Handler._handle_ops（approve）` | G3 | P0 | — | 4 |
+| **M14.F3** | 远程吊销（注册表与认证层同时生效） | `nxs/edge/gateway.py:_Handler._handle_ops（revoke）` | G3 | P0 | S10 | 1 |
+| **M14.F4** | 远程释放过期租约 | `nxs/edge/gateway.py:_Handler._handle_ops（release）` | G3 | P1 | — | 1 |
+| **M14.F5** | 节点状态查询（含未批准节点） | `nxs/edge/gateway.py:_Handler._handle_ops（nodes）` | G3 | P1 | — | 2 |
+| **M14.F6** | 运维动作审计（谁在何时给谁放了行） | `nxs/edge/gateway.py:Gateway.record_ops` | G3 | P0 | — | 1 |
+| **M14.F7** | 运维 CLI（nxs ops） | `nxs/__main__.py:cmd_ops` | G3 | P1 | — | 3 |
+| **M14.R1** | 运维通道不与节点共享配额——故障时运维必须进得来 | （由 M14.F1, M14.F2, M14.F3 实现） | G3 | P0 | — | 2 |
+| **M14.R2** | 被管理者不能给自己批条子：节点密钥无法调用运维接口 | （由 M14.F2 实现） | G2,G3 | P0 | — | 2 |
 
 ## 代码准则
 
@@ -226,9 +242,11 @@ _（未实现，暂无功能点）_
 | **S6** | 产出等级由产出方标注，发起方无法指定 | M10.R1 |
 | **S7** | 回传内容的 semantics 被强制改写为 data | M10.F2, M10.R2 |
 | **S8** | 自由文本字段受长度上限约束，并做指令前缀剥离与控制字符清理 | M10.F3, M10.R2 |
-| **S9** | 新节点不能自行加入——注册后需人工批准 | M3.F1, M3.F2, M3.R1 |
-| **S10** | 凭据吊销立即生效，不等过期 | M1.F6, M3.F3, M3.R2 |
+| **S9** | 新节点不能自行加入——注册后需人工批准 | M3.F1, M3.F2, M3.F8, M3.R1 |
+| **S10** | 凭据吊销立即生效，不等过期 | M1.F6, M3.F3, M14.F3, M3.R2 |
 | **S11** | 回传时以服务端持有的任务为准，节点无法冒领他人的任务 | M1.F11 |
+| **S12** | 节点自注册不能带来批准，角色卡一经变更批准立即撤销 | M3.F8, M3.F9, M3.R3 |
+| **S13** | 信任域由运维配置裁定，节点无法通过自报域获得更多权限 | M3.F10 |
 
 ## 尚未实现的模块
 
@@ -236,7 +254,6 @@ _（未实现，暂无功能点）_
 - **M4** 匹配器 —— nxs/control/matcher（未建）
 - **M9** 产物通道 —— nxs/data/artifact（未建）
 - **M13** 可观测 —— nxs/mgmt/observ（未建）
-- **M14** 运维接口 —— nxs/mgmt/ops（未建）
 
 > 这些模块暂无功能点，因此不参与覆盖统计。
 > 实现时应先在 `registry.py` 中登记功能点，再写测试并挂 `@covers`。

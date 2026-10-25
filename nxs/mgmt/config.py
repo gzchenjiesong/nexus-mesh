@@ -32,6 +32,15 @@ ENV_SECRET_PREFIX = "NXS_SECRET_"
 
 MIN_SECRET_LENGTH = 16
 
+#: 运维身份的保留 ID。**真实节点不可占用它。**
+#:
+#: 运维接口（批准/吊销/释放租约）用这个身份签名，凭据来自 ``NXS_OPS_SECRET``。
+#: 用双下划线包围是刻意的：它不像任何正常的节点命名习惯，不会与真实节点混淆。
+OPS_NODE_ID = "__ops__"
+
+#: 运维密钥的环境变量名。**未设置时运维接口整体关闭**（默认无攻击面）。
+ENV_OPS_SECRET = "NXS_OPS_SECRET"
+
 #: 允许的存储后端
 QUEUE_BACKENDS = ("memory", "sqlite")
 AUDIT_BACKENDS = ("file",)
@@ -449,6 +458,12 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
         )
         if card.node_id in nodes:
             raise ConfigError(f"{where}: 节点 ID 重复 '{card.node_id}'")
+        if card.node_id == OPS_NODE_ID:
+            # 运维身份是保留的。若允许真实节点占用它，
+            # 该节点就能调用运维接口（批准/吊销），等于把钥匙交给被管理者。
+            raise ConfigError(
+                f"{where}: '{OPS_NODE_ID}' 是保留的运维身份，不可作为节点 ID"
+            )
         nodes[card.node_id] = card
         domains.add(card.domain)
 
