@@ -202,6 +202,22 @@ class Registry:
         rec = self._store.get(node_id)
         return rec.card if rec else None
 
+    def domain_of_safe(self, node_id: str) -> str:
+        """取节点的域；未知节点返回空字符串。
+
+        与 :meth:`require_card` 的区别：**不抛异常**。
+
+        为什么需要它：匹配器需要来源域来算"同域优先"，但那只是一个
+        排序偏好。如果为了它去要求"来源节点必须存在"，就会把
+        "节点存不存在"变成一个可以在排序阶段触发的分支——
+        而排序不该有失败路径（失败路径会泄漏节点是否注册）。
+
+        未知节点返回空字符串后，``same_domain`` 恒为 False，
+        所有候选按后续几级排序，行为完全确定。
+        """
+        rec = self._store.get(node_id)
+        return rec.card.domain if rec else ""
+
     def require_card(self, node_id: str) -> RoleCard:
         rec = self._store.get(node_id)
         if rec is None:

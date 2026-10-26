@@ -338,6 +338,99 @@ class TestRegisterEndpointHardening:
 
 class TestRegistryLayer:
 
+    @covers("M1.F18")
+    def test_secret_can_live_only_in_environment(self, monkeypatch):
+        """★ 凭据只在环境变量里也要能用。
+
+        这条来自一次真实的部署踩坑：v0.3 让节点能自注册了（角色卡不用
+        写进 yaml），但 ``load_config`` 只从 ``nodes`` 列表读凭据——
+        于是"新节点仍要写进 yaml"，自注册等于白做。
+
+        HMAC 的固有性质决定了服务端**必须**知道对方密钥，
+        所以这里做的不是"取消预置"，而是把预置降到最小摩擦：
+        在 ``nxs.env`` 里加一行即可，**不用动 yaml、不用写角色卡**。
+        """
+        monkeypatch.setenv("NXS_SECRET_LAPTOP_TWO",
+                           "env-only-secret-0123456789abcdef")
+
+        from nxs.backends.memory import MemoryRegistryStore
+        from nxs.edge.auth import Authenticator
+        from nxs.edge.httpsig import sign_request
+        from nxs.edge.gateway import PREFIX
+
+        auth = Authenticator({})           # 配置里没有任何凭据
+        body = b'{"ok":true}'
+        headers = sign_request(
+            b"env-only-secret-0123456789abcdef", method="POST",
+            path=f"{PREFIX}/register", node_id="laptop-two", body=body,
+        )
+        sender = auth.verify_request(
+            method="POST", path=f"{PREFIX}/register", headers=headers, body=body,
+        )
+        assert sender == "laptop-two"
+
+    @covers("M1.F18")
+    def test_short_env_secret_is_treated_as_missing(self, monkeypatch):
+        """过短的环境变量凭据视为未配置 —— 半个密钥比没有更危险。"""
+        monkeypatch.setenv("NXS_SECRET_TINY", "short")
+
+        from nxs.edge.auth import Authenticator
+        from nxs.edge.gateway import PREFIX
+        from nxs.edge.httpsig import sign_request
+
+        auth = Authenticator({})
+        body = b"{}"
+        headers = sign_request(
+            b"short", method="POST", path=f"{PREFIX}/register",
+            node_id="tiny", body=body,
+        )
+        import pytest as _pytest
+
+        from nxs.core.errors import RuleId
+        from nxs.edge.auth import AuthFailed
+
+        with _pytest.raises(AuthFailed) as excinfo:
+            auth.verify_request(method="POST", path=f"{PREFIX}/register",
+                                headers=headers, body=body)
+        assert excinfo.value.rule_id is RuleId.AU_SIGNATURE_INVALID
+
+    @covers("M1.F18")
+    def test_configured_secret_takes_precedence(self, monkeypatch):
+        """配置里有凭据时以配置为准，环境变量不得覆盖。
+
+        反过来说：环境变量是**回落**，不是覆盖。
+        否则一个残留的环境变量就能悄悄改掉某个节点的凭据。
+        """
+        monkeypatch.setenv("NXS_SECRET_BOTH", "env-version-secret-0123456789")
+
+        from nxs.edge.auth import Authenticator
+        from nxs.edge.gateway import PREFIX
+        from nxs.edge.httpsig import sign_request
+
+        auth = Authenticator({"both": b"config-version-secret-0123456789"})
+        body = b"{}"
+
+        # 环境变量那把签不过
+        headers_env = sign_request(b"env-version-secret-0123456789",
+                                   method="POST", path=f"{PREFIX}/register",
+                                   node_id="both", body=body)
+        from nxs.core.errors import RuleId
+        from nxs.edge.auth import AuthFailed
+
+        with pytest.raises(AuthFailed) as excinfo:
+            auth.verify_request(method="POST", path=f"{PREFIX}/register",
+                                headers=headers_env, body=body)
+        assert excinfo.value.rule_id is RuleId.AU_SIGNATURE_INVALID
+
+        # 配置那把能签过
+        headers_cfg = sign_request(b"config-version-secret-0123456789",
+                                   method="POST", path=f"{PREFIX}/register",
+                                   node_id="both", body=body)
+        assert auth.verify_request(
+            method="POST", path=f"{PREFIX}/register",
+            headers=headers_cfg, body=body,
+        ) == "both"
+
     @covers("M3.F8", "S12")
     def test_register_from_node_never_approves(self):
         from nxs.backends.memory import MemoryRegistryStore

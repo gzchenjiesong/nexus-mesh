@@ -1,6 +1,6 @@
-"""七步验收 Demo —— 项目的可执行说明书。
+"""八步验收 Demo —— 项目的可执行说明书。
 
-``make demo`` 跑的就是这个文件。七步里最要紧的是 **4、5、6 步**：
+``make demo`` 跑的就是这个文件。八步里最要紧的是 **4、5、6 步**：
 它们验证的是这个项目**区别于普通消息队列**的地方。
 
     1  启动核心
@@ -18,7 +18,7 @@
 * ``nxs demo``       —— 同进程传输（快，无网络依赖）
 * ``nxs demo --net`` —— **同一套断言，走真实 HTTP**
 
-``--net`` 不是另一份实现：七步代码完全共用，只有 ``transports`` 换了。
+``--net`` 不是另一份实现：八步代码完全共用，只有 ``transports`` 换了。
 这正是"传输可替换"的证明——如果节点逻辑真的与传输解耦，
 换个传输跑同一套断言应当不需要改任何一行流程代码。
 """
@@ -148,9 +148,9 @@ def make_transports(app: NexusApp, *, net: bool) -> tuple[dict[str, Any], Any]:
 # ---------------------------------------------------------------------------
 
 def main(net: bool = False, config_path: str | None = None) -> int:
-    total = 7
+    total = 8
     mode = "HTTP 传输（真实网络）" if net else "同进程传输"
-    print(c("\n  Nexus Mesh · 七步验收 Demo", "b"))
+    print(c("\n  Nexus Mesh · 八步验收 Demo", "b"))
     print(c(f"  传输：{mode}", "dim"))
     print(c("  " + "─" * 62, "dim"))
 
@@ -172,15 +172,15 @@ def main(net: bool = False, config_path: str | None = None) -> int:
         for f in failures:
             print(c(f"    · {f}", "bad"))
         return 1
-    print(c("  七步全部通过 ✓", "ok"))
+    print(c("  八步全部通过 ✓", "ok"))
     print(c("  其中第 4、5、6 步是安全断言——它们才是这个项目的意义所在。", "dim"))
     return 0
 
 
 def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
                cl: dict[str, NodeClient], *, net: bool) -> list[str]:
-    """七步流程本体。**两种传输共用这一段**，不复制两份。"""
-    total = 7
+    """八步流程本体。**两种传输共用这一段**，不复制两份。"""
+    total = 8
     failures: list[str] = []
     sess = "ses-demo-1"
 
@@ -308,6 +308,35 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
     else:
         failures.append("第 7 步：任务未能自动回到队列")
         print(c("       ✗ 任务未能自动回到队列", "bad"))
+
+    # ---- 8 ----
+    step(8, total, "★ 自动匹配：不指定目标，也能派出活且可复现")
+    # 前七步都是 Direct 投递（写死 to_node）。这一步验证 M4：
+    # 不指定目标时，系统按能力筛候选、确定性排序、逐个过策略。
+    detail("候选名单（运维视角，不经 HTTP 暴露）：")
+    rows = app.transport.candidates(task_type="demo.echo", from_node="hub")
+    for r in rows:
+        print(f"         {r['node_id']:<10} load={r['load']}/{r['capacity']} "
+              f"level={r['level']} same_domain={r['same_domain']}")
+
+    auto = hub.publish(from_node="hub", task_type="demo.echo",
+                       params={"text": "auto"}, session_id=sess,
+                       idempotency_key="idem-8")
+    ok(f"自动选中 {auto.task.to_node}（未指定 to_node）")
+
+    # ★ 确定性：同样的输入连算 10 次，顺序必须逐字相同。
+    #   随机挑选会让"昨天能跑今天不能"变成不可复现的问题。
+    runs = [
+        [r["node_id"] for r in
+         app.transport.candidates(task_type="demo.echo", from_node="hub")]
+        for _ in range(10)
+    ]
+    if len({tuple(r) for r in runs}) == 1:
+        ok(f"确定性：连算 10 次顺序一致 → {runs[0]}")
+    else:
+        failures.append("第 8 步：候选排序不确定")
+        print(c("       ✗ 候选排序不确定（同一输入出现多种顺序）", "bad"))
+    detail("排序依据：同域优先 → 等级刚好够用 → 负载率低 → 节点 ID 字典序")
 
     # ---- 审计摘要 ----
     print(c("\n  审计摘要", "b"))

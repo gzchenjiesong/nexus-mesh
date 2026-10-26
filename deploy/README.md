@@ -207,6 +207,22 @@ sudo journalctl -u nexus-mesh -f
 
 ## 8. 节点接入（在另一台机器上做）
 
+> ⚠ **先读完这三条再动手**——都是实测踩过的，不知道会卡很久。
+
+**① 服务端必须先有该节点的凭据。** HMAC 的固有性质：验签要求服务端
+知道对方密钥。所以加节点的最小流程是「在 `/etc/nexus-mesh/nxs.env` 加一行
+`NXS_SECRET_<大写下划线节点ID>` → 重启服务」。
+
+好消息是**不用改 yaml、不用写角色卡**（那是自注册解决的）。
+坏消息是仍需重启——环境变量在进程启动时固定。
+
+**② hub 自己也要批准。** `auto_approve_domains: []` 意味着默认拒绝对
+所有人一视同仁，包括 hub。首次部署后必须先 `nxs ops approve hub`，
+否则 hub 发不出任何任务。这是设计使然，不是 bug。
+
+**③ 自注册的节点默认未批准。** 注册成功只代表"我来了"，
+不代表"我可以干活"。必须运维显式批准。
+
 节点侧只需要**能出网**，不需要任何入站端口。
 
 ```python
@@ -274,6 +290,24 @@ sudo -u nxs sh -c 'set -a && . /etc/nexus-mesh/nxs.env && set +a && \
 > ⚠ **批准绑定的是它当前那张角色卡。** 节点之后改了卡片，
 > 批准会自动撤销，需要重新批准。所以角色卡要确定性生成。
 
+### 不指定目标也能派活（v0.6）
+
+批准之后，hub 就可以不指定 `to_node` 直接投递，由系统按能力选目标：
+
+```python
+hub.publish(from_node="hub", task_type="work.calendar",
+            params={"day": "2026-10-27"}, idempotency_key="daily-1")
+# to_node 省略 → 自动匹配
+```
+
+排序是**确定性**的（同域 → 等级刚好够用 → 负载率低 → 节点 ID），
+所以"为什么派给了它"是一个可以复现的问题：
+
+```bash
+nxs candidates --type work.calendar --from-node hub \
+  -c /etc/nexus-mesh/local.yaml
+```
+
 ---
 
 ## 9. 连通性验证
@@ -298,16 +332,36 @@ hub             hub         alive    ✓    1     work.summary
 work-laptop     zone-work   alive    ✓    1     work.calendar
 ```
 
+再确认"谁能干某类活"（自动投递的前提）：
+
+```bash
+nxs candidates --type work.calendar --from-node hub \
+  -c /etc/nexus-mesh/local.yaml
+```
+
+```
+候选执行者 · work.calendar  （来源 hub）
+  #  节点          域          等级      负载    同域
+  1  work-laptop   zone-work   summary   0/2     -
+排序依据：① 同域优先 ② 等级刚好够用 ③ 负载率（工作/并发上限）④ 节点 ID 字典序
+```
+
+> ⚠ 候选名单**只在 hub 本机可见**，没有对应 HTTP 端点——
+> "谁能干这个活"是拓扑信息。节点侧拿不到，也不需要拿。
+
 ---
 
 ## 10. 出问题时的排查顺序
 
 | 现象 | 先查什么 |
 |---|---|
+| 节点注册返回 **401 `AU-SIG-01`** | **最常见**：服务端 `/etc/nexus-mesh/nxs.env` 里没有这个节点的 `NXS_SECRET_<ID>`。注意 ID 转大写下划线：`work-laptop` → `NXS_SECRET_WORK_LAPTOP`。加完**必须重启服务** |
 | 节点注册返回 401 | 两边的 `NXS_SECRET_<节点ID>` 是否一致；节点 ID 拼写（含大小写与连字符） |
+| hub 发不出任务 `MX-RECEIVE-03` | **hub 自己没批准**。`auto_approve_domains: []` 时谁都要批，先 `nxs ops approve hub` |
 | 注册成功但一直"未批准" | `nxs ops nodes` 看有没有待批准；批准后节点下一次心跳会变 ✓ |
 | 任务投递被拒 `MX-DOMAIN-02` | 矩阵里有没有 `hub → zone-work` 这条规则；`allow_types` 是否覆盖该类型 |
 | 任务投递被拒 `WL-TYPE-404` | 节点的角色卡里有没有声明该能力；声明后要重新批准 |
+| **自动投递总报 `WL-TYPE-404`** | 用 `nxs candidates --type <类型>` 看候选。若显示"无候选"且提示有节点待批准，先去 `nxs ops approve`。注意：候选全被矩阵拒绝时**也**报这个码（防止泄漏"有人但不给你"），所以要去 hub 的审计日志里看真实的拒绝码 |
 | 产出被拒 `WL-FIELD-001` | 产出的字段是否都在 `response_fields` 里（**只报数量不报字段名**，去节点侧日志看） |
 | 产出被拒 `WL-LEVEL-002` | 等级超过能力声明或卡片上限。**注意节点侧边界会先拦**，看节点日志而不是中心日志 |
 | 长任务反复重试 | 节点 `renew_interval` 是否设置；续租失败会丢产出 |

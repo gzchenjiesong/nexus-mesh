@@ -20,10 +20,11 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from .backends import memory
+from .control.matcher import Matcher
 from .control.policy import PolicyEngine, Usage
 from .control.registry import Registry
 from .core.errors import ConfigError, PolicyDenied, RuleId
-from .core.models import Artifact, RoleCard, Task, TaskStatus
+from .core.models import Artifact, Level, RoleCard, Task, TaskStatus
 from .data.boundary import ResponseBoundary
 from .data.mailbox import DeliveryResult, Mailbox
 from .data.task import TaskLifecycle
@@ -50,10 +51,11 @@ class Transport(Protocol):
         节点需要知道"我到底被批准了没有"，否则它只能盲目重试。
         """
 
-    def publish(self, *, from_node: str, to_node: str, task_type: str,
-                params: dict, session_id: str = "",
-                idempotency_key: str | None = None) -> DeliveryResult:
-        """投递任务。"""
+    def publish(self, *, from_node: str, to_node: str | None = None,
+                task_type: str, params: dict, session_id: str = "",
+                idempotency_key: str | None = None,
+                min_level: str | None = None) -> DeliveryResult:
+        """投递任务。``to_node`` 省略时按能力自动匹配。"""
 
     def poll(self, node_id: str) -> Task | None:
         """领取任务。"""
@@ -107,7 +109,12 @@ class NexusApp:
         )
         self.lifecycle = TaskLifecycle(stores.queue, lease_seconds=lease_seconds,
                                        max_attempts=max_attempts)
-        self.mailbox = Mailbox(self.policy, self.registry, self.lifecycle)
+        # 匹配器（M4）：自动投递时"按能力找谁干"。
+        # 它排在策略层之后装配，但**语义上先于策略**——
+        # 匹配器筛"能不能干"，策略判"允许不允许"。
+        self.matcher = Matcher(self.registry, stores.queue)
+        self.mailbox = Mailbox(self.policy, self.registry, self.lifecycle,
+                               matcher=self.matcher)
         self.boundary = ResponseBoundary(self.policy)
         self.audit = stores.audit
 
@@ -227,23 +234,64 @@ class InProcessTransport:
 
     # -- 投递 --
 
-    def publish(self, *, from_node: str, to_node: str, task_type: str,
-                params: dict, session_id: str = "",
-                idempotency_key: str | None = None) -> DeliveryResult:
+    def publish(self, *, from_node: str, to_node: str | None = None,
+                task_type: str, params: dict, session_id: str = "",
+                idempotency_key: str | None = None,
+                min_level: str | None = None) -> DeliveryResult:
         app = self._app
         try:
             result = app.mailbox.deliver(
                 from_node=from_node, to_node=to_node,
                 task_type=task_type, params=params, session_id=session_id,
                 idempotency_key=idempotency_key,
-                usage=app.usage_of(to_node),
+                min_level=Level.parse(min_level, "min_level")
+                if min_level is not None else Level.METADATA,
+                usage_for=app.usage_of,
             )
         except PolicyDenied as denied:
             self._audit_denied(denied, from_node=from_node,
-                               to_node=to_node, task_type=task_type,
+                               to_node=to_node or "", task_type=task_type,
                                session_id=session_id)
             raise
         return result
+
+    # -- 候选查询（运维/调试）--
+
+    def candidates(self, *, task_type: str, from_node: str = "",
+                   min_level: str | None = None) -> list[dict]:
+        """列出候选执行者。**仅供运维与调试，不允许经 HTTP 暴露。**
+
+        "谁能干这个活"是拓扑信息。本方法让运维能在本地命令行看到它，
+        但网关不提供对应端点——一旦有了端点，它就成了一个
+        "枚举网络规模"的探测接口。
+
+        ⚠ **本方法刻意不在 :class:`Transport` 协议里。**
+
+        那个协议描述的是"节点与网络之间的传输"（节点侧 SDK 依赖它）。
+        候选查询是**运维视角**的能力，节点不该有这个权限，
+        ``HttpTransport`` 也因此不实现它——把它写进协议等于宣称
+        "每个节点都能查全网拓扑"，与设计相反。
+        """
+        from .control.matcher import Requirement
+
+        app = self._app
+        req = Requirement(
+            task_type=task_type,
+            min_level=Level.parse(min_level, "min_level")
+            if min_level is not None else Level.METADATA,
+            from_domain=app.registry.domain_of_safe(from_node) if from_node else "",
+        )
+        return [
+            {
+                "node_id": c.node_id,
+                "domain": c.domain,
+                "level": str(c.level),
+                "load": c.load,
+                "capacity": c.capacity,
+                "same_domain": c.same_domain,
+            }
+            for c in app.matcher.candidates(req)
+        ]
 
     # -- 领取 --
 

@@ -758,11 +758,17 @@ class _Handler(BaseHTTPRequestHandler):
         envelope = Envelope.from_dict(self._parse_json(body))
         task = envelope.task
 
+        # ★ ``to_node`` 为空字符串 = 请求按能力自动匹配（M4）。
+        #
+        #   为什么用空串而不是"字段可省略"：投给谁是一个关键决策，
+        #   而"漏写 to_node"和"故意不指定"在报文上长得一样。
+        #   保持字段必填，让漏写立刻报"缺少必填字段"，
+        #   而写空串是一个明确的、看得出来是故意的选择。
         result = self.gw.transport.publish(
             # ★ 发送方取自**已验签的**信封，而不是信任 body 里的 from_node——
             #   两者本该一致，但只有前者不可伪造。
             from_node=sender,
-            to_node=task.to_node,
+            to_node=task.to_node or None,
             task_type=task.type,
             params=dict(task.params),
             session_id=task.session_id or envelope.session_id,

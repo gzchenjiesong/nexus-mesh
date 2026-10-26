@@ -73,7 +73,7 @@ git clone https://github.com/gzchenjiesong/nexus-mesh.git
 cd nexus-mesh
 make install
 make demo          # 等价于 nxs demo
-make demo-net      # 同一套七步断言，走真实 HTTP
+make demo-net      # 同一套八步断言，走真实 HTTP
 ```
 
 四个命令：
@@ -82,9 +82,10 @@ make demo-net      # 同一套七步断言，走真实 HTTP
 |---|---|
 | `nxs verify` | 配置自检：校验角色卡、矩阵、凭据的一致性 |
 | `nxs doctor` | **部署前自检**：持久化、权限、TLS、运维通道（加 `--production` 按生产标准） |
-| `nxs demo` | 跑七步验收 demo（**先看这个**）。加 `--net` 改走真实网络 |
+| `nxs demo` | 跑八步验收 demo（**先看这个**）。加 `--net` 改走真实网络 |
 | `nxs serve` | 核心常驻：**真的监听 HTTP 端口** + 定期维护 |
 | `nxs ops` | 远程运维：`approve` / `revoke` / `release` / `nodes` |
+| `nxs candidates` | 查某任务类型的候选执行者**及排序依据**（运维视角，不经 HTTP） |
 | `nxs status` | 查看节点状态与审计摘要 |
 
 `nxs demo` 会跑出一段完整的协作流程，包括**三条安全断言**：
@@ -161,7 +162,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.5.0）
+### 已实现（v0.6.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -177,11 +178,12 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 | 存储后端 | memory · sqlite |
 | **HTTP 传输层**（网关 + 节点客户端，走真实网络） | ✅ |
 | **SSE 通知流**（只推"有活"，不推内容；断线自动退回短轮询） | ✅ |
+| **自动匹配**（按能力选目标，确定性排序，不泄漏候选） | ✅ |
 | **节点自注册 + 心跳**（不用改云端配置重启） | ✅ |
 | **长任务续租**（`/nxs/ack`，不靠调大租约） | ✅ |
 | **远程运维**（批准 / 吊销 / 释放租约，走 HTTP + 审计） | ✅ |
 | **部署物**（systemd unit · 生产配置模板 · 部署自检 · 指南） | ✅ |
-| CLI | verify · **doctor** · demo · serve · **ops** · status |
+| CLI | verify · **doctor** · demo · serve · **ops** · **candidates** · status |
 
 ### 尚未实现
 
@@ -198,7 +200,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 ```bash
 make install     # 建 venv 并安装（仅 PyYAML 一个运行时依赖）
 make test        # 190 个测试
-make demo        # 七步验收
+make demo        # 八步验收
 ```
 
 `traceability/MATRIX.md` 是可执行的追溯表 —— 由测试生成，覆盖 66 个
@@ -272,9 +274,12 @@ See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
 
-**v0.5.0** — deployable. A node on a company laptop can register itself,
-get approved remotely, receive a task, run it, and hand back a result that
-survived **two** response boundaries (322 tests).
+**v0.6.0** — it can dispatch on its own. Omit `to_node` and the hub picks a
+provider by capability, in a **deterministic** order (same-domain →
+least-sufficient level → lowest load ratio → node id), then walks the
+candidates through the policy matrix until one is allowed (353 tests).
+The candidate list and the reason a match failed never leave the hub —
+"who can do X" is topology (`nxs candidates` is operator-only).
 
 * **Transport**: `POST /nxs/register` · `POST /nxs/ack` · `POST /nxs/publish`
   · `GET /nxs/poll` · `POST /nxs/result` · `POST /nxs/fail` · `GET /nxs/events`
@@ -285,6 +290,10 @@ survived **two** response boundaries (322 tests).
   initiates a connection — push rides the connection the node opened
 * **Two response boundaries**: the node trims its own output *before* sending
   (so a compromised hub gets nothing extra), the hub re-checks authoritatively
+* **Auto-matching (M4)**: four-level deterministic ordering, no randomness
+  anywhere — "why did it go to A and not B" is a reproducible query, not a
+  mystery. Candidates are never exposed over HTTP; failed matches report the
+  same code as "no such type" so topology and permission layout don't leak
 * **Self-registration with approval semantics**: approval binds to *that role
   card*, not the node id — change the card and approval is revoked; a node can
   never approve itself, and ops endpoints are opt-in and never rate-limited

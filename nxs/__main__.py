@@ -3,7 +3,7 @@
 四个子命令：
 
     nxs verify  配置自检：加载配置、校验合法性、打印生效的规则
-    nxs demo    跑七步验收 demo（同 ``make demo``）
+    nxs demo    跑八步验收 demo（同 ``make demo``）
     nxs serve   核心常驻：启动 HTTP 网关 + 定期维护（sweep）
     nxs status  查看当前节点状态与审计摘要
 
@@ -155,7 +155,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_demo(args: argparse.Namespace) -> int:
-    """跑七步验收 demo。``--net`` 时改走真实 HTTP（同一套断言）。"""
+    """跑八步验收 demo。``--net`` 时改走真实 HTTP（同一套断言）。"""
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root))
     try:
@@ -275,6 +275,73 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_candidates(args: argparse.Namespace) -> int:
+    """列出某任务类型的候选执行者，以及**为什么是这个顺序**。
+
+    ⚠ 这是**运维视角**的命令：它读的是 hub 本地状态，
+    不经 HTTP 暴露。"谁能干这个活"是拓扑信息。
+
+    设计意图：让"自动匹配为什么投给了 A 而不是 B"成为一个
+    可以直接查询的问题，而不是靠翻日志猜。
+    """
+    try:
+        app = _load_app(args)
+    except ConfigError as exc:
+        _err(f"配置校验失败：{exc}")
+        return 2
+    app.start()
+    if not args.task_type:
+        _err("缺少任务类型：用 --type 指定，例如 --type demo.echo")
+        return 2
+    try:
+        rows = app.transport.candidates(
+            task_type=args.task_type,
+            from_node=args.from_node or "",
+            min_level=args.min_level,
+        )
+    except NexusError as exc:
+        _err(str(exc))
+        return 1
+
+    _info(_color(f"候选执行者 · {args.task_type}", "b")
+          + (f"  （来源 {args.from_node}）" if args.from_node else ""))
+    if not rows:
+        _info(_color(
+            "  （无候选）可能原因：没有节点声明该能力 / 等级不够 / "
+            "节点未批准或已吊销", "warn"))
+        # ⭐ 主动指出"是不是有节点在等批准"。
+        #    运维最常卡在这里：节点明明声明了能力，却因为没批准而"看不见"。
+        #    这里只在本机 CLI 显示，不构成对外泄漏（运维本来就能看节点列表）。
+        pending = [
+            rec.card.node_id for rec in app.registry.all_records()
+            if not rec.approved and rec.card.capability(args.task_type)
+        ]
+        if pending:
+            _info("")
+            _info(_color(
+                f"  其中 {len(pending)} 个节点声明了该能力但**尚未批准**："
+                f"{', '.join(sorted(pending))}", "warn"))
+            _info(_color(
+                "  批准：nxs ops approve <节点ID> --url <hub-url>", "dim"))
+        return 0
+
+    _info(_color(
+        f"  {'#':<3}{'节点':<14}{'域':<12}{'等级':<10}{'负载':<10}{'同域':<6}", "b"))
+    for i, r in enumerate(rows, 1):
+        _info(f"  {i:<3}{r['node_id']:<14}{r['domain']:<12}{r['level']:<10}"
+              f"{str(r['load']) + '/' + str(r['capacity']):<10}"
+              f"{'✓' if r['same_domain'] else '-':<6}")
+
+    _info("")
+    _info(_color(
+        "排序依据：① 同域优先 ② 等级刚好够用 ③ 负载率低 ④ 节点 ID 字典序。"
+        "同样的输入必定选出同一个。", "dim"))
+    _info(_color(
+        "⚠ 候选只是「能不能干」。真的投得出去还要过策略矩阵——"
+        "这里是运维视角，节点拿不到这份清单。", "dim"))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # doctor（部署自检）
 # ---------------------------------------------------------------------------
@@ -381,17 +448,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"已被占用（若服务正在运行则正常）: {exc}")
 
     # ---- TLS ----
+    # ⭐ 分两种情况，不能一刀切：
+    #   · 监听 0.0.0.0 且无 TLS → **真的危险**（明文暴露在公网），必须失败
+    #   · 监听 127.0.0.1 且无 TLS → 合理。前面通常有 Caddy/Nginx 终止 TLS，
+    #     部署指南推荐的正是这个组合。这里一刀切会让推荐做法通不过自检，
+    #     运维的唯一出路是忽略报错——那就把自检变成了噪音。
     tls_ok = bool(cfg.server.tls_cert and cfg.server.tls_key)
+    local_only = host in ("127.0.0.1", "::1", "localhost")
     if tls_ok:
         cert_ok = _Path(cfg.server.tls_cert).exists()
         key_ok = _Path(cfg.server.tls_key).exists()
         check("TLS 证书文件存在", cert_ok and key_ok,
               "证书或私钥路径不存在")
+    elif local_only:
+        add("TLS 由前置代理终止（只监听回环地址）", "ok",
+            "")
+        _info(_color(
+            "      ⚠ 请自行确认代理确实配了 TLS："
+            "curl -v https://<域名>/nxs/health", "dim"))
     else:
-        # 若前置代理做 TLS 终止，留空是正确的 —— 所以只提示
-        check("TLS 已配置（或由前置代理终止）", False,
-              "未配置 tls_cert/tls_key。若前面有 Nginx/Caddy 终止 TLS 可忽略；"
-              "否则公网明文传输",
+        check("TLS 已配置（或改为只监听回环地址）", False,
+              f"监听 {host} 但没配 tls_cert/tls_key —— 公网明文传输。"
+              f"要么配证书，要么改 host: 127.0.0.1 并在前面放 Caddy/Nginx",
               warn_when_not_production=True)
 
     # ---- 运维通道 ----
@@ -539,7 +617,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "示例：\n"
             "  nxs verify                         自检示例配置\n"
-            "  nxs demo                           跑七步验收 demo（同进程）\n"
+            "  nxs demo                           跑八步验收 demo（同进程）\n"
             "  nxs demo --net                     同一套断言，走真实 HTTP\n"
             "  nxs serve -c config/local.yaml     常驻：监听端口 + 定期维护\n"
             "  nxs status                         查看节点与审计\n\n"
@@ -561,10 +639,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(sp)
     sp.set_defaults(func=cmd_verify)
 
-    sp = sub.add_parser("demo", help="跑七步验收 demo")
+    sp = sub.add_parser("demo", help="跑八步验收 demo")
     add_common(sp)
     sp.add_argument("--net", action="store_true",
-                    help="改走真实 HTTP（同一套七步断言，验证传输层）")
+                    help="改走真实 HTTP（同一套八步断言，验证传输层）")
     sp.set_defaults(func=cmd_demo)
 
     sp = sub.add_parser("serve", help="核心常驻（含定期维护）")
@@ -580,6 +658,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("status", help="查看节点状态与审计摘要")
     add_common(sp)
     sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser(
+        "candidates",
+        help="列出某任务类型的候选执行者（运维视角，不经 HTTP 暴露）")
+    add_common(sp)
+    sp.add_argument("--type", dest="task_type", required=True,
+                    help="任务类型，例如 demo.echo")
+    sp.add_argument("--from-node", default="",
+                    help="来源节点 ID（用于计算同域优先）")
+    sp.add_argument("--min-level", default=None,
+                    help="需要的最低应答等级：metadata/summary/fragment/full_text")
+    sp.set_defaults(func=cmd_candidates)
 
     sp = sub.add_parser(
         "doctor", help="部署前自检（持久化 / 权限 / TLS / 运维通道）")

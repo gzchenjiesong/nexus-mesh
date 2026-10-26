@@ -101,6 +101,15 @@ class TaskLifecycle:
     # 领取（执行方侧）
     # ------------------------------------------------------------------
 
+    def find_by_idempotency(self, key: str) -> Task | None:
+        """按幂等键查已有任务。
+
+        暴露它是因为**投递层需要在做任何校验之前先判幂等**：
+        自动匹配的结果可能随时间变化，若先匹配、失败后才查幂等，
+        重试一笔早已成功的投递会得到"类型不可用"——那是一句误导。
+        """
+        return self._store.find_by_idempotency(key)
+
     def claim(self, node_id: str, *, now: str | None = None) -> Task | None:
         """领取一个待办任务。返回 None 表示队列为空。
 

@@ -62,6 +62,48 @@ class Authenticator:
         """轮换凭据。旧凭据立即失效。"""
         self._secrets[node_id] = secret
 
+    def _secret_for(self, node_id: str) -> bytes | None:
+        """取节点的共享密钥。查不到时**回落到环境变量**。
+
+        ⭐ 为什么需要这条回落
+        --------------------
+        HMAC 的固有性质：**服务端必须知道对方的密钥才能验签**。
+        所以"节点自注册"的前提是——服务端已经持有它的密钥。
+
+        而配置加载只从 ``nodes`` 列表里读凭据。于是出现一个尴尬局面：
+        节点能自注册（角色卡不用写进 yaml），但**凭据仍要求写进 yaml**，
+        那"加节点不用改配置"就成了一句空话。
+
+        回落的做法：节点 ID 已知（来自请求头），按环境变量的命名规则
+        （``NXS_SECRET_<大写下划线>``）直接查一次环境变量。
+        运维只需在 ``/etc/nexus-mesh/nxs.env`` 里加一行，
+        **不用动 yaml、不用写角色卡**。
+
+        ⚠ **仍需重启进程才能生效**——环境变量在进程启动时固定
+        （除非用文件 + SIGHUP，那是另一套复杂度，当前规模不值得）。
+        这个限制是诚实的：改 env 文件 + 重启，比改 yaml + 重启少一步，
+        但没有变成"零重启"。
+
+        安全性：环境变量里的凭据同样受文件权限保护（``chmod 600``），
+        与配置内凭据同等。回落**不降低**任何门槛——查不到就仍然是
+        认证失败（``AU-SIG-01``，不区分"没配"与"配错了"）。
+        """
+        secret = self._secrets.get(node_id)
+        if secret is not None:
+            return secret
+
+        import os
+
+        env_key = "NXS_SECRET_" + "".join(
+            ch.upper() if ch.isalnum() else "_" for ch in node_id
+        )
+        raw = os.environ.get(env_key, "")
+        if len(raw) < 16:
+            # 太短的一律视为未配置：半个密钥比没有更危险，
+            # 它会让人以为这个节点配好了
+            return None
+        return raw.encode()
+
     def revoke(self, node_id: str) -> None:
         """吊销节点。**立即生效**，不等到凭据过期。"""
         with self._lock:
@@ -97,7 +139,7 @@ class Authenticator:
         # -- 1. 节点存在性与吊销状态 --
         if self.is_revoked(node_id):
             raise AuthFailed(RuleId.AU_CREDENTIAL_REVOKED, f"revoked {node_id}")
-        secret = self._secrets.get(node_id)
+        secret = self._secret_for(node_id)
         if secret is None:
             # 未注册节点：报"认证失败"而不是"节点不存在"，
             # 避免通过错误码差异枚举节点 ID
@@ -141,7 +183,7 @@ class Authenticator:
 
         if self.is_revoked(node_id):
             raise AuthFailed(RuleId.AU_CREDENTIAL_REVOKED, f"revoked {node_id}")
-        secret = self._secrets.get(node_id)
+        secret = self._secret_for(node_id)
         if secret is None:
             raise AuthFailed(RuleId.AU_SIGNATURE_INVALID, f"unknown {node_id}")
 

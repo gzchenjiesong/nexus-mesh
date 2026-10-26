@@ -111,10 +111,14 @@ class HttpTransport:
     # Transport 协议
     # ------------------------------------------------------------------
 
-    def publish(self, *, from_node: str, to_node: str, task_type: str,
-                params: dict, session_id: str = "",
+    def publish(self, *, from_node: str, to_node: str | None = None,
+                task_type: str, params: dict, session_id: str = "",
                 idempotency_key: str | None = None) -> DeliveryResult:
         """发布任务。
+
+        :param to_node: 目标节点。**省略或传 ``None`` 表示按能力自动匹配**——
+            服务端会按 M4 筛出候选、确定性排序、逐个过策略校验，
+            取第一个通过的。
 
         ``from_node`` 参数**保留但会被覆盖**：服务端只认已验签的发送方。
         显式覆盖而不是静默忽略，是为了让"伪造发送方"在服务端被结构性拒绝，
@@ -130,7 +134,9 @@ class HttpTransport:
             type=task_type,
             session_id=session_id,
             from_node=self.node_id,
-            to_node=to_node,
+            # 空串 = 自动匹配。协议上 to_node 始终必填（漏写会报"缺少必填字段"），
+            # 空串是"故意不指定"的显式表达。
+            to_node=to_node or "",
             params=dict(params),
         )
         envelope = envelope_for(self._secret, self.node_id, task,

@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **283** 个测试方法（已声明覆盖）· **102** 个纵向编号项（81 功能点 + 21 模块需求）
+共 **317** 个测试方法（已声明覆盖）· **113** 个纵向编号项（90 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -40,6 +40,7 @@
 | **M1.F15** | 网关优雅关闭（先关中枢再停 accept） | `nxs/edge/gateway.py:Gateway.stop` | G1 | P2 | — | 2 |
 | **M1.F16** | 节点侧 HTTP 传输（实现 Transport 协议） | `nxs/edge/client.py:HttpTransport` | G1,G4 | P0 | — | 7 |
 | **M1.F17** | 推送不可用时降级为短轮询 | `nxs/edge/client.py:HttpTransport.subscribe` | G1 | P1 | — | 2 |
+| **M1.F18** | 凭据可只放在环境变量（自注册节点无需写进配置节点列表） | `nxs/edge/auth.py:Authenticator._secret_for` | G4,G1 | P0 | — | 3 |
 | **M1.R1** | 认证失败不得区分具体原因（防成员枚举） | （由 M1.F7 实现） | G2 | P0 | S4 | 1 |
 | **M1.R2** | Egress-Only：节点侧永不监听端口，入站连接只由总线提供 | （由 M1.F16, M1.F17 实现） | G2 | P1 | — | 1 |
 | **M1.R3** | 未认证输入不得进入审计（拒绝时不记录调用方自报的标识） | （由 M1.F11 实现） | G2,G3 | P0 | S4 | 2 |
@@ -74,9 +75,20 @@ _（未实现，暂无功能点）_
 
 ### M4 匹配器
 
-平面 `控制面` · 实现 `nxs/control/matcher（未建）` · 状态 **未实现**
+平面 `控制面` · 实现 `nxs/control/matcher.py` · 状态 **已实现**
 
-_（未实现，暂无功能点）_
+| 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
+|---|---|---|---|---|---|---|
+| **M4.F1** | 按能力筛选候选（能力声明 + 等级下限 + 接不接受该域） | `nxs/control/matcher.py:Matcher.candidates` | G1 | P0 | S15 | 6 |
+| **M4.F2** | 确定性排序（同域 → 等级刚好够用 → 负载率 → 节点 ID） | `nxs/control/matcher.py:Candidate.sort_key` | G1 | P0 | — | 9 |
+| **M4.F3** | 只把可路由节点列为候选（未批准/已吊销不参与） | `nxs/control/matcher.py:Matcher.candidates（rec.routable）` | G1,G2 | P0 | S9 | 1 |
+| **M4.F4** | 依次尝试直到通过（匹配 + 策略校验的编排） | `nxs/control/matcher.py:Matcher.select` | G1 | P0 | — | 4 |
+| **M4.F5** | 自动投递（deliver 省略 to_node 时按能力选目标） | `nxs/data/mailbox.py:Mailbox._select_target` | G1 | P0 | — | 4 |
+| **M4.F6** | 匹配失败统一错误码（候选数量与拒绝原因不外泄） | `nxs/data/mailbox.py:Mailbox._select_target（WL-TYPE-404）` | G2 | P0 | S15 | 2 |
+| **M4.F7** | 幂等检查先于匹配（重试不会因候选变化而误报失败） | `nxs/data/mailbox.py:Mailbox.deliver（步骤 ⓪）` | G1,G2 | P0 | S16 | 2 |
+| **M4.F8** | 候选查询仅供运维（不经 HTTP 暴露） | `nxs/app.py:InProcessTransport.candidates` | G3 | P1 | S15 | 4 |
+| **M4.R1** | 排序必须确定性——同一输入两次必须选出同一个候选 | （由 M4.F2 实现） | G1 | P0 | — | 1 |
+| **M4.R2** | 匹配只看「能力 + 约束」，不看「关系」（不读域间矩阵） | （由 M4.F1 实现） | G1,G2 | P0 | S15 | 1 |
 
 ### M5 策略执行点
 
@@ -252,17 +264,18 @@ _（未实现，暂无功能点）_
 | **S6** | 产出等级由产出方标注，发起方无法指定 | M10.R1 |
 | **S7** | 回传内容的 semantics 被强制改写为 data | M10.F2, M10.R2 |
 | **S8** | 自由文本字段受长度上限约束，并做指令前缀剥离与控制字符清理 | M10.F3, M10.F6, M10.R2 |
-| **S9** | 新节点不能自行加入——注册后需人工批准 | M3.F1, M3.F2, M3.F8, M3.R1 |
+| **S9** | 新节点不能自行加入——注册后需人工批准 | M3.F1, M3.F2, M3.F8, M4.F3, M3.R1 |
 | **S10** | 凭据吊销立即生效，不等过期 | M1.F6, M3.F3, M14.F3, M3.R2 |
 | **S11** | 回传时以服务端持有的任务为准，节点无法冒领他人的任务 | M1.F11 |
 | **S12** | 节点自注册不能带来批准，角色卡一经变更批准立即撤销 | M3.F8, M3.F9, M3.R3 |
 | **S13** | 信任域由运维配置裁定，节点无法通过自报域获得更多权限 | M3.F10 |
 | **S14** | 节点侧边界先于传输执行——数据离开节点时已裁剪到自身声明范围 | M10.F5 |
+| **S15** | 候选集合与匹配失败原因不外泄——「谁能干这个活」本身是拓扑信息 | M4.F1, M4.F6, M4.F8, M4.R2 |
+| **S16** | 幂等命中须归属一致——不得凭幂等键探测他人任务 | M4.F7 |
 
 ## 尚未实现的模块
 
 - **M2** 协议适配 —— nxs/edge/proto（未建）
-- **M4** 匹配器 —— nxs/control/matcher（未建）
 - **M9** 产物通道 —— nxs/data/artifact（未建）
 - **M13** 可观测 —— nxs/mgmt/observ（未建）
 

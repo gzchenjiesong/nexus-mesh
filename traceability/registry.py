@@ -167,7 +167,8 @@ MODULES: tuple[Module, ...] = (
     Module("M2", "协议适配", "接入层", "nxs/edge/proto（未建）", "未实现", ("G4",)),
     # ---- 控制面 ----
     Module("M3", "注册中心", "控制面", "nxs/control/registry.py", "已实现", ("G1", "G5")),
-    Module("M4", "匹配器", "控制面", "nxs/control/matcher（未建）", "未实现", ("G1",)),
+    Module("M4", "匹配器", "控制面",
+           "nxs/control/matcher.py", "已实现", ("G1",)),
     Module("M5", "策略执行点", "控制面", "nxs/control/policy.py", "已实现", ("G2", "G3")),
     # ---- 数据面 ----
     Module("M6", "信箱", "数据面", "nxs/data/mailbox.py", "已实现", ("G1",)),
@@ -244,6 +245,9 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M1.F17", "推送不可用时降级为短轮询",
             "nxs/edge/client.py:HttpTransport.subscribe",
             ("G1",), "P1"),
+    Feature("M1.F18", "凭据可只放在环境变量（自注册节点无需写进配置节点列表）",
+            "nxs/edge/auth.py:Authenticator._secret_for",
+            ("G4", "G1"), "P0"),
 
     # ---------------- M3 注册中心 ----------------
     Feature("M3.F1", "角色卡注册（默认不批准）",
@@ -284,6 +288,32 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M3.F12", "注册事件审计（只记结果与版本，不记卡片内容）",
             "nxs/edge/gateway.py:Gateway.record_registration",
             ("G3",), "P1"),
+
+    # ---------------- M4 匹配器 ----------------
+    Feature("M4.F1", "按能力筛选候选（能力声明 + 等级下限 + 接不接受该域）",
+            "nxs/control/matcher.py:Matcher.candidates",
+            ("G1",), "P0", ("S15",)),
+    Feature("M4.F2", "确定性排序（同域 → 等级刚好够用 → 负载率 → 节点 ID）",
+            "nxs/control/matcher.py:Candidate.sort_key",
+            ("G1",), "P0"),
+    Feature("M4.F3", "只把可路由节点列为候选（未批准/已吊销不参与）",
+            "nxs/control/matcher.py:Matcher.candidates（rec.routable）",
+            ("G1", "G2"), "P0", ("S9",)),
+    Feature("M4.F4", "依次尝试直到通过（匹配 + 策略校验的编排）",
+            "nxs/control/matcher.py:Matcher.select",
+            ("G1",), "P0"),
+    Feature("M4.F5", "自动投递（deliver 省略 to_node 时按能力选目标）",
+            "nxs/data/mailbox.py:Mailbox._select_target",
+            ("G1",), "P0"),
+    Feature("M4.F6", "匹配失败统一错误码（候选数量与拒绝原因不外泄）",
+            "nxs/data/mailbox.py:Mailbox._select_target（WL-TYPE-404）",
+            ("G2",), "P0", ("S15",)),
+    Feature("M4.F7", "幂等检查先于匹配（重试不会因候选变化而误报失败）",
+            "nxs/data/mailbox.py:Mailbox.deliver（步骤 ⓪）",
+            ("G1", "G2"), "P0", ("S16",)),
+    Feature("M4.F8", "候选查询仅供运维（不经 HTTP 暴露）",
+            "nxs/app.py:InProcessTransport.candidates",
+            ("G3",), "P1", ("S15",)),
 
     # ---------------- M5 策略执行点 ----------------
     Feature("M5.F1", "任务类型白名单",
@@ -499,6 +529,14 @@ REQUIREMENTS: tuple[Requirement, ...] = (
         realized_by=("M14.F2",), goals=("G2", "G3"), priority="P0",
     ),
     Requirement(
+        "M4.R1", "排序必须确定性——同一输入两次必须选出同一个候选",
+        realized_by=("M4.F2",), goals=("G1",), priority="P0",
+    ),
+    Requirement(
+        "M4.R2", "匹配只看「能力 + 约束」，不看「关系」（不读域间矩阵）",
+        realized_by=("M4.F1",), goals=("G1", "G2"), priority="P0", security=("S15",),
+    ),
+    Requirement(
         "M5.R1", "默认拒绝——没有显式允许的即拒绝",
         realized_by=("M5.F1", "M5.F2", "M5.F3"), goals=("G2",),
         priority="P0", security=("S3",),
@@ -621,6 +659,8 @@ SECURITY: tuple[SecurityReq, ...] = (
     SecurityReq("S12", "节点自注册不能带来批准，角色卡一经变更批准立即撤销"),
     SecurityReq("S13", "信任域由运维配置裁定，节点无法通过自报域获得更多权限"),
     SecurityReq("S14", "节点侧边界先于传输执行——数据离开节点时已裁剪到自身声明范围"),
+    SecurityReq("S15", "候选集合与匹配失败原因不外泄——「谁能干这个活」本身是拓扑信息"),
+    SecurityReq("S16", "幂等命中须归属一致——不得凭幂等键探测他人任务"),
 )
 
 
