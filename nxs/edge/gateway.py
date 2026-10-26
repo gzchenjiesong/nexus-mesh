@@ -328,6 +328,8 @@ class Gateway:
         )
         self.rate_limiter = RateLimiter(app.config.policy.rate_limit_per_second)
         self.stats = GatewayStats()
+        #: 上一次指标快照，用于判断趋势（见 :meth:`collect_metrics`）。
+        self._last_snapshot: Any = None
 
         # 运维面：**默认关闭**。没配密钥时 /nxs/ops/* 返回 501，
         # 攻击面上就不存在这个端点，而不是"存在但拒绝"。
@@ -475,6 +477,55 @@ class Gateway:
     def stream_alive(self, node_id: str, gen: int) -> bool:
         with self._stream_lock:
             return self._stream_gen.get(node_id, 0) == gen
+
+    # ------------------------------------------------------------------
+    # 可观测（M13）
+    # ------------------------------------------------------------------
+
+    def collect_metrics(self) -> dict[str, Any]:
+        """采集指标 + 系统级关联异常。
+
+        ⭐ **只挂在运维面上，不给节点。**
+
+        指标是拓扑与活跃度信息：
+        "某节点每天处理多少任务"、"拒绝集中在哪条规则"、"谁在积压"——
+        这些单独看都不敏感，合起来就是一张**网络规模与使用习惯的画像**。
+        节点没有理由需要这份画像；它的视角应该只有自己的任务。
+
+        这与候选名单的处理是同一个理由（见 ``InProcessTransport.candidates``），
+        与审计"只记元数据"也是同一条线：**能不给的就不给**。
+
+        ⚠ **趋势判定要靠两次调用。**
+        ``silent_stall`` 需要"积压是否在增长"，而单次快照看不出趋势。
+        所以本方法把上一次快照存在网关实例上，下次调用时用来对比。
+        副作用是：**第一次调用拿不到趋势类告警**——那是信息不足，
+        不是漏报，比凭空猜一个"可能在增长"要诚实。
+        """
+        from ..mgmt.observ import collect, detect_anomalies
+
+        snap = collect(
+            self.app.metrics,
+            registry=self.app.registry,
+            queue=self.app.stores.queue,
+            gateway_stats=self.stats,
+        )
+        anomalies = detect_anomalies(snap, previous=self._last_snapshot)
+        self._last_snapshot = snap
+
+        payload = snap.as_dict()
+        payload["anomalies"] = [
+            {
+                "rule": a.rule,
+                "severity": a.severity,
+                "subject": a.subject,
+                "message": a.message,
+                "rationale": a.rationale,
+                "suggestion": a.suggestion,
+                "evidence": dict(a.evidence),
+            }
+            for a in anomalies
+        ]
+        return payload
 
     # ------------------------------------------------------------------
     # 注册：域裁定与审计
@@ -983,6 +1034,8 @@ class _Handler(BaseHTTPRequestHandler):
                 }
                 for rec in self.gw.app.registry.all_records()
             ]})
+        elif action == "metrics":
+            self._send_json(200, self.gw.collect_metrics())
         else:
             self._reject_status(501, f"unknown ops action: {action}")
 

@@ -86,6 +86,7 @@ make demo-net      # 同一套八步断言，走真实 HTTP
 | `nxs serve` | 核心常驻：**真的监听 HTTP 端口** + 定期维护 |
 | `nxs ops` | 远程运维：`approve` / `revoke` / `release` / `nodes` |
 | `nxs candidates` | 查某任务类型的候选执行者**及排序依据**（运维视角，不经 HTTP） |
+| `nxs metrics` | 运行时指标 + **系统级关联异常**（加 `--url` 读远端，`--json` 便于喂工具） |
 | `nxs status` | 查看节点状态与审计摘要 |
 
 **产物能多大？** 实测信封上限约 **186 KB 文件**（含 base64 开销）。
@@ -167,7 +168,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.7.0）
+### 已实现（v0.8.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -185,11 +186,12 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 | **SSE 通知流**（只推"有活"，不推内容；断线自动退回短轮询） | ✅ |
 | **自动匹配**（按能力选目标，确定性排序，不泄漏候选） | ✅ |
 | **产物引用形态**（`kind=reference` 传坐标，大文件不进信封） | ✅ |
+| **可观测**（指标 + 分位数 + **只报组合异常**，无阈值告警） | ✅ |
 | **节点自注册 + 心跳**（不用改云端配置重启） | ✅ |
 | **长任务续租**（`/nxs/ack`，不靠调大租约） | ✅ |
 | **远程运维**（批准 / 吊销 / 释放租约，走 HTTP + 审计） | ✅ |
 | **部署物**（systemd unit · 生产配置模板 · 部署自检 · 指南） | ✅ |
-| CLI | verify · **doctor** · demo · serve · **ops** · **candidates** · status |
+| CLI | verify · **doctor** · demo · serve · **ops** · **candidates** · **metrics** · status |
 
 ### 尚未实现
 
@@ -280,6 +282,14 @@ See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
 
+**v0.8.0** — observability with no threshold alerts, by design.
+`nxs metrics` reports counters, latency percentiles and **five correlation rules**
+that only fire on combinations — "big responses" is fine, "many tasks" is fine,
+"big responses *and* many tasks" is what looks like bulk extraction. Every rule
+carries a `rationale` field saying *why each metric is normal on its own*; a rule
+that can't fill it would just be a threshold alert and doesn't belong here
+(404 tests). Metrics never leave the ops surface, and they contain no task content.
+
 **v0.7.0** — artifact size is answered with measurements, not guesses.
 The envelope carries ~186 KB (256 KB body minus base64's 33%); anything larger
 goes through `kind=reference`, where a 10 MB file costs 96 bytes of coordinates.
@@ -318,7 +328,7 @@ The candidate list and the reason a match failed never leave the hub —
   pre-flight check, and a step-by-step [`deploy/README.md`](deploy/README.md)
 
 Not yet implemented: capability matching, session task graph,
-large-artifact channel, mTLS, metrics/observability.
+large-artifact channel (one-time tokens / ArtifactStore), mTLS.
 See [`docs/architecture.md`](docs/architecture.md) for the tracked gaps —
 including the ones with **weaker evidence** (TLS has no automated test).
 

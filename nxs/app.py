@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import warnings
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
@@ -30,6 +31,7 @@ from .data.mailbox import DeliveryResult, Mailbox
 from .data.task import TaskLifecycle
 from .mgmt.audit import AuditError, FileAuditStore, make_record
 from .mgmt.config import NexusConfig, load_config as _load_config
+from .mgmt.observ import Metrics, Snapshot, collect, detect_anomalies
 from .ports.stores import AuditStore, QueueStore, RegistryStore
 
 
@@ -117,6 +119,9 @@ class NexusApp:
                                matcher=self.matcher)
         self.boundary = ResponseBoundary(self.policy)
         self.audit = stores.audit
+        # 可观测（M13）。**内存态，重启归零** —— 见 mgmt/observ.py 的说明：
+        # 指标是滚动观测，不是账本；跨重启的趋势归审计与外部监控系统。
+        self.metrics = Metrics()
 
         # 省略时取配置里的策略设置（默认为空 = 不自动批准任何域）
         self._approved_domains = (
@@ -253,6 +258,14 @@ class InProcessTransport:
                                to_node=to_node or "", task_type=task_type,
                                session_id=session_id)
             raise
+        # ★ 幂等命中时 created=False，那不是一次新的提交，不该计入提交数。
+        #   否则"提交率"会被重试污染——重试越多显得越忙，而实际活没变。
+        if result.created:
+            app.metrics.on_submit(
+                task_id=result.task.id,
+                task_type=result.task.type,
+                to_node=result.task.to_node,
+            )
         return result
 
     # -- 候选查询（运维/调试）--
@@ -336,6 +349,13 @@ class InProcessTransport:
             contains_freetext=hint["contains_freetext"],
             sanitized=hint["sanitized"],
         )
+        # 字节数按产物的实际载荷估：这是"这个节点往外吐了多少"的度量，
+        # 也正是 bulk_movement 规则需要的量。用 JSON 长度而非 proto 长度，
+        # 因为前者与业务体量线性相关，后者含大量恒定的框架开销。
+        app.metrics.on_complete(
+            task_id=done.id, task_type=done.type, from_node=node_id,
+            byte_size=_payload_bytes(done.artifacts),
+        )
         return done
 
     def fail(self, node_id: str, task: Task, reason: str) -> Task:
@@ -344,6 +364,9 @@ class InProcessTransport:
             outcome="failed", task_id=failed.id, task_type=failed.type,
             session_id=failed.session_id, from_node=failed.from_node,
             to_node=failed.to_node, attempt=failed.attempt,
+        )
+        self._app.metrics.on_fail(
+            task_id=failed.id, task_type=failed.type, from_node=node_id,
         )
         return failed
 
@@ -381,6 +404,38 @@ class InProcessTransport:
                 f"审计写入失败，本次拒绝未被记录: {exc}",
                 RuntimeWarning, stacklevel=2,
             )
+        finally:
+            # ★ 指标打点放在 finally 里，**不受审计成败影响**。
+            #
+            #   审计可能因为磁盘故障失败，但"发生过一次拒绝"这个事实
+            #   与磁盘无关。如果打点放在审计之后，一次磁盘故障就会让
+            #   攻击探测在监控里消失——那正是最不该丢信号的时候。
+            #
+            #   反过来说，指标也不该反过来影响审计：这里只做内存加法，
+            #   不会抛异常。
+            app.metrics.on_deny(
+                rule_id=denied.rule_id.value, from_node=from_node,
+            )
+
+
+def _payload_bytes(artifacts: list[Artifact]) -> int:
+    """估算产物载荷字节数。
+
+    用 ``json.dumps`` 的 UTF-8 长度，不是精确的线上体积——
+    线上体积含签名、信封框架等恒定开销，与业务体量不成比例。
+    对指标（判断"这个节点吐得多不多"）来说，**与业务体量线性相关**
+    才是要的性质，绝对准确度不重要。
+    """
+    if not artifacts:
+        return 0
+    total = 0
+    for art in artifacts:
+        try:
+            total += len(json.dumps(art.data, ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError):
+            # 不可序列化的产物会在边界被拒，这里只是估算，忽略即可
+            total += 0
+    return total
 
 
 # ---------------------------------------------------------------------------

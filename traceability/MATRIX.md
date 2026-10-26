@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **325** 个测试方法（已声明覆盖）· **116** 个纵向编号项（93 功能点 + 23 模块需求）
+共 **368** 个测试方法（已声明覆盖）· **128** 个纵向编号项（105 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -208,9 +208,22 @@ _（未实现，暂无功能点）_
 
 ### M13 可观测
 
-平面 `管理面` · 实现 `nxs/mgmt/observ（未建）` · 状态 **未实现**
+平面 `管理面` · 实现 `nxs/mgmt/observ.py` · 状态 **已实现**
 
-_（未实现，暂无功能点）_
+| 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
+|---|---|---|---|---|---|---|
+| **M13.F1** | 运行时指标计数器（提交／完成／失败／拒绝／字节，线程安全） | `nxs/mgmt/observ.py:Metrics` | G3 | P0 | — | 3 |
+| **M13.F2** | 延迟分位数 p50/p95/p99（有界样本窗口） | `nxs/mgmt/observ.py:_percentile` | G3 | P0 | — | 5 |
+| **M13.F3** | 快照组装（计数用计数器，状态用队列真源） | `nxs/mgmt/observ.py:collect` | G3 | P0 | — | 2 |
+| **M13.F4** | 积压水位（待办／并发上限，按比率而非绝对数） | `nxs/mgmt/observ.py:NodeMetrics.backlog_ratio` | G3 | P1 | — | 2 |
+| **M13.F5** | 系统级关联：批量搬运（字节与任务量同时离群） | `nxs/mgmt/observ.py:_check_bulk_movement` | G3,G2 | P0 | S18 | 6 |
+| **M13.F6** | 系统级关联：权限试探（撞多种不同拒绝规则） | `nxs/mgmt/observ.py:_check_probe_pattern` | G3,G2 | P0 | S18 | 4 |
+| **M13.F7** | 系统级关联：给离线节点派活（stale/revoked 名下仍有任务） | `nxs/mgmt/observ.py:_check_dead_route` | G3 | P0 | — | 5 |
+| **M13.F8** | 系统级关联：静默卡死（积压高且零产出） | `nxs/mgmt/observ.py:_check_stall` | G3 | P0 | — | 9 |
+| **M13.F9** | 系统级关联：拒绝结构（集中于单条规则 = 配错） | `nxs/mgmt/observ.py:_check_denial_surge` | G3 | P1 | — | 5 |
+| **M13.F10** | 指标只走运维面（节点拿不到拓扑画像） | `nxs/edge/gateway.py:Gateway.collect_metrics（ops/metrics）` | G2 | P0 | S19 | 5 |
+| **M13.F11** | 指标 CLI（nxs metrics，支持本机与 --url 远端） | `nxs/__main__.py:cmd_metrics` | G3 | P1 | — | 3 |
+| **M13.F12** | 指标不记录业务内容（只有数量、类型名、规则码、字节数） | `nxs/mgmt/observ.py:Metrics（打点签名）` | G2,G3 | P0 | S19 | 2 |
 
 ### M14 运维接口
 
@@ -277,11 +290,12 @@ _（未实现，暂无功能点）_
 | **S15** | 候选集合与匹配失败原因不外泄——「谁能干这个活」本身是拓扑信息 | M4.F1, M4.F6, M4.F8, M4.R2 |
 | **S16** | 幂等命中须归属一致——不得凭幂等键探测他人任务 | M4.F7 |
 | **S17** | 产物 kind 必须与能力声明自洽——不得自称 freetext 绕过清洗 | M10.F7 |
+| **S18** | 告警须为组合判断——单指标阈值不算异常，避免告警疲劳淹没真信号 | M13.F5, M13.F6 |
+| **S19** | 指标属拓扑画像，只在运维面暴露；不含业务内容 | M13.F10, M13.F12 |
 
 ## 尚未实现的模块
 
 - **M2** 协议适配 —— nxs/edge/proto（未建）
-- **M13** 可观测 —— nxs/mgmt/observ（未建）
 
 > 这些模块暂无功能点，因此不参与覆盖统计。
 > 实现时应先在 `registry.py` 中登记功能点，再写测试并挂 `@covers`。

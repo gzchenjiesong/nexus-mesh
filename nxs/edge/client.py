@@ -404,5 +404,14 @@ class OpsClient:
         """列出所有节点及其状态。"""
         return list(self._post("nodes", {}).get("nodes", []))
 
+    def metrics(self) -> Mapping[str, Any]:
+        """读取指标与系统级关联异常。
+
+        ⚠ **连续调用会得到不同结果**：趋势类告警（如 ``silent_stall``）
+        需要和"上一次快照"对比才能判断，所以第一次调用可能少了几条。
+        这不是漏报，是信息还不够——比凭空猜一个"可能在增长"诚实。
+        """
+        return self._post("metrics", {})
+
 
 __all__ = ["DEFAULT_TIMEOUT_SECONDS", "HttpTransport", "OpsClient"]

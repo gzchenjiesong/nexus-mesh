@@ -331,6 +331,7 @@ effective = min( 域间矩阵上限, 节点自约束上限, 能力声明等级 )
 | `/nxs/ops/revoke` | POST | 运维：吊销节点（注册表＋认证层同时生效） | ✅ v0.3 |
 | `/nxs/ops/release` | POST | 运维：主动释放过期租约 | ✅ v0.3 |
 | `/nxs/ops/nodes` | POST | 运维：列出节点（含未批准） | ✅ v0.3 |
+| `/nxs/ops/metrics` | POST | 运维：指标 + 系统级关联异常 | ✅ v0.8 |
 | `/nxs/ack` | POST | 续租（只允许持有者续自己的租约） | ✅ v0.3 |
 | `/nxs/session` | GET | 查询会话任务图（只读） | M8 未完成，返回 501 |
 | `/nxs/artifact` | GET | 数据面：按一次性令牌取大产物 | M9 未实现，返回 501 |
@@ -400,6 +401,41 @@ POST /nxs/register            # 请求签名（无任务可签）
    若共用配额，运维会被自己的保护机制锁在门外。
 
 运维动作**全部留痕**（`outcome=ops:*`），否则"谁在何时给谁放了行"无法回答。
+
+#### `/nxs/ops/metrics`（v0.8）
+
+返回运行时指标与**系统级关联异常**：
+
+```json
+{
+  "totals": {"submitted": 4, "completed": 2, "failed": 0, "denied": 5},
+  "latency_ms": {"p50": 12.3, "p95": 45.6, "p99": 89.1},
+  "latency_samples": 128,
+  "by_type": {"work.calendar": {"completed": 2}},
+  "denied_by_rule": {"MX-ISSUER-01": 2, "AU-NODE-04": 1},
+  "nodes": [
+    {"node_id": "work-laptop", "state": "alive", "approved": true,
+     "received": 4, "completed": 2, "pending": 1, "in_flight": 1,
+     "capacity": 2, "backlog_ratio": 0.5, "bytes_out": 350}
+  ],
+  "anomalies": [
+    {"rule": "probe_pattern", "severity": "critical", "subject": "hub",
+     "message": "…", "rationale": "…", "suggestion": "…"}
+  ]
+}
+```
+
+⭐ **指标只在运维面暴露，节点拿不到。** 它是一张**拓扑画像**：
+"谁处理得多"、"谁在积压"、"拒绝集中在哪条规则"。单独看不敏感，
+合起来能推断网络规模与使用习惯。节点的视角应只有自己的任务。
+
+⚠ **趋势类告警要靠两次调用。** `silent_stall` 需要判断"积压是否在增长"，
+单次快照看不出。第一次调用时该规则被**跳过**而不是猜——
+跳过是"信息不足"，比编一个"可能在增长"诚实。
+
+⚠ **进程重启后指标归零。** 指标是滚动观测，不是账本；
+跨重启的趋势归审计与外部监控系统。详见
+[`observability.md`](observability.md)。
 
 ### `/fail` 为什么是 v0.2 新增的端点
 

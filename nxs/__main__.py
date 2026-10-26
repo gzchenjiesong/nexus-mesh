@@ -3,7 +3,7 @@
 四个子命令：
 
     nxs verify  配置自检：加载配置、校验合法性、打印生效的规则
-    nxs demo    跑八步验收 demo（同 ``make demo``）
+    nxs demo    跑九步验收 demo（同 ``make demo``）
     nxs serve   核心常驻：启动 HTTP 网关 + 定期维护（sweep）
     nxs status  查看当前节点状态与审计摘要
 
@@ -155,7 +155,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_demo(args: argparse.Namespace) -> int:
-    """跑八步验收 demo。``--net`` 时改走真实 HTTP（同一套断言）。"""
+    """跑九步验收 demo。``--net`` 时改走真实 HTTP（同一套断言）。"""
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root))
     try:
@@ -273,6 +273,155 @@ def cmd_status(args: argparse.Namespace) -> int:
     for rule, cnt in s.get("denied_by_rule", {}).items():
         _info(f"    · {rule:<16} × {cnt}")
     return 0
+
+
+def cmd_metrics(args: argparse.Namespace) -> int:
+    """查看运行时指标与**系统级关联**异常。
+
+    两种用法，刻意分开：
+
+    * ``nxs metrics``（本机）—— 直连本地进程状态。
+      适合开发、demo、以及"服务就在这台机器上"的场景。
+      注意它读的是**本进程内存**，所以只有同进程运行时才有数据。
+    * ``nxs metrics --url ...`` —— 走运维端点读**远端运行中的服务**。
+      这是生产环境的正常用法。
+
+    两者共用同一份渲染逻辑（:func:`_render_metrics`）：
+    同样的问题不该因为数据从哪来而有两套答案。
+    """
+    if args.url:
+        return _metrics_remote(args)
+
+    from .mgmt.observ import collect
+
+    try:
+        app = _load_app(args)
+    except ConfigError as exc:
+        _err(f"配置校验失败：{exc}")
+        return 2
+    app.start()
+
+    snap = collect(app.metrics, registry=app.registry,
+                   queue=app.stores.queue)
+    _render_metrics(snap.as_dict(), json_out=args.json)
+    return 0
+
+
+def _metrics_remote(args: argparse.Namespace) -> int:
+    """从运行中的 hub 读指标（走运维通道）。"""
+    import os
+
+    from .edge.client import OpsClient
+    from .mgmt.config import ENV_OPS_SECRET, MIN_SECRET_LENGTH
+
+    raw = os.environ.get(ENV_OPS_SECRET, "")
+    if len(raw) < MIN_SECRET_LENGTH:
+        _err(f"缺少运维凭据：环境变量 {ENV_OPS_SECRET} 未设置或过短")
+        return 2
+    try:
+        ops = OpsClient(args.url, secret=raw.encode())
+        payload = ops.metrics()
+    except NexusError as exc:
+        _err(str(exc))
+        return 1
+    _render_metrics(payload, json_out=args.json)
+    return 0
+
+
+def _pad(text: str, width: int) -> str:
+    """按**终端显示宽度**左对齐。
+
+    为什么不能直接用 f-string 的 ``:<14``：那个按字符数算，
+    而中文在终端占两格。一列中文混一个英文，表格就歪了。
+
+    运维工具歪掉的表格不只是难看——它会让人看错行，
+    尤其在"字节数"和"失败数"这种挨着的列上。
+    """
+    import unicodedata
+
+    shown = sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+                for ch in text)
+    return text + " " * max(0, width - shown)
+
+
+def _render_metrics(data: dict, *, json_out: bool = False) -> None:
+    """渲染指标与异常。**CLI 与运维端点共用同一份数据形状。**"""
+    import json as _json
+
+    if json_out:
+        print(_json.dumps(data, ensure_ascii=False, indent=2))
+        return
+
+    totals = data.get("totals", {})
+    _info(_color("运行时指标", "b") + f"  （已运行 {data.get('uptime_seconds', 0):.0f}s）")
+    _info(f"  提交 {totals.get('submitted', 0)} · 完成 {totals.get('completed', 0)} · "
+          f"失败 {totals.get('failed', 0)} · 拒绝 {totals.get('denied', 0)}")
+
+    lat = data.get("latency_ms") or {}
+    samples = data.get("latency_samples", 0)
+    if samples >= 2:
+        _info(f"  延迟 p50={lat.get('p50')}ms  p95={lat.get('p95')}ms  "
+              f"p99={lat.get('p99')}ms  （{samples} 个样本）")
+    else:
+        _info(_color(f"  延迟：样本不足（{samples} 个），暂不算分位数", "dim"))
+
+    by_type = data.get("by_type") or {}
+    if by_type:
+        _info("")
+        _info(_color("按任务类型", "b"))
+        for tname in sorted(by_type):
+            stat = by_type[tname]
+            total = stat.get("completed", 0) + stat.get("failed", 0)
+            rate = (stat.get("failed", 0) / total) if total else 0.0
+            _info(f"  {_pad(tname, 22)} 完成 {stat.get('completed', 0):<6} "
+                  f"失败 {stat.get('failed', 0):<6} 失败率 {rate:.0%}")
+
+    rules = data.get("denied_by_rule") or {}
+    if rules:
+        _info("")
+        _info(_color("拒绝分布", "b"))
+        for rule, cnt in sorted(rules.items(), key=lambda kv: -kv[1]):
+            _info(f"  {_pad(rule, 18)} × {cnt}")
+
+    nodes = data.get("nodes") or []
+    if nodes:
+        _info("")
+        _info(_color("节点", "b"))
+        _info(_color(
+            "  " + _pad("节点", 14) + _pad("域", 12) + _pad("状态", 10)
+            + _pad("收到", 8) + _pad("完成", 8) + _pad("失败", 8)
+            + _pad("待办", 8) + _pad("执行中", 9) + _pad("水位", 8) + "字节", "b"))
+        for n in nodes:
+            mark = "" if n.get("approved") else "  [未批准]"
+            backlog = n.get("backlog_ratio")
+            backlog_text = "∞" if backlog is None else f"{backlog:.1f}×"
+            _info("  " + _pad(n["node_id"], 14) + _pad(n["domain"], 12)
+                  + _pad(n["state"], 10) + _pad(str(n["received"]), 8)
+                  + _pad(str(n["completed"]), 8) + _pad(str(n["failed"]), 8)
+                  + _pad(str(n["pending"]), 8) + _pad(str(n["in_flight"]), 9)
+                  + _pad(backlog_text, 8) + str(n["bytes_out"]) + mark)
+
+    # ---- 异常 ----
+    anomalies = data.get("anomalies") or []
+    _info("")
+    if not anomalies:
+        _info(_color("系统级关联异常：无", "ok"))
+        _info(_color(
+            "  （只报「组合异常」——单指标超阈值不在此列，那种告警会响到没人看）",
+            "dim"))
+        return
+
+    _info(_color(f"系统级关联异常：{len(anomalies)} 条", "bad"))
+    for a in anomalies:
+        sev = a.get("severity", "info")
+        color = {"critical": "bad", "warn": "warn"}.get(sev, "dim")
+        _info("")
+        _info(f"  {_color('●', color)} [{sev}] {a['rule']} · {a['subject']}")
+        _info(f"      {a['message']}")
+        # rationale 是这类规则存在的资格证明，必须显示出来——
+        # 否则运维会问"这凭什么算异常"
+        _info(_color(f"      为什么单看正常：{a['rationale']}", "dim"))
+        _info(_color(f"      建议：{a['suggestion']}", "dim"))
 
 
 def cmd_candidates(args: argparse.Namespace) -> int:
@@ -617,7 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "示例：\n"
             "  nxs verify                         自检示例配置\n"
-            "  nxs demo                           跑八步验收 demo（同进程）\n"
+            "  nxs demo                           跑九步验收 demo（同进程）\n"
             "  nxs demo --net                     同一套断言，走真实 HTTP\n"
             "  nxs serve -c config/local.yaml     常驻：监听端口 + 定期维护\n"
             "  nxs status                         查看节点与审计\n\n"
@@ -639,10 +788,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(sp)
     sp.set_defaults(func=cmd_verify)
 
-    sp = sub.add_parser("demo", help="跑八步验收 demo")
+    sp = sub.add_parser("demo", help="跑九步验收 demo")
     add_common(sp)
     sp.add_argument("--net", action="store_true",
-                    help="改走真实 HTTP（同一套八步断言，验证传输层）")
+                    help="改走真实 HTTP（同一套九步断言，验证传输层）")
     sp.set_defaults(func=cmd_demo)
 
     sp = sub.add_parser("serve", help="核心常驻（含定期维护）")
@@ -670,6 +819,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--min-level", default=None,
                     help="需要的最低应答等级：metadata/summary/fragment/full_text")
     sp.set_defaults(func=cmd_candidates)
+
+    sp = sub.add_parser(
+        "metrics",
+        help="运行时指标与系统级关联异常（本机进程状态，或 --url 读远端）")
+    add_common(sp)
+    sp.add_argument("--url", default=None,
+                    help="读运行中的 hub（走运维通道）。省略时读本进程内存，"
+                         "仅在同进程运行时有数据")
+    sp.add_argument("--json", action="store_true",
+                    help="输出 JSON（便于喂给其他工具）")
+    sp.set_defaults(func=cmd_metrics)
 
     sp = sub.add_parser(
         "doctor", help="部署前自检（持久化 / 权限 / TLS / 运维通道）")

@@ -1,6 +1,6 @@
-"""八步验收 Demo —— 项目的可执行说明书。
+"""九步验收 Demo —— 项目的可执行说明书。
 
-``make demo`` 跑的就是这个文件。八步里最要紧的是 **4、5、6 步**：
+``make demo`` 跑的就是这个文件。九步里最要紧的是 **4、5、6 步**：
 它们验证的是这个项目**区别于普通消息队列**的地方。
 
     1  启动核心
@@ -18,7 +18,7 @@
 * ``nxs demo``       —— 同进程传输（快，无网络依赖）
 * ``nxs demo --net`` —— **同一套断言，走真实 HTTP**
 
-``--net`` 不是另一份实现：八步代码完全共用，只有 ``transports`` 换了。
+``--net`` 不是另一份实现：九步代码完全共用，只有 ``transports`` 换了。
 这正是"传输可替换"的证明——如果节点逻辑真的与传输解耦，
 换个传输跑同一套断言应当不需要改任何一行流程代码。
 """
@@ -148,9 +148,9 @@ def make_transports(app: NexusApp, *, net: bool) -> tuple[dict[str, Any], Any]:
 # ---------------------------------------------------------------------------
 
 def main(net: bool = False, config_path: str | None = None) -> int:
-    total = 8
+    total = 9
     mode = "HTTP 传输（真实网络）" if net else "同进程传输"
-    print(c("\n  Nexus Mesh · 八步验收 Demo", "b"))
+    print(c("\n  Nexus Mesh · 九步验收 Demo", "b"))
     print(c(f"  传输：{mode}", "dim"))
     print(c("  " + "─" * 62, "dim"))
 
@@ -172,15 +172,15 @@ def main(net: bool = False, config_path: str | None = None) -> int:
         for f in failures:
             print(c(f"    · {f}", "bad"))
         return 1
-    print(c("  八步全部通过 ✓", "ok"))
+    print(c("  九步全部通过 ✓", "ok"))
     print(c("  其中第 4、5、6 步是安全断言——它们才是这个项目的意义所在。", "dim"))
     return 0
 
 
 def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
                cl: dict[str, NodeClient], *, net: bool) -> list[str]:
-    """八步流程本体。**两种传输共用这一段**，不复制两份。"""
-    total = 8
+    """九步流程本体。**两种传输共用这一段**，不复制两份。"""
+    total = 9
     failures: list[str] = []
     sess = "ses-demo-1"
 
@@ -337,6 +337,76 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
         failures.append("第 8 步：候选排序不确定")
         print(c("       ✗ 候选排序不确定（同一输入出现多种顺序）", "bad"))
     detail("排序依据：同域优先 → 等级刚好够用 → 负载率低 → 节点 ID 字典序")
+
+    # ---- 9 ----
+    step(9, total, "★ 可观测：单看都正常的指标，合起来才说明问题")
+    from nxs.mgmt.observ import collect, detect_anomalies
+
+    # 前八步已经产生了若干拒绝。先看指标本身
+    snap = collect(app.metrics, registry=app.registry,
+                   queue=app.stores.queue)
+    payload = snap.as_dict()
+    ok(f"提交 {payload['totals']['submitted']} · "
+       f"完成 {payload['totals']['completed']} · "
+       f"拒绝 {payload['totals']['denied']}")
+    if payload["denied_by_rule"]:
+        detail("拒绝分布：" + ", ".join(
+            f"{k}×{v}" for k, v in sorted(payload["denied_by_rule"].items())))
+
+    anomalies = detect_anomalies(snap)
+    detail("异常规则只报「组合异常」——单指标超阈值不算，那种告警会响到没人看")
+    if anomalies:
+        for a in anomalies:
+            print(f"         {c('●', 'warn')} [{a.severity}] {a.rule} · {a.subject}")
+            print(f"           {a.message}")
+            detail(f"为什么单看正常：{a.rationale[:50]}…")
+    else:
+        ok("当前无组合异常（健康）")
+
+    # ★ 演示：制造一次"权限试探"，看它是否被识别
+    #   单撞一条规则是配错（良性），撞多种互不相关的规则才像在摸边界。
+    #
+    #   三笔**全部由 hub 发出**——这是刻意的：规则按节点归集，
+    #   分散到不同节点上就凑不出"同一个节点撞多种规则"这个形态，
+    #   而那正是要被识别的信号。
+    detail("现在制造一次试探：让 hub 依次撞 3 种不同的规则")
+    probes = [
+        ("未知类型", lambda: hub.publish(
+            from_node="hub", to_node="node-a", task_type="demo.ghost",
+            params={}, session_id=sess)),
+        ("未知节点", lambda: hub.publish(
+            from_node="hub", to_node="ghost-node", task_type="demo.echo",
+            params={}, session_id=sess)),
+        ("矩阵不允许", lambda: hub.publish(
+            # 矩阵里**没有** hub → hub 这条规则（示例配置只配了
+            # hub→zone-a、hub→zone-b、zone-b→hub）。协调节点把活派给自己
+            # 这件事本身没有意义，所以没有规则——正是"默认拒绝"的体现。
+            from_node="hub", to_node="hub", task_type="demo.synthesize",
+            params={}, session_id=sess)),
+    ]
+    hit: list[str] = []
+    for label, fn in probes:
+        try:
+            fn()
+            detail(f"{label} → （竟然成功）")
+        except PolicyDenied as e:
+            hit.append(e.rule_id.value)
+            detail(f"{label} → {e.rule_id.value}")
+
+    after = detect_anomalies(
+        collect(app.metrics, registry=app.registry, queue=app.stores.queue)
+    )
+    probed = [a for a in after if a.rule == "probe_pattern"]
+    if probed:
+        ok(f"识别为权限试探：{probed[0].message}")
+        detail("★ 单看每一次拒绝都正常（默认拒绝必然拒），"
+               "但撞到多种不同规则，更像在逐条试探边界")
+        detail(f"建议：{probed[0].suggestion[:60]}…")
+    else:
+        # 不算失败，但要说清为什么没触发——否则读者不知道是漏了还是没到条件
+        detail(f"未触发试探告警（已命中 {len(set(hit))} 种规则："
+               f"{', '.join(sorted(set(hit)))}）")
+        detail("规则要求**同一节点**撞到 3 种以上互不相关的规则")
 
     # ---- 审计摘要 ----
     print(c("\n  审计摘要", "b"))

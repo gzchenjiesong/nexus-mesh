@@ -349,6 +349,32 @@ nxs candidates --type work.calendar --from-node hub \
 > ⚠ 候选名单**只在 hub 本机可见**，没有对应 HTTP 端点——
 > "谁能干这个活"是拓扑信息。节点侧拿不到，也不需要拿。
 
+最后看系统健康度：
+
+```bash
+export NXS_OPS_SECRET=<与服务端一致>
+nxs metrics --url https://nxs.example.com/nxs
+```
+
+```
+运行时指标  （已运行 3600s）
+  提交 42 · 完成 40 · 失败 0 · 拒绝 2
+  延迟 p50=12.3ms  p95=45.6ms  p99=89.1ms  （128 个样本）
+
+节点
+  节点          域          状态      收到    完成    失败    待办    执行中   水位    字节
+  work-laptop   zone-work   alive     42      40      0       0       0        0.0×    3500
+
+系统级关联异常：无
+```
+
+> ⚠ **这里没有阈值告警，是设计如此。** 只报"单看正常、合起来可疑"的组合
+> （如"字节大 **且** 任务多"= 疑似批量导出；"积压高 **且** 零产出"= 静默卡死）。
+> 阈值告警会在正常业务上天天响，响到没人看就失去了意义。
+> 设计理由见 [`docs/observability.md`](../docs/observability.md)。
+>
+> ⚠ **指标是内存态，重启归零。** 长期趋势看审计日志。
+
 ---
 
 ## 10. 出问题时的排查顺序
@@ -367,6 +393,8 @@ nxs candidates --type work.calendar --from-node hub \
 | 长任务反复重试 | 节点 `renew_interval` 是否设置；续租失败会丢产出 |
 | **产物被拒 `FM-BODY-04`** | 文件超过约 **186 KB**（信封上限 256 KB，base64 膨胀 33%）。小于它就塞信封；更大就走 `kind=reference` 传坐标。实测数据与判断见 [`docs/artifact-size.md`](../docs/artifact-size.md) |
 | 想确认到底能传多大 | `python examples/probe_artifact_size.py` —— 实测，不是读配置推的 |
+| **想确认系统现在健康吗** | `nxs metrics --url https://<域名>/nxs` —— 指标 + 系统级关联异常。注意它**没有阈值告警**（设计如此），只报"单看正常、合起来可疑"的组合 |
+| 指标显示全 0 | 指标是**内存态**，进程重启即归零（审计日志才是账本）。若重启后一直 0，说明打点没接上，不是正常的 |
 | 运维接口 501 | 服务器上 `NXS_OPS_SECRET` 没配或过短（<16 字节） |
 | SSE 事件不实时 | 代理缓冲没关；或直接设 `sse_enabled: false` 退回轮询 |
 | 重启后节点全没了 | `stores` 用了 memory —— 改成 sqlite |
