@@ -88,6 +88,11 @@ make demo-net      # 同一套八步断言，走真实 HTTP
 | `nxs candidates` | 查某任务类型的候选执行者**及排序依据**（运维视角，不经 HTTP） |
 | `nxs status` | 查看节点状态与审计摘要 |
 
+**产物能多大？** 实测信封上限约 **186 KB 文件**（含 base64 开销）。
+更大的产物走 `kind=reference` 传坐标（10 MB 文件只占几十字节）。
+数据与判断见 [`docs/artifact-size.md`](docs/artifact-size.md)，
+可用 `python examples/probe_artifact_size.py` 复现。
+
 `nxs demo` 会跑出一段完整的协作流程，包括**三条安全断言**：
 
 ```
@@ -162,7 +167,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.6.0）
+### 已实现（v0.7.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -179,6 +184,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 | **HTTP 传输层**（网关 + 节点客户端，走真实网络） | ✅ |
 | **SSE 通知流**（只推"有活"，不推内容；断线自动退回短轮询） | ✅ |
 | **自动匹配**（按能力选目标，确定性排序，不泄漏候选） | ✅ |
+| **产物引用形态**（`kind=reference` 传坐标，大文件不进信封） | ✅ |
 | **节点自注册 + 心跳**（不用改云端配置重启） | ✅ |
 | **长任务续租**（`/nxs/ack`，不靠调大租约） | ✅ |
 | **远程运维**（批准 / 吊销 / 释放租约，走 HTTP + 审计） | ✅ |
@@ -273,6 +279,14 @@ make demo
 See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
+
+**v0.7.0** — artifact size is answered with measurements, not guesses.
+The envelope carries ~186 KB (256 KB body minus base64's 33%); anything larger
+goes through `kind=reference`, where a 10 MB file costs 96 bytes of coordinates.
+`docs/artifact-size.md` has the numbers and the decision table; run
+`python examples/probe_artifact_size.py` to reproduce them. Also fixed a
+bypass found along the way: `kind="freetext"` was decorative — a node could
+claim it, skip sanitisation, and look safe (364 tests).
 
 **v0.6.0** — it can dispatch on its own. Omit `to_node` and the hub picks a
 provider by capability, in a **deterministic** order (same-domain →

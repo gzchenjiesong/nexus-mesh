@@ -71,9 +71,10 @@ class ResponseBoundary:
         """校验并改写产出。通过则返回改写后的产物列表。
 
         流程：
-        ① 逐条规范化（剥离自由文本的注入外层）
-        ② 交给策略引擎做完整校验（等级、字段白名单、长度）
-        ③ 强制把 ``semantics`` 改写为 ``data``
+        ① 逐条校验 kind 与声明自洽（防"自称 freetext 却绕过清洗"）
+        ② 逐条规范化（剥离自由文本的注入外层）
+        ③ 交给策略引擎做完整校验（等级、字段白名单、长度）
+        ④ 强制把 ``semantics`` 改写为 ``data``
 
         任一步失败即抛 :class:`PolicyDenied`，**不返回部分结果**——
         部分成功会让调用方误以为拿到了完整数据。
@@ -85,8 +86,10 @@ class ResponseBoundary:
                 f"{node_id} has no capability {task.type}",
             )
 
-        sanitized = [self._sanitize(node_id, cap, a) for a in artifacts]
+        for art in artifacts:
+            check_kind_matches_declaration(cap, art)
 
+        sanitized = [self._sanitize(node_id, cap, a) for a in artifacts]
         # 交给策略引擎做权威判定（等级 / 白名单 / 长度）
         probe = replace(task, artifacts=list(sanitized))
         self._policy.check_response(node_id, probe)
@@ -206,6 +209,51 @@ def sanitize_artifact(cap: Capability, art: Artifact) -> Artifact:
     return replace(art, data=cleaned, provenance=prov)
 
 
+def check_kind_matches_declaration(cap: Capability, art: Artifact) -> None:
+    """校验产物的 ``kind`` 与能力的声明是否自洽。不符即拒。
+
+    ⭐ **为什么这条不能省**
+
+    ``kind="freetext"`` 是一个**语义承诺**：意思是"这里面是人类自然语言，
+    我按自由文本处理过"（剥控制字符、剥指令性前缀、截断）。
+
+    但清洗的实际依据是 ``cap.freetext_fields``——按**字段名**判断。
+    于是存在一条绕过路径：
+
+    ```
+    能力声明 response_fields=["echo","level"]，freetext_fields=[]   ← 没声明自由文本
+    节点回传 kind="freetext", data={"echo": 250KB 的注入文本}       ← 却自称 freetext
+    ```
+
+    结果：``sanitize_artifact`` 看到 ``freetext_fields`` 为空，**直接原样返回**。
+    注入文本未经任何处理就通过了边界，而 ``kind`` 标签让接收方以为
+    它已经被处理过。**这比不标更危险——它给了一个错误的安心感。**
+
+    修法选"拒绝"而不是"自动清洗"：声明与实现不符是一个**应当被发现**
+    的错误。静默把它洗干净，等于把这个不一致藏起来——
+    而本项目的贯穿原则是"声明即承诺"（角色卡、应答等级都按这个执行）。
+
+    同理，``kind="reference"`` 也不该被当成内容传递的通道：
+    引用形态的 payload 是坐标，如果能力连 ``response_fields`` 都没声明，
+    说明这个类型根本没打算返回引用。
+    """
+    if art.kind == "freetext" and not cap.freetext_fields:
+        raise PolicyDenied(
+            RuleId.WL_FREETEXT_NOT_ALLOWED,
+            f"artifact kind=freetext but {cap.type} declares no freetext_fields",
+        )
+    if art.kind == "reference" and not cap.response_fields:
+        # ⚠ **这一条是冗余防御，不是必需。**
+        #   没有 response_fields 时，后面的字段白名单本来就会拒掉任何字段。
+        #   留着它的价值只有一个：错误码更准确（指向"没声明字段"
+        #   而不是"这个字段不在白名单里"）。
+        #   写清楚是因为——把冗余防御说成关键防线，会让人误判真实风险位置。
+        raise PolicyDenied(
+            RuleId.WL_FIELD_NOT_ALLOWED,
+            f"artifact kind=reference but {cap.type} declares no response_fields",
+        )
+
+
 # ---------------------------------------------------------------------------
 # 节点侧边界
 # ---------------------------------------------------------------------------
@@ -279,11 +327,15 @@ class LocalBoundary:
                 f"ceiling={ceiling}",
             )
 
-        # -- ② 自由文本清洗（在字段检查之前做，因为清洗会改值不改键） --
+        # -- ② kind 与声明自洽（两层用同一个函数，防止两边判断分叉） --
+        if cap is not None:
+            check_kind_matches_declaration(cap, artifact)
+
+        # -- ③ 自由文本清洗（在字段检查之前做，因为清洗会改值不改键） --
         if cap is not None:
             artifact = sanitize_artifact(cap, artifact)
 
-        # -- ③ 字段白名单（降级模式下无从判断，跳过） --
+        # -- ④ 字段白名单（降级模式下无从判断，跳过） --
         if cap is not None:
             allowed = set(cap.response_fields)
             stray = _extract_fields(artifact.data) - allowed
@@ -294,7 +346,7 @@ class LocalBoundary:
                     f"local boundary: {len(stray)} field(s) outside allow-list",
                 )
 
-            # -- ④ 自由文本长度 --
+            # -- ⑤ 自由文本长度 --
             for fname in cap.freetext_fields:
                 value = _get_field(artifact.data, fname)
                 if value is None:
@@ -311,7 +363,7 @@ class LocalBoundary:
                         f"local boundary: {fname} size={size}",
                     )
 
-        # -- ⑤ 语义：产出永远是数据 --
+        # -- ⑥ 语义：产出永远是数据 --
         prov = dict(artifact.provenance)
         prov.setdefault("local_boundary", "passed")
         return replace(artifact, provenance=prov)

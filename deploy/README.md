@@ -365,6 +365,8 @@ nxs candidates --type work.calendar --from-node hub \
 | 产出被拒 `WL-FIELD-001` | 产出的字段是否都在 `response_fields` 里（**只报数量不报字段名**，去节点侧日志看） |
 | 产出被拒 `WL-LEVEL-002` | 等级超过能力声明或卡片上限。**注意节点侧边界会先拦**，看节点日志而不是中心日志 |
 | 长任务反复重试 | 节点 `renew_interval` 是否设置；续租失败会丢产出 |
+| **产物被拒 `FM-BODY-04`** | 文件超过约 **186 KB**（信封上限 256 KB，base64 膨胀 33%）。小于它就塞信封；更大就走 `kind=reference` 传坐标。实测数据与判断见 [`docs/artifact-size.md`](../docs/artifact-size.md) |
+| 想确认到底能传多大 | `python examples/probe_artifact_size.py` —— 实测，不是读配置推的 |
 | 运维接口 501 | 服务器上 `NXS_OPS_SECRET` 没配或过短（<16 字节） |
 | SSE 事件不实时 | 代理缓冲没关；或直接设 `sse_enabled: false` 退回轮询 |
 | 重启后节点全没了 | `stores` 用了 memory —— 改成 sqlite |

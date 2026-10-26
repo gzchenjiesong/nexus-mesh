@@ -174,7 +174,10 @@ MODULES: tuple[Module, ...] = (
     Module("M6", "信箱", "数据面", "nxs/data/mailbox.py", "已实现", ("G1",)),
     Module("M7", "任务生命周期", "数据面", "nxs/data/task.py", "已实现", ("G1", "G2")),
     Module("M8", "会话与任务图", "数据面", "nxs/data/task.py:session_view", "部分实现", ("G1", "G3")),
-    Module("M9", "产物通道", "数据面", "nxs/data/artifact（未建）", "未实现", ("G1",)),
+    Module("M9", "产物通道", "数据面",
+           "nxs/core/models.py（kind=reference，坐标形态可用）· "
+           "一次性令牌与 ArtifactStore 未做 · docs/artifact-size.md",
+           "部分实现", ("G1",)),
     Module("M10", "应答边界", "数据面", "nxs/data/boundary.py", "已实现", ("G2",)),
     # ---- 管理面 ----
     Module("M11", "配置中心", "管理面", "nxs/mgmt/config.py", "已实现", ("G4", "G5")),
@@ -401,6 +404,15 @@ FEATURES: tuple[Feature, ...] = (
             "nxs/data/task.py:TaskLifecycle.session_view",
             ("G1", "G3"), "P1"),
 
+    # ---------------- M9 产物通道 ----------------
+    # 实测后重新界定：**不扩容，走引用**（见 docs/artifact-size.md）
+    Feature("M9.F1", "引用传递形态（kind=reference 传坐标，不传内容）",
+            "nxs/core/models.py:Artifact（kind）+ nxs/data/boundary.py（白名单）",
+            ("G1",), "P0"),
+    Feature("M9.F2", "产物体积实测脚本（信封上限可复现）",
+            "examples/probe_artifact_size.py",
+            ("G1", "G3"), "P1"),
+
     # ---------------- M10 应答边界 ----------------
     Feature("M10.F1", "字段白名单强制执行",
             "nxs/data/boundary.py:ResponseBoundary.enforce",
@@ -420,6 +432,9 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M10.F6", "自由文本规范化两层共用同一实现（防逻辑分叉）",
             "nxs/data/boundary.py:sanitize_artifact",
             ("G2",), "P1", ("S8",)),
+    Feature("M10.F7", "kind 与声明自洽（禁止自称 freetext 绕过清洗）",
+            "nxs/data/boundary.py:check_kind_matches_declaration",
+            ("G2",), "P0", ("S8", "S17")),
 
     # ---------------- M11 配置中心 ----------------
     Feature("M11.F1", "配置加载与严格校验（非法即拒绝启动）",
@@ -661,6 +676,7 @@ SECURITY: tuple[SecurityReq, ...] = (
     SecurityReq("S14", "节点侧边界先于传输执行——数据离开节点时已裁剪到自身声明范围"),
     SecurityReq("S15", "候选集合与匹配失败原因不外泄——「谁能干这个活」本身是拓扑信息"),
     SecurityReq("S16", "幂等命中须归属一致——不得凭幂等键探测他人任务"),
+    SecurityReq("S17", "产物 kind 必须与能力声明自洽——不得自称 freetext 绕过清洗"),
 )
 
 

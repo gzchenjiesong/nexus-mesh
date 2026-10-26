@@ -291,3 +291,47 @@ class TestDeployCheck:
         )
         assert result.returncode != 0, "memory 后端在生产模式下没有被拦下"
         assert "memory" in (result.stdout + result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# 4. 产物大小实测脚本
+# ---------------------------------------------------------------------------
+
+class TestArtifactSizeProbe:
+    """``examples/probe_artifact_size.py`` 是回答"能传多大"的工具。
+
+    它必须真的能跑 —— 一份跑不起来的测量工具，比没有更糟：
+    人会照着它给出的数字做决策。
+    """
+
+    @covers("M9.F2")
+    def test_probe_script_runs_and_reports_limit(self):
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "examples/probe_artifact_size.py"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=300,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        out = result.stdout
+        # 必须报出上限
+        assert "max_body_bytes" in out
+        # 必须给出实测结论（而不是只说"看配置"）
+        assert "信封能带约" in out
+        # 必须有被拒的证据 —— 否则说明探测没真的加到超限
+        assert "FM-BODY-04" in out, "探测没有触及上限，结论不可信"
+
+    @covers("M9.F2")
+    def test_reference_payload_does_not_scale_with_file_size(self):
+        """"传坐标"的核心性质：信封大小与文件大小**无关**。
+
+        这条用纯计算验证，不依赖脚本：
+        10 MB 和 100 MB 的引用，payload 应当一样小。
+        """
+        import json
+
+        small = {"path": "/d/a.pdf", "sha256": "a" * 64, "size": 10 * 1024 * 1024}
+        large = {"path": "/d/b.pdf", "sha256": "b" * 64, "size": 100 * 1024 * 1024}
+        assert abs(len(json.dumps(small)) - len(json.dumps(large))) < 10
+        assert len(json.dumps(small)) < 200
