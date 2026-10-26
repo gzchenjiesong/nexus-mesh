@@ -18,6 +18,12 @@ System Definition · v1.2
 > （接入层 `E1–E2` / 控制面 `C1–C3` / 数据面 `D1–D4` / 管理面 `M1–M4`），
 > 因与其他编号体系撞号而合并。对照见 `CONTRIBUTING.md`「已废弃的字母」。
 >
+> **各模块的实现状态不写在这里。** 状态会变，写两处必然不一致。
+> 唯一权威是 [`traceability/registry.py`](../../traceability/registry.py)，
+> 人可读的视图是 [`docs/architecture.md`](../architecture.md) 的模块表 ——
+> 两者由 `tests/test_docs_consistency.py` 守护一致性。
+> 本文只负责"这个系统应该是什么样"。
+>
 > **本文档只列了 13 个模块**（M1–M9、M11–M14），缺 **M10 应答边界** ——
 > 这不是遗漏：`M10` 是在后续的需求审查中发现并补入的，当时的模块列表里
 > 没有单列它（其职责散落在别处）。补入的理由见
@@ -306,7 +312,7 @@ M7 任务生命周期 Task Lifecycle`nxs/data/task`
 - **幂等键（idempotency key）是必填字段**，由 Issuer 生成。重试不能产生重复副作用。
 - 状态流转不可跳跃、不可回退（除了 input_required ↔ working）。
 
-M8 会话与任务图 Session & Task Graph`nxs/data/session`
+M8 会话与任务图 Session & Task Graph`nxs/data/task.py:session_view`
 
 职责：为一次用户诉求提供统一上下文标识，跟踪该诉求下所有任务的依赖关系与推进状态。
  输入：Session 创建 / 任务加入 / 依赖声明
@@ -318,7 +324,7 @@ M8 会话与任务图 Session & Task Graph`nxs/data/session`
 - 怎么拆、拆几个、发给谁——由 Issuer / Decomposer 角色（即 Agent）决定，Nexus 只负责记录"它声明了这样的依赖关系"，并在依赖满足时通知。**一旦 Nexus 开始"决定"怎么拆，它就退回了 Hub 模式。**
 - Session 是**配额统计与授权复用**的天然边界（见 8.4）。
 
-M9 产物通道 Artifact Channel`nxs/data/artifact`
+M9 产物通道 Artifact Channel`nxs/core/models.py`（kind）· 存储约定
 
 职责：承接超过信封承载能力的产物（大文档、代码库检索结果集等）。
  输入：产物提交（产出方）/ 一次性令牌兑换（消费方）
@@ -346,7 +352,7 @@ M12 审计留痕 Audit Trail`nxs/mgmt/audit`
 - 审计日志**写入失败时熔断**——"不可追溯的协作"比"中断"更糟。
 - 日志按保留期分层：热数据（近期，可查询）与冷归档。
 
-M13 可观测 Observability`nxs/mgmt/observ`
+M13 可观测 Observability`nxs/mgmt/observ.py`
 
 职责：指标、链路追踪、告警。
  关键指标：
@@ -358,9 +364,11 @@ M13 可观测 Observability`nxs/mgmt/observ`
 
 关键约束：告警要建在**系统级关联**上，不只是单成员级。
 
-M14 运维接口 Ops API`nxs/mgmt/ops`
+M14 运维接口 Ops API`nxs/edge/gateway.py`（ops 端点）· `OpsClient`
 
-职责：人工干预入口：吊销成员、清空队列、熔断某条链路、强制释放租约、暂停某类型任务。
+职责：人工干预入口：吊销节点、清空队列、熔断某条链路、强制释放租约、暂停某类型任务。
+ **当前已实现**：批准、吊销、释放租约、查节点、读指标。
+ **尚未实现**：清空队列、熔断链路、暂停某类型任务 —— 这三项目前仍需改配置重启。
  关键约束：所有操作需鉴权 + 留痕。**这是"出事时能快速止血"的那条路径，必须存在且必须好用**——没有它，出问题时只能改代码重启。
 
 ### 5.5 Port 抽象层
@@ -636,6 +644,11 @@ Nexus 提供**六种基本交互模式**作为原语，以及一个**会话容�
   }
 }
 ```
+
+> ⚠ 上面 `provenance.rule_id` 里的 `WL-CAL-001` 是**示例值**，不是本项目
+> 实际存在的错误码（实际错误码见 `nxs/core/errors.py` 与
+> [`docs/protocol.md`](../protocol.md) §9）。这里用它只想表达
+> "provenance 应记录这次产出命中了哪条规则"这个结构。
 
 > **信封里三个"★"字段是安全设计的支点，任何一个缺失都会让防线失效：**
 

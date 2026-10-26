@@ -2,6 +2,26 @@ Repo Init · Planning
 
 # v0.1 MVP 与 GitHub 仓库初始化规划
 
+> ## ⚠ 这是历史快照（2026-10-07），不是当前规范
+>
+> 本文记录 v0.1 时期的规划与判断，**刻意不改写** —— 那份时间切片本身有价值。
+>
+> **但它用的模块编号是旧体系，8 个里有 7 个与现在不同。**
+> 直接按本文的 M 编号去代码里找模块会**全部找错**：
+>
+> | 本文说的 | 实际是现在 |
+> |---|---|
+> | M1 配置中心 | M11 |
+> | M4 任务生命周期 | M7 |
+> | M6 应答边界 | M10 |
+> | M7 网关与认证 | M1 |
+>
+> **完整对照见 [`03-traceability-review.md` §6.5](03-traceability-review.md)。**
+> 当前有效的编号一律以 [`traceability/registry.py`](../../traceability/registry.py) 为准。
+>
+> 若要看当前系统是什么样，读 [`01-system-definition.md`](01-system-definition.md)
+> 或 [`docs/architecture.md`](../architecture.md)。
+
 为了让你能尽早在 GitHub 完成项目初始化，这份文档给出：**仓库名的可用性核查结果（有意外发现）**、开源前必须做的脱敏清单、需要你提供的全部内容、v0.1 的功能范围与验收标准。
 
 2026-10-07

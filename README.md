@@ -61,10 +61,20 @@ Nexus Mesh 把这两件事作为核心，而不是附属功能。
 | [`docs/design/02-numbering-standard.md`](docs/design/02-numbering-standard.md) | 编号体系：G/M/F/R/T 纵向链 + 横切标签 |
 | [`docs/architecture.md`](docs/architecture.md) | 工程视角的架构说明与已知缺口 |
 | [`traceability/registry.py`](traceability/registry.py) | **需求编号的唯一真相源**（可执行） |
+| [`docs/artifact-size.md`](docs/artifact-size.md) | 产物能多大：实测数据 + 决策表 |
+| [`docs/observability.md`](docs/observability.md) | 为什么这里没有阈值告警 |
+| [`docs/docs-audit.md`](docs/docs-audit.md) | **文档腐化审计**：方法与历史发现 |
 | [`traceability/MATRIX.md`](traceability/MATRIX.md) | 追溯矩阵（由测试自动生成） |
 
-设计文档与代码的一致性由 `tests/test_traceability.py` **自动校验**，
-不是靠人工维护 —— 详见 [`CONTRIBUTING.md`](CONTRIBUTING.md) 的「可执行的追溯」。
+文档与代码的一致性由测试**自动校验**，不是靠人工维护，分两条链：
+
+* `tests/test_traceability.py` —— **需求 → 功能 → 测试**的覆盖完整性（零缺口）
+* `tests/test_docs_consistency.py` —— **文档声称的事实**与代码是否相符
+  （模块状态、端点、错误码、步数、路径……17 项）
+
+后者是 2026-10-26 一次审计的产物：当时发现 11 处文档腐化，
+其中两处把**已完成的功能列进了「尚未实现」**。
+详见 [`docs/docs-audit.md`](docs/docs-audit.md) 与 [`CONTRIBUTING.md`](CONTRIBUTING.md) 的 C9。
 
 ### 快速开始
 
@@ -73,7 +83,7 @@ git clone https://github.com/gzchenjiesong/nexus-mesh.git
 cd nexus-mesh
 make install
 make demo          # 等价于 nxs demo
-make demo-net      # 同一套八步断言，走真实 HTTP
+make demo-net      # 同一套九步断言，走真实 HTTP
 ```
 
 四个命令：
@@ -82,7 +92,7 @@ make demo-net      # 同一套八步断言，走真实 HTTP
 |---|---|
 | `nxs verify` | 配置自检：校验角色卡、矩阵、凭据的一致性 |
 | `nxs doctor` | **部署前自检**：持久化、权限、TLS、运维通道（加 `--production` 按生产标准） |
-| `nxs demo` | 跑八步验收 demo（**先看这个**）。加 `--net` 改走真实网络 |
+| `nxs demo` | 跑九步验收 demo（**先看这个**）。加 `--net` 改走真实网络 |
 | `nxs serve` | 核心常驻：**真的监听 HTTP 端口** + 定期维护 |
 | `nxs ops` | 远程运维：`approve` / `revoke` / `release` / `nodes` |
 | `nxs candidates` | 查某任务类型的候选执行者**及排序依据**（运维视角，不经 HTTP） |
@@ -168,7 +178,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.8.0）
+### 已实现（v0.8.1）
 
 | 模块 | 状态 |
 |---|---|
@@ -197,22 +207,21 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 | 项 | 说明 |
 |---|---|
-| **能力匹配（Capability-Match）** | 当前用 Direct 模式（指定目标节点） |
-| **会话任务图与依赖跟踪** | 目前只记录 `session_id` 用于审计聚合 |
-| **大产物的产物通道** | 当前应答都走信封（小数据） |
+| **会话任务图与依赖跟踪** | 目前只记录 `session_id` 用于审计聚合（M8 部分实现） |
+| **产物的带外通道** | `kind=reference` 可传坐标（10 MB 文件只占 96 字节），但**一次性令牌与 ArtifactStore 未做** —— 跨网络时对方能否取到坐标取决于你的存储约定。见 [`docs/artifact-size.md`](docs/artifact-size.md) |
 | **mTLS** | 目前用共享密钥 HMAC；接口不变，Core 不感知认证方式 |
-| **可观测与运维接口** | 指标、告警、在线吊销等仍走 CLI 与改配置 |
+| **外部协议适配（A2A 等）** | M2 未建 |
 
 ### 开发
 
 ```bash
 make install     # 建 venv 并安装（仅 PyYAML 一个运行时依赖）
-make test        # 190 个测试
-make demo        # 八步验收
+make test        # 跑全部测试
+make demo        # 九步验收
 ```
 
-`traceability/MATRIX.md` 是可执行的追溯表 —— 由测试生成，覆盖 66 个
-需求编号项，零缺口。
+`traceability/MATRIX.md` 是可执行的追溯表 —— 由测试生成，覆盖 128 个
+编号项（105 功能点 + 23 模块需求），零缺口。
 
 ### 许可证
 
@@ -282,13 +291,20 @@ See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
 
+**v0.8.1** — a docs audit. This project is vibecoding: the requirement docs
+are the real dependency. An audit of ~5300 lines of documentation against the
+code found **11 cases of drift**, two of which listed already-shipped modules
+under "not implemented". Fixed all of them, added the missing
+old→new module-number crosswalk, and — the important part — added 17 guard
+tests so it can't happen silently again (`tests/test_docs_consistency.py`).
+
 **v0.8.0** — observability with no threshold alerts, by design.
 `nxs metrics` reports counters, latency percentiles and **five correlation rules**
 that only fire on combinations — "big responses" is fine, "many tasks" is fine,
 "big responses *and* many tasks" is what looks like bulk extraction. Every rule
 carries a `rationale` field saying *why each metric is normal on its own*; a rule
 that can't fill it would just be a threshold alert and doesn't belong here
-(404 tests). Metrics never leave the ops surface, and they contain no task content.
+Metrics never leave the ops surface, and they contain no task content.
 
 **v0.7.0** — artifact size is answered with measurements, not guesses.
 The envelope carries ~186 KB (256 KB body minus base64's 33%); anything larger
