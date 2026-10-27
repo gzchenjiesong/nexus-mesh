@@ -429,3 +429,73 @@ class TestActorInjection:
             hermes_home=str(workdir), node_id="taskflow",
         )
         assert handler({"question": "问题"})["answer"] == "taskflow"
+
+
+class TestProbe:
+    """★ 探活路径必须被测到 —— 它的缺失让一个真 bug 上线了。
+
+    ⚠ 事故记录：v0.17 我把 ``_hermes_env`` 的签名加了 ``node_id``，
+    改了 ``make_handler`` 那条路径，**但漏了 ``probe()`` 里的调用**。
+    测试全绿（它们只走 make_handler），部署后桥接直接起不来：
+
+        TypeError: _hermes_env() missing 1 required positional argument
+
+    **改了签名就要扫全部调用点**。而更该记住的是：
+    ``probe()`` 是 main() 里的必经路径（先探活再注册），
+    之前一条测试都没有 —— 那是覆盖盲区。
+    """
+
+    @staticmethod
+    def _fake(workdir, body: str):
+        f = workdir / "fake_probe.py"
+        f.write_text(body, encoding="utf-8")
+        return [sys.executable, str(f)]
+
+    @covers("M1.F16")
+    def test_probe_succeeds(self, workdir):
+        import logging
+        from examples.hermes_node import probe
+
+        cmd = self._fake(workdir, "print('就绪')\n")
+        assert probe(cmd, timeout=15, logger=logging.getLogger("t"),
+                     hermes_home=str(workdir), node_id="taskflow") is True
+
+    @covers("M1.F16")
+    def test_probe_reports_failure_on_nonzero(self, workdir):
+        import logging
+        from examples.hermes_node import probe
+
+        cmd = self._fake(workdir,
+                         "import sys\nsys.stderr.write('boom')\nsys.exit(2)\n")
+        assert probe(cmd, timeout=15, logger=logging.getLogger("t"),
+                     hermes_home=str(workdir), node_id="taskflow") is False
+
+    @covers("M1.F16")
+    def test_probe_passes_node_id_to_subprocess(self, workdir):
+        """★ 探活时也要传 NXS_ACTOR —— 就是这里漏了导致桥接起不来。
+
+        probe 里跑的子进程同样需要知道身份：它有可能是 Agent 自己的
+        启动检查（比如它想调 nxs-cli 确认网络可达）。
+        更重要的是：**签名一致** —— 两处调用同一个函数，
+        参数必须都对，否则一处能跑一处崩。
+        """
+        import logging
+        from examples.hermes_node import probe
+
+        cmd = self._fake(
+            workdir,
+            "import os, sys\n"
+            "sys.exit(0 if os.environ.get('NXS_ACTOR') == 'taskflow' else 3)\n",
+        )
+        assert probe(cmd, timeout=15, logger=logging.getLogger("t"),
+                     hermes_home=str(workdir), node_id="taskflow") is True, \
+            "probe 没把 NXS_ACTOR 传给子进程"
+
+    @covers("M1.F16")
+    def test_probe_timeout_returns_false(self, workdir):
+        import logging
+        from examples.hermes_node import probe
+
+        cmd = self._fake(workdir, "import time\ntime.sleep(30)\n")
+        assert probe(cmd, timeout=2, logger=logging.getLogger("t"),
+                     hermes_home=str(workdir), node_id="taskflow") is False

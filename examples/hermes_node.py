@@ -258,7 +258,7 @@ def build_hermes_cmd(python: str, model: str | None,
 
 
 def probe(hermes_cmd: list[str], *, timeout: int,
-          logger: logging.Logger, hermes_home: str) -> bool:
+          logger: logging.Logger, hermes_home: str, node_id: str) -> bool:
     """``--dry-run`` 用：先确认 Hermes 本身能跑通。
 
     这一步很重要 —— 如果 Hermes 调不通，注册成节点只会让每条任务
@@ -270,7 +270,7 @@ def probe(hermes_cmd: list[str], *, timeout: int,
             [*hermes_cmd, "只回复两个字：就绪"],
             capture_output=True, text=True, timeout=timeout,
             stdin=subprocess.DEVNULL,
-            env=_hermes_env(hermes_home),
+            env=_hermes_env(hermes_home, node_id),
             cwd=hermes_home if Path(hermes_home).is_dir() else None,
         )
     except subprocess.TimeoutExpired:
@@ -334,7 +334,7 @@ def main() -> int:
     # 顺序刻意：先探活再注册。反过来的话，Hermes 有问题时会先注册成功，
     # 然后每条任务都失败 —— 而失败原因在节点日志里，运维看不见。
     if not probe(hermes_cmd, timeout=min(args.timeout, 60), logger=log,
-                 hermes_home=args.hermes_home):
+                 hermes_home=args.hermes_home, node_id=args.node_id):
         log.error("Hermes 探活失败，不注册节点。先修好 Hermes 再试。")
         return 1
 
