@@ -49,17 +49,24 @@ class TestRoleCard:
         assert a.to_dict() == b.to_dict()
 
     @covers("M5.F1")
-    def test_card_declares_executor_only(self):
-        """★ 只给执行权，不给发布权。
+    def test_card_roles_are_scoped(self):
+        """★ 执行权 + **受限的**发布权。
 
-        开放 ``issuer`` 等于让这个节点能把任务参数当外发通道 ——
-        而它的参数来自别的节点，那是一条不该存在的路。
+        v0.17 起开放 ``issuer`` —— 那是 A2A 协作的前提：
+        不给发布权，Agent 只能等 coordinator 中转，那就不是 mesh
+        而是消息队列。
+
+        但范围收在 ``can_issue_types``：**只放行 agent.ask 一种**。
+        不写 ``["*"]`` —— 白名单越窄，"它能发出什么"就越确定。
         """
         card = build_card("hermes-working", "cloud", toolsets="safe")
         assert card.roles.executor is True
-        assert card.roles.issuer is False
+        assert card.roles.issuer is True
         assert card.roles.relay is False
         assert card.roles.observer is False
+        # ★ 发布权是收窄的，不是"什么都能发"
+        assert card.constraints.can_issue_types == ("agent.ask",)
+        assert "*" not in card.constraints.can_issue_types
 
     @covers("M5.F1")
     def test_answer_is_declared_freetext(self):
@@ -147,7 +154,7 @@ class TestHermesInvocation:
         这个错误很隐蔽：传成命令行参数时 hermes **不会报错**，
         只会用默认 profile —— 症状是"回答风格不对"，而不是启动失败。
         """
-        env = _hermes_env("/root/.hermes/profiles/working")
+        env = _hermes_env("/root/.hermes/profiles/working", "taskflow")
         assert env["HERMES_HOME"] == "/root/.hermes/profiles/working"
         # 命令里不该出现 HERMES_HOME
         cmd = build_hermes_cmd("/usr/bin/python", None, "safe")
@@ -225,6 +232,7 @@ class TestHandlerValidation:
             timeout=10,
             logger=logging.getLogger("test"),
             hermes_home=str(workdir),
+            node_id="test-node",
         )
 
     @covers("M10.F1")
@@ -367,3 +375,57 @@ class TestRegistrationOutcomeHandling:
         assert "return 1" in branch, (
             "注册失败分支没有返回非零 —— dry-run 会说「一切正常」"
         )
+
+
+class TestActorInjection:
+    """★ 桥接必须告诉 Agent「你是谁」。
+
+    ⚠ 这是 A2A 协作的钥匙。Agent 通过 `nxs-cli ask` 问别的 Agent 时，
+    `nxs-cli` 靠 `NXS_ACTOR` 这个名字去查凭据。
+
+    没有它的话，Agent 的 shell 里 `nxs-cli` 会说"无法确定身份" ——
+    而那是一条它自己修不了的错误（它不知道自己的节点 ID）。
+
+    **密钥刻意不进 Agent 上下文**：它只知道名字，
+    凭据在 /etc/nexus-mesh/agents/<id>.env 里。
+    """
+
+    @covers("M14.F3")
+    def test_hermes_env_carries_actor(self):
+        from examples.hermes_node import _hermes_env
+
+        env = _hermes_env("/root/.hermes/profiles/working", "hermes-working")
+        assert env["NXS_ACTOR"] == "hermes-working"
+        # profile 选择也要在
+        assert env["HERMES_HOME"] == "/root/.hermes/profiles/working"
+
+    @covers("M14.F3")
+    def test_hermes_env_does_not_carry_secret(self):
+        """★ 只给名字，**不给密钥**。
+
+        密钥一旦进了子进程环境，就可能被 Agent 打印出来、
+        写进会话历史、或者在 prompt 里出现 —— 那时它就不再是秘密。
+        """
+        from examples.hermes_node import _hermes_env
+
+        env = _hermes_env("/tmp/profile", "taskflow")
+        leaked = [k for k in env if "SECRET" in k.upper()]
+        assert not leaked, f"这些密钥变量不该进 Agent 环境：{leaked}"
+
+    @covers("M14.F3")
+    def test_actor_reaches_subprocess(self, workdir):
+        """端到端：子进程里真的能读到 NXS_ACTOR。"""
+        import logging
+        from examples.hermes_node import make_handler
+
+        fake = workdir / "echo_actor.py"
+        fake.write_text(
+            "import os\nprint(os.environ.get('NXS_ACTOR', 'MISSING'))\n",
+            encoding="utf-8",
+        )
+        handler = make_handler(
+            [sys.executable, str(fake)],
+            timeout=15, logger=logging.getLogger("t"),
+            hermes_home=str(workdir), node_id="taskflow",
+        )
+        assert handler({"question": "问题"})["answer"] == "taskflow"

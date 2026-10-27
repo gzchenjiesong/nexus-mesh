@@ -117,9 +117,14 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
         "heartbeat_interval": 30,
         "roles": {
             "executor": True,
-            # ⚠ 不给发布权。开放它等于让这个节点能把任务参数当外发通道，
-            #   而它的参数是从别的节点来的 —— 那是一条不该存在的路。
-            "issuer": False,
+            # ★ v0.17：开放发布权。
+            #
+            # 这是 A2A 协作的前提 —— Agent 之间要能互相问话，而"问话"
+            # 就是一次任务投递。不给 issuer，它只能被动等 coordinator
+            # 中转，那就不是 mesh 而是消息队列。
+            #
+            # 范围收在 can_issue_types（见下），只放行 agent.ask 一种。
+            "issuer": True,
         },
         "capabilities": [
             {
@@ -140,7 +145,9 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
             # 只接受协调域派来的活。写域名而不是节点 ID ——
             # 这个参数匹配的是 src.domain。
             "can_receive_from": [domain],
-            "can_issue_types": [],
+            # ★ 只放行 agent.ask —— 不写 ["*"]。
+            # 白名单越窄，"它能把什么发出去"就越确定。
+            "can_issue_types": ["agent.ask"],
             "can_delegate_to": [],
             "quota": {
                 # 每次任务都烧 token，所以按日上限刻意压低。
@@ -158,14 +165,24 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
 # 业务处理器
 # ---------------------------------------------------------------------------
 
-def _hermes_env(hermes_home: str) -> dict[str, str]:
+def _hermes_env(hermes_home: str, node_id: str) -> dict[str, str]:
     """子进程的环境变量。
 
-    只设 ``HERMES_HOME``，其余继承当前进程。**不在这里塞凭据** ——
-    Hermes 自己从 profile 的 ``.env`` 读 key，桥接不该碰那些东西。
+    设两样东西：
+
+    * ``HERMES_HOME`` —— 决定用哪个 profile
+    * ``NXS_ACTOR`` —— **告诉 Agent 它自己是谁**
+
+    后者是 A2A 协作的钥匙：Agent 通过 ``nxs-cli ask`` 问别的 Agent 时，
+    ``nxs-cli`` 要靠这个名字去查凭据。**密钥不进 Agent 的上下文** ——
+    它只知道自己的名字，凭据在 ``/etc/nexus-mesh/agents/<id>.env`` 里。
+
+    **不在这里塞凭据**：Hermes 自己从 profile 的 ``.env`` 读 key，
+    桥接不该碰那些东西；同理也不该把 mesh 密钥塞给 Agent。
     """
     env = dict(os.environ)
     env["HERMES_HOME"] = hermes_home
+    env["NXS_ACTOR"] = node_id
     return env
 
 
@@ -183,7 +200,7 @@ def build_prompt(question: str) -> str:
 
 
 def make_handler(hermes_cmd: list[str], *, timeout: int, logger: logging.Logger,
-                 hermes_home: str):
+                 hermes_home: str, node_id: str):
     """构造 ``agent.ask`` 的处理器。
 
     :param hermes_cmd: ``hermes`` 的基础命令（含 -z 之前的全部参数）
@@ -200,9 +217,8 @@ def make_handler(hermes_cmd: list[str], *, timeout: int, logger: logging.Logger,
             [*hermes_cmd, prompt],
             timeout=timeout,
             logger=logger,
-            # HERMES_HOME 必须显式传：它决定用哪个 profile。
-            # 不传会退回默认 profile，而症状是"回答不对"不是报错。
-            env=_hermes_env(hermes_home),
+            # HERMES_HOME 决定 profile；NXS_ACTOR 让 Agent 知道自己的身份
+            env=_hermes_env(hermes_home, node_id),
             cwd=hermes_home if Path(hermes_home).is_dir() else None,
             what="Hermes",
         )
@@ -336,7 +352,7 @@ def main() -> int:
             args.node_id,
             handlers={"agent.ask": make_handler(
                 hermes_cmd, timeout=args.timeout, logger=log,
-                hermes_home=args.hermes_home)},
+                hermes_home=args.hermes_home, node_id=args.node_id)},
             levels={"agent.ask": Level.SUMMARY},
             card=card,
             heartbeat_interval=30.0,

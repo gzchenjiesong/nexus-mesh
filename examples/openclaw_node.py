@@ -123,8 +123,8 @@ def build_card(node_id: str, domain: str, *, agent_id: str,
         "heartbeat_interval": 30,
         "roles": {
             "executor": True,
-            # ⚠ 不给发布权。开放它等于让这个节点能把任务参数当外发通道。
-            "issuer": False,
+            # ★ v0.17：开放发布权（A2A 协作的前提，见 hermes_node.py 同处说明）。
+            "issuer": True,
         },
         "capabilities": [
             {
@@ -143,7 +143,8 @@ def build_card(node_id: str, domain: str, *, agent_id: str,
             # 只接受本域派来的活。写域名而不是节点 ID ——
             # 这个参数匹配的是 src.domain。
             "can_receive_from": [domain],
-            "can_issue_types": [],
+            # ★ 只放行 agent.ask
+            "can_issue_types": ["agent.ask"],
             "can_delegate_to": [],
             "quota": {
                 "tasks_per_day": 100,
@@ -203,7 +204,25 @@ def extract_answer(payload: dict) -> str:
     )
 
 
-def make_runner(cmd_builder, *, timeout: int, logger: logging.Logger):
+def _actor_env(node_id: str) -> dict[str, str]:
+    """子进程环境：继承全部 + 只加 ``NXS_ACTOR``。
+
+    ⚠ **刻意只加一个变量，不整体替换 env** —— OpenClaw 从
+    ``~/.openclaw`` 读配置与凭据，清空环境会让它找不到那些东西。
+    这与 Hermes 那边不同：那边必须显式给 ``HERMES_HOME`` 才能选对
+    profile，所以是"构造"环境；这里只是"附加"。
+
+    ``NXS_ACTOR`` 是 A2A 协作的钥匙：Agent 通过 ``nxs-cli ask``
+    问别的 Agent 时，``nxs-cli`` 靠这个名字查凭据。
+    **密钥不进 Agent 的上下文** —— 它只知道自己的名字。
+    """
+    env = dict(os.environ)
+    env["NXS_ACTOR"] = node_id
+    return env
+
+
+def make_runner(cmd_builder, *, timeout: int, logger: logging.Logger,
+                node_id: str):
     """构造 runner：吃 prompt，吐 OpenClaw 的回答文本。
 
     :param cmd_builder: ``prompt -> list[str]``。**不在这里拼命令** ——
@@ -217,8 +236,8 @@ def make_runner(cmd_builder, *, timeout: int, logger: logging.Logger):
             cmd_builder(prompt),
             timeout=timeout,
             logger=logger,
-            # 不覆写 env：OpenClaw 自己从 ~/.openclaw 读配置与凭据。
-            # 塞进 HERMES_HOME 之类的变量反而可能让它行为异常。
+            # 只附加 NXS_ACTOR，其余继承 —— 见 _actor_env 的说明
+            env=_actor_env(node_id),
             what="OpenClaw",
         )
         try:
@@ -404,6 +423,7 @@ def main() -> int:
                     lambda prompt: build_cmd(args.node_bin, args.cli,
                                              args.agent_id, prompt),
                     timeout=args.timeout, logger=log,
+                    node_id=args.node_id,
                 ),
                 logger=log, via="任务总线")},
             levels={"agent.ask": Level.SUMMARY},

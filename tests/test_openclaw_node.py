@@ -47,7 +47,9 @@ class TestRoleCard:
         """只给执行权。``issuer`` 会让任务参数变成外发通道。"""
         card = build_card("taskflow", "cloud", agent_id="taskflow", tools_note="x")
         assert card.roles.executor is True
-        assert card.roles.issuer is False
+        # v0.17：开放发布权（A2A 前提），但类型收窄在 agent.ask
+        assert card.roles.issuer is True
+        assert card.constraints.can_issue_types == ("agent.ask",)
 
     @covers("M5.F1")
     def test_answer_declared_freetext(self):
@@ -170,6 +172,7 @@ class TestRunner:
         return make_runner(
             lambda prompt: [sys.executable, str(fake)],
             timeout=15, logger=logging.getLogger("test"),
+            node_id="taskflow",
         )
 
     @covers("M10.F1")
@@ -272,3 +275,51 @@ class TestSharedSafetyLogic:
         assert "def truncate_utf8" not in source, (
             "本地又写了一份截断 —— 应该用 agent_bridge_common 的"
         )
+
+
+class TestActorInjection:
+    """★ 桥接必须告诉 Agent「你是谁」（A2A 协作的钥匙）。
+
+    与 Hermes 那边的差别：这里是**附加**一个变量，不整体替换 env ——
+    OpenClaw 从 ~/.openclaw 读配置与凭据，清空环境会让它找不到。
+    """
+
+    @covers("M14.F3")
+    def test_actor_added_without_replacing_env(self):
+        import os
+        from examples.openclaw_node import _actor_env
+
+        os.environ["SOME_EXISTING_VAR"] = "keep-me"
+        try:
+            env = _actor_env("taskflow")
+            assert env["NXS_ACTOR"] == "taskflow"
+            # ★ 原有变量必须还在 —— 否则 OpenClaw 找不到自己的配置
+            assert env.get("SOME_EXISTING_VAR") == "keep-me"
+        finally:
+            os.environ.pop("SOME_EXISTING_VAR", None)
+
+    @covers("M14.F3")
+    def test_no_secret_leaked(self):
+        from examples.openclaw_node import _actor_env
+
+        env = _actor_env("taskflow")
+        leaked = [k for k in env if "NXS_SECRET" in k.upper()]
+        assert not leaked, f"密钥不该进 Agent 环境：{leaked}"
+
+    @covers("M14.F3")
+    def test_actor_reaches_subprocess(self, workdir):
+        import logging
+        from examples.openclaw_node import make_runner
+
+        fake = workdir / "echo_actor_oc.py"
+        fake.write_text(
+            "import json, os\n"
+            "print(json.dumps({'status':'ok','result':{'meta':{'terminalReply':"
+            "{'text': os.environ.get('NXS_ACTOR','MISSING')}}}}))\n",
+            encoding="utf-8",
+        )
+        runner = make_runner(
+            lambda p: [sys.executable, str(fake)],
+            timeout=15, logger=logging.getLogger("t"), node_id="taskflow",
+        )
+        assert runner("问题") == "taskflow"
