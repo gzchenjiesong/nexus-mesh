@@ -218,3 +218,48 @@ class TestPulseKeepsItAlive:
                 f"能力 {cap_type} 的提供者里没有本地节点 {node_id} —— "
                 f"stale 会让它从匹配器眼里消失"
             )
+
+
+class TestVerifyWarnsWhenLocalNodeMissing:
+    """★ 没配 local_node 时，verify 必须**如实**说"留空"。
+
+    ⚠ 初版这里有个自相矛盾的提示：
+    「✓ local_node 已声明（本进程承载的节点）」
+    后面跟着「留空 = 本进程不承载节点」。
+
+    一个打勾的"已声明"，配着"留空"的说明 —— 读起来像配好了，
+    实际什么都没配。**这比不提示更糟**：它会让人以为已经修好了，
+    然后困惑于"为什么还是 stale"。
+
+    现在标签如实写"留空"，状态是 warn 而不是 ok。
+    """
+
+    @covers("M14.F8")
+    def test_empty_local_node_is_warn_not_ok(self, workdir):
+        import os
+        import subprocess
+        import sys
+
+        from conftest import REPO_ROOT
+        from nxs.mgmt.config import demo_env_for
+
+        # 造一份没有 local_node 的配置
+        src = (REPO_ROOT / "config" / "nxs.example.yaml").read_text(encoding="utf-8")
+        stripped = src.replace("local_node: coordinator\n", "", 1)
+        assert "local_node" not in stripped
+        path = workdir / "nolocal.yaml"
+        path.write_text(stripped, encoding="utf-8")
+
+        env = dict(os.environ)
+        env.update(demo_env_for(REPO_ROOT / "config" / "nxs.example.yaml"))
+        r = subprocess.run(
+            [sys.executable, "-m", "nxs", "verify", "--config", str(path)],
+            cwd=REPO_ROOT, capture_output=True, text=True, env=env, timeout=180,
+        )
+        out = r.stdout + r.stderr
+        assert "local_node 留空" in out, (
+            "没配 local_node 时应如实说「留空」，不能说「已声明」"
+        )
+        assert "local_node 已声明" not in out, (
+            "值为空却报「已声明」—— 自相矛盾，会让人以为配好了"
+        )
