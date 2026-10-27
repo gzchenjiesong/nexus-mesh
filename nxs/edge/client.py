@@ -67,7 +67,8 @@ class HttpTransport:
     """
 
     def __init__(self, base_url: str, *, node_id: str, secret: bytes,
-                 timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+                 timeout: float = DEFAULT_TIMEOUT_SECONDS,
+                 ca_file: str | None = None) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ConfigError(f"base_url 必须以 http:// 或 https:// 开头: {base_url!r}")
         # 前缀必须显式给全：签名覆盖路径，前缀少了会让每个请求
@@ -79,6 +80,13 @@ class HttpTransport:
         self.base_url = base_url.rstrip("/")
         self.node_id = node_id
         self._secret = secret
+        #: 信任的 CA 证书路径。用于 hub 使用**自签证书**的场景（无域名时）。
+        #:
+        #: 为什么不靠 ``SSL_CERT_FILE`` 环境变量：那是**进程全局**的，
+        #: 一旦设置就影响该进程的所有 HTTPS 请求。而信任哪个 CA 应该是
+        #: **每个连接**的决定 —— 同一进程连两个用不同 CA 的 hub 时，
+        #: 环境变量根本表达不了。显式参数也更难被意外泄漏的环境变量带偏。
+        self.ca_file = ca_file
         self.timeout = timeout
 
     # ------------------------------------------------------------------
@@ -258,6 +266,22 @@ class HttpTransport:
         prefix = self.base_url[marker:] if marker >= 0 else ""
         return f"{prefix}{path}"
 
+    def _ssl_context(self):
+        """按需构造 SSL 上下文。
+
+        返回 ``None`` 表示"用 urllib 的默认行为"（系统 CA 库）。
+        只有配了 ``ca_file`` 且地址是 https 时才自建上下文。
+        """
+        if not self.ca_file or not self.base_url.startswith("https://"):
+            return None
+        import ssl
+        try:
+            return ssl.create_default_context(cafile=self.ca_file)
+        except (OSError, ssl.SSLError) as exc:
+            raise ConfigError(
+                f"加载 CA 证书失败（ca_file={self.ca_file!r}）：{exc}"
+            ) from exc
+
     def _post(self, path: str, envelope: Envelope) -> Mapping[str, Any]:
         body = json.dumps(envelope.to_dict(), ensure_ascii=False).encode("utf-8")
         status, payload = self._request("POST", path, body=body)
@@ -280,7 +304,9 @@ class HttpTransport:
             self.base_url + path, data=body, method=method, headers=headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout, context=self._ssl_context(),
+            ) as response:
                 return response.status, _decode(response.read())
         except urllib.error.HTTPError as err:
             payload = _decode(err.read())
@@ -354,12 +380,15 @@ class OpsClient:
     """
 
     def __init__(self, base_url: str, *, secret: bytes,
-                 timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
+                 timeout: float = DEFAULT_TIMEOUT_SECONDS,
+                 ca_file: str | None = None) -> None:
         if not base_url.rstrip("/").endswith("/nxs"):
             raise ConfigError(f"base_url 必须以 /nxs 结尾: {base_url!r}")
         self.base_url = base_url.rstrip("/")
         self._secret = secret
         self.timeout = timeout
+        #: 信任的 CA（自签场景）。语义同 HttpTransport.ca_file。
+        self.ca_file = ca_file
 
     def _post(self, action: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         body = json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
@@ -378,7 +407,13 @@ class OpsClient:
             headers=headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            context = None
+            if self.ca_file and self.base_url.startswith("https://"):
+                import ssl
+                context = ssl.create_default_context(cafile=self.ca_file)
+            with urllib.request.urlopen(
+                request, timeout=self.timeout, context=context,
+            ) as response:
                 parsed = _decode(response.read())
                 return dict(parsed or {})
         except urllib.error.HTTPError as err:

@@ -569,3 +569,79 @@ class TestRenderSafety:
         a = _get(f"{live_ui.base_url}/")[2]
         b = _get(f"{live_ui.base_url}/?t=wrong")[2]
         assert a == b
+
+
+# ---------------------------------------------------------------------------
+# 自签证书：节点侧与运维侧都要能信任指定的 CA
+# ---------------------------------------------------------------------------
+
+class TestSelfSignedCaSupport:
+    """hub 用自签证书时，客户端要能**显式**信任那张 CA。
+
+    ⚠ 这条来自真机部署：服务器没有域名，申不了 Let's Encrypt，
+    只能用自签 CA。而 ``HttpTransport`` 原先**没有任何 SSL 参数** ——
+    节点侧只能靠 ``SSL_CERT_FILE`` 环境变量，那是进程全局的：
+    一旦设置就影响该进程所有 HTTPS 请求，而且同一进程连两个用不同 CA
+    的 hub 时根本表达不了。
+
+    "信任哪个 CA" 应该是**每个连接**的决定，不是进程的决定。
+    """
+
+    @covers("M1.F16")
+    def test_transport_accepts_ca_file(self):
+        from nxs.edge.client import HttpTransport
+
+        transport = HttpTransport(
+            "https://example.com/nxs", node_id="n", secret=b"x" * 32,
+            ca_file="/etc/nexus-mesh/tls/ca.pem",
+        )
+        assert transport.ca_file == "/etc/nexus-mesh/tls/ca.pem"
+
+    @covers("M1.F16")
+    def test_no_ca_file_means_default_context(self):
+        """不传 ca_file 时返回 None —— 用系统 CA 库，行为不变。"""
+        from nxs.edge.client import HttpTransport
+
+        transport = HttpTransport(
+            "https://example.com/nxs", node_id="n", secret=b"x" * 32)
+        assert transport.ca_file is None
+        assert transport._ssl_context() is None  # noqa: SLF001
+
+    @covers("M1.F16")
+    def test_http_url_ignores_ca_file(self):
+        """给 http:// 地址配 ca_file 是无意义的 —— 不该构造上下文。
+
+        静默忽略而不是报错：配置可能在 http/https 之间切换，
+        而 ca_file 留着不影响。但绝不能因为它而破坏明文连接。
+        """
+        from nxs.edge.client import HttpTransport
+
+        transport = HttpTransport(
+            "http://127.0.0.1:1234/nxs", node_id="n", secret=b"x" * 32,
+            ca_file="/nonexistent/ca.pem",
+        )
+        assert transport._ssl_context() is None  # noqa: SLF001
+
+    @covers("M1.F16")
+    def test_bad_ca_file_raises_clear_error(self):
+        """CA 路径错时要给出**明确**的错误，而不是连接时才莫名其妙失败。"""
+        from nxs.core.errors import ConfigError
+        from nxs.edge.client import HttpTransport
+
+        transport = HttpTransport(
+            "https://example.com/nxs", node_id="n", secret=b"x" * 32,
+            ca_file="/definitely/not/here.pem",
+        )
+        with pytest.raises(ConfigError) as ei:
+            transport._ssl_context()  # noqa: SLF001
+        assert "CA 证书" in str(ei.value)
+        assert "/definitely/not/here.pem" in str(ei.value)
+
+    @covers("M14.F2")
+    def test_ops_client_accepts_ca_file(self):
+        """运维通道也要能走自签 —— 它在同一台机器上连 hub。"""
+        from nxs.edge.client import OpsClient
+
+        ops = OpsClient("https://example.com/nxs", secret=b"x" * 32,
+                        ca_file="/etc/nexus-mesh/tls/ca.pem")
+        assert ops.ca_file == "/etc/nexus-mesh/tls/ca.pem"

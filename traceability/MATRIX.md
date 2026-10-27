@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **443** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
+共 **448** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -38,7 +38,7 @@
 | **M1.F13** | 并发与流配额（短请求与 SSE 分别计） | `nxs/edge/gateway.py:Gateway.acquire_request_slot/acquire_sse_slot` | G2 | P1 | — | 3 |
 | **M1.F14** | SSE 通知流（仅通知不含数据 · 心跳 · 重连换流） | `nxs/edge/gateway.py:_Handler._handle_events` | G1 | P1 | — | 4 |
 | **M1.F15** | 网关优雅关闭（先关中枢再停 accept） | `nxs/edge/gateway.py:Gateway.stop` | G1 | P2 | — | 2 |
-| **M1.F16** | 节点侧 HTTP 传输（实现 Transport 协议） | `nxs/edge/client.py:HttpTransport` | G1,G4 | P0 | — | 7 |
+| **M1.F16** | 节点侧 HTTP 传输（实现 Transport 协议） | `nxs/edge/client.py:HttpTransport` | G1,G4 | P0 | — | 11 |
 | **M1.F17** | 推送不可用时降级为短轮询 | `nxs/edge/client.py:HttpTransport.subscribe` | G1 | P1 | — | 2 |
 | **M1.F18** | 凭据可只放在环境变量（自注册节点无需写进配置节点列表） | `nxs/edge/auth.py:Authenticator._secret_for` | G4,G1 | P0 | — | 3 |
 | **M1.R1** | 认证失败不得区分具体原因（防成员枚举） | （由 M1.F7 实现） | G2 | P0 | S4 | 1 |
@@ -232,7 +232,7 @@ _（未实现，暂无功能点）_
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
 | **M14.F1** | 运维身份与端点开关（未配密钥则整体不存在） | `nxs/edge/gateway.py:Gateway.ops_enabled/_ops_secret_from_env` | G3,G2 | P0 | — | 10 |
-| **M14.F2** | 远程批准节点（绑定当前那张角色卡） | `nxs/edge/gateway.py:_Handler._handle_ops（approve）` | G3 | P0 | — | 5 |
+| **M14.F2** | 远程批准节点（绑定当前那张角色卡） | `nxs/edge/gateway.py:_Handler._handle_ops（approve）` | G3 | P0 | — | 6 |
 | **M14.F3** | 远程吊销（注册表与认证层同时生效） | `nxs/edge/gateway.py:_Handler._handle_ops（revoke）` | G3 | P0 | S10 | 2 |
 | **M14.F4** | 远程释放过期租约 | `nxs/edge/gateway.py:_Handler._handle_ops（release）` | G3 | P1 | — | 2 |
 | **M14.F5** | 节点状态查询（含未批准节点） | `nxs/edge/gateway.py:_Handler._handle_ops（nodes）` | G3 | P1 | — | 3 |
