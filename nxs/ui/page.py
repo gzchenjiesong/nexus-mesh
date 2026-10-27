@@ -320,3 +320,90 @@ window.__nxsTimer = setInterval(refresh, 5000);
 </body>
 </html>
 """
+
+#: 凭据无效时返回的页面。
+#:
+#: ⚠ **这个页面是补的一个真实缺口。** 最初的实现里，token 无效时返回的是
+#: 纯文本 ``unauthorized`` —— 而用户的真实场景是"刷新一个带旧 token 的标签"，
+#: 那一步在**换 cookie 阶段**就被拒，根本加载不到主页面。
+#: 于是用户在浏览器里看到的就是裸的 "unauthorized" 一个词，
+#: 自然会以为系统坏了。
+#:
+#: 主页面里的那些说明（"token 每次启动重新生成…"）永远显示不出来，
+#: 因为那条路径走不到。
+#:
+#: 现在：**任何 401 都返回这一个页面**，不管是"没带 token"还是
+#: "token 过期/错误"。两种情况返回完全相同的内容，所以不泄露任何信息
+#: —— 与网关拒绝时只回 rule_id 是同一条思路。
+UNAUTHORIZED_PAGE = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nexus Mesh · 凭据已失效</title>
+<style>
+  :root {
+    --bg: #fbfbfc; --fg: #1c1d21; --dim: #6b7280;
+    --card: #ffffff; --line: #e5e7eb; --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --fg: #e6e7ea; --dim: #9aa1ab;
+      --card: #1b1e23; --line: #2a2e35; --warn: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 56px 32px; background: var(--bg); color: var(--fg);
+    font: 14px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 620px; margin: 0 auto; }
+  h1 { font-size: 17px; margin: 0 0 6px; font-weight: 600; }
+  .sub { color: var(--warn); font-size: 13px; margin-bottom: 22px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 20px 24px;
+  }
+  ol { margin: 0; padding-left: 22px; }
+  li { margin-bottom: 12px; }
+  li:last-child { margin-bottom: 0; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12.5px; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+  }
+  .note { color: var(--dim); font-size: 12.5px; margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>凭据已失效</h1>
+  <div class="sub">这不代表系统出了问题</div>
+
+  <div class="card">
+    <ol>
+      <li>
+        观察窗的 <code>token</code> <strong>每次启动重新生成</strong>
+        （不落盘、不跨重启），所以服务一重启，旧链接就失效。
+      </li>
+      <li>
+        重新打开时，用访问服务器的那个脚本重新取一次链接
+        （例如 <code>nxs-view.sh</code>），它会自动带上当前 token
+        并验证链路。
+      </li>
+      <li>
+        如果你只是刷新了旧标签页，那个 token 已经过期 ——
+        换用新链接即可，不需要重启任何服务。
+      </li>
+    </ol>
+  </div>
+
+  <div class="note">
+    需要<b>手动</b>取链接时，在服务器上执行：<br>
+    <code>journalctl -u nexus-mesh-ui -n 40 | grep -oE 'http://127\.0\.0\.1:8080/\?t=\S+' | tail -1</code>
+  </div>
+</div>
+</body>
+</html>
+"""

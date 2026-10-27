@@ -39,7 +39,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..core.errors import ConfigError
 from ..edge.client import OpsClient
-from .page import SHELL
+from .page import SHELL, UNAUTHORIZED_PAGE
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +205,22 @@ def _make_handler(server: UiServer) -> type[BaseHTTPRequestHandler]:
             self._send_bytes(status, text.encode("utf-8"),
                              content_type="text/plain; charset=utf-8")
 
+        def _send_unauthorized(self) -> None:
+            """401 —— 返回一个**说清原因与做法**的页面。
+
+            ⚠ 这里最关键的一点：**两种情况返回完全相同的页面**。
+            区分"token 过期"与"没带 token"会泄露信息（攻击者能据此判断
+            某个 token 是否曾经有效），与网关拒绝时只回 rule_id 同理。
+
+            为什么必须是 HTML 页面而不是纯文本：用户的真实场景是
+            **刷新一个带旧 token 的标签** —— 那一步在换 cookie 阶段就被拒，
+            根本加载不到主页面。返回纯文本时用户只看到裸的
+            "unauthorized" 一个词，会以为系统坏了。
+            """
+            self._send_bytes(HTTPStatus.UNAUTHORIZED,
+                             UNAUTHORIZED_PAGE.encode("utf-8"),
+                             content_type="text/html; charset=utf-8")
+
         def _redirect(self, location: str, *, cookie: str | None = None) -> None:
             extra = {"Location": location}
             if cookie:
@@ -244,7 +260,7 @@ def _make_handler(server: UiServer) -> type[BaseHTTPRequestHandler]:
             if presented:
                 if not self._same(presented, server.token):
                     # 不区分"token 错"与"没有 token"，少给一点信息
-                    self._send_text(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+                    self._send_unauthorized()
                     return
                 cookie = (
                     f"{COOKIE_NAME}={server.token}; HttpOnly; SameSite=Strict; "
@@ -255,7 +271,7 @@ def _make_handler(server: UiServer) -> type[BaseHTTPRequestHandler]:
 
             # ② 其余一律要求 cookie
             if not self._authorized():
-                self._send_text(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+                self._send_unauthorized()
                 return
 
             if path == "/":

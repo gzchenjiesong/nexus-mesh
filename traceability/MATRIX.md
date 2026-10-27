@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **490** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
+共 **492** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -249,7 +249,7 @@ _（未实现，暂无功能点）_
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
 | **M15.F1** | 只读 UI 进程（只听 127.0.0.1，拒绝公网绑定） | `nxs/ui/server.py:UiServer` | G3 | P1 | — | 4 |
-| **M15.F2** | 一次性 token 鉴权（启动生成 · HttpOnly cookie · 不落盘） | `nxs/ui/server.py:_make_handler` | G3 | P1 | — | 13 |
+| **M15.F2** | 一次性 token 鉴权（启动生成 · HttpOnly cookie · 不落盘） | `nxs/ui/server.py:_make_handler` | G3 | P1 | — | 15 |
 | **M15.F3** | 数据只经运维端点（不 import app／存储后端） | `nxs/ui/server.py:UiServer.snapshot` | G3 | P1 | — | 4 |
 | **M15.F4** | 节点列表视图（名称／简介／角色／状态／能力） | `nxs/ui/page.py:SHELL · nxs/ui/server.py:snapshot` | G3 | P1 | — | 3 |
 | **M15.F5** | 系统汇总视图（计数／延迟分位数／积压） | `nxs/ui/page.py:renderTiles` | G3 | P1 | — | 2 |

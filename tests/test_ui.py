@@ -709,61 +709,109 @@ class TestSelfSignedCaSupport:
 
 
 class TestUnauthorizedUx:
-    """★ 401 的提示必须说清「为什么」与「怎么办」。
+    """★ 401 必须返回一个**说清原因与做法**的页面。
 
-    ⚠ **这条来自用户的真实困惑。** 他刷新页面看到「未授权」，
-    第一反应是「是不是坏了、要不要你重新打开一下」。
+    ⚠ **这一节被推翻重写过一次，过程值得记下来。**
 
-    而实际上这只是**服务重启过**——token 每次启动重新生成
-    （不落盘、不跨重启是刻意的安全设计），旧链接随之失效。
+    第一版：用户刷新页面看到「未授权」，我以为是页面内的提示不够清楚，
+    于是改 `SHELL` 里的 401 分支，加了三行说明。测试全绿，我提交了。
 
-    原来的提示只有一行小字「未授权 —— 请用带 token 的链接打开」：
-    * 位置不显眼（右上角 stamp）
-    * 没说原因，用户会以为是故障
-    * 没说怎么办（"带 token 的链接"从哪来？）
+    然后实测发现——**那条路径根本走不到**。用户的真实场景是
+    「刷新一个带旧 token 的标签」，那一步在**换 cookie 阶段**就被拒，
+    返回的是纯文本 ``unauthorized``，浏览器根本不会加载主页面。
+    所以他看到的就是裸的一个词，而我加的说明永远显示不出来。
 
-    一次因为**正常安全行为**而产生的困惑，是这个提示的失败，
-    不是用户的误解。
+    教训：**改之前要先复现用户走的那条路径**，而不是改自己以为的那条。
+    `SHELL` 里的 401 分支只在"有 cookie 但 cookie 失效"时才会触发 ——
+    那是另一种情况，不是用户碰到的那个。
+
+    现在：服务端任何 401 都返回 ``UNAUTHORIZED_PAGE``。下面测它。
     """
+
+    @staticmethod
+    def _unauth_page() -> str:
+        from nxs.ui.page import UNAUTHORIZED_PAGE
+        return UNAUTHORIZED_PAGE
+
+    @covers("M15.F2")
+    def test_401_is_an_html_page_not_bare_text(self):
+        """★ 401 必须是 HTML 页面，不能是纯文本。
+
+        纯文本时用户只看到 "unauthorized" 一个词 —— 那看起来像系统坏了。
+        """
+        page = self._unauth_page()
+        assert page.lstrip().startswith("<!DOCTYPE html>")
+        assert "<h1>" in page
 
     @covers("M15.F2")
     def test_401_explains_it_is_not_a_failure(self):
-        text = SHELL
-        assert "不代表系统出了问题" in text, (
-            "401 提示必须明确说「这不是故障」—— 否则用户会以为系统挂了"
+        assert "不代表系统出了问题" in self._unauth_page(), (
+            "第一眼就要说清「这不是故障」—— 否则用户会以为系统挂了"
         )
 
     @covers("M15.F2")
     def test_401_explains_why_token_expired(self):
-        text = SHELL
-        assert "每次启动重新生成" in text, (
+        page = self._unauth_page()
+        assert "每次启动重新生成" in page, (
             "要说清 token 为什么失效：每次启动重新生成"
         )
 
     @covers("M15.F2")
     def test_401_tells_what_to_do(self):
-        text = SHELL
-        assert "nxs-view.sh" in text or "脚本重新取" in text, (
+        page = self._unauth_page()
+        assert "nxs-view.sh" in page, (
             "要给出可执行的做法，不能只说「请用带 token 的链接」（从哪来？）"
         )
+        # 手动取链接的命令也要给，否则没有那个脚本的人卡死
+        assert "journalctl" in page, "应给出手动取链接的命令作为兜底"
 
     @covers("M15.F2")
-    def test_401_stops_polling(self):
-        """★ 401 之后必须停掉轮询。
+    def test_401_says_no_restart_needed(self):
+        """★ 明确说「不需要重启服务」。
 
-        不停的话每 5 秒再撞一次 401：既不会自己变好，又把日志刷满。
+        用户的困惑之一就是"是不是要你重开一下"。要直接回答这个问题。
         """
-        text = SHELL
-        assert "clearInterval" in text, (
-            "401 后没有停止轮询 —— 会每 5 秒撞一次，白刷日志"
+        assert "不需要重启" in self._unauth_page()
+
+    @covers("M15.F2")
+    def test_401_does_not_leak_which_case(self):
+        """★ "token 错了" 与 "没带 token" 必须返回完全相同的页面。
+
+        区分它们会泄露信息：攻击者能据此判断某个 token 是否曾经有效。
+        与网关拒绝时只回 rule_id 是同一条思路。
+        """
+        import subprocess
+        import sys
+
+        code = (
+            "import sys; sys.path.insert(0, %r);\n"
+            "from nxs.ui import UiServer\n"
+            "import urllib.request, urllib.error\n"
+            "app_secret = b'x' * 32\n"
+            "s = UiServer('http://127.0.0.1:1/nxs', app_secret, port=0).start()\n"
+            "def get(u):\n"
+            "    try:\n"
+            "        with urllib.request.urlopen(u, timeout=5) as r: return r.read()\n"
+            "    except urllib.error.HTTPError as e: return e.read()\n"
+            "a = get(f'{s.base_url}/')\n"
+            "b = get(f'{s.base_url}/?t=wrong-token')\n"
+            "s.stop()\n"
+            "print('SAME' if a == b else 'DIFF')\n"
+        ) % str(REPO_ROOT)
+        result = subprocess.run([sys.executable, "-c", code],
+                                capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stderr[-800:]
+        assert "SAME" in result.stdout, (
+            "「没带 token」与「token 错误」返回的内容不同 —— 会泄露信息"
         )
 
     @covers("M15.F2")
-    def test_401_shown_in_main_area_not_only_corner(self):
-        """提示要出现在主区域，不能只在右上角那行小字里。"""
-        text = SHELL
-        # showUnauthorized 里应该往 error 容器里塞内容
-        assert 'getElementById("error")' in text
-        assert "showUnauthorized" in text, (
-            "应有专门的 401 渲染函数，而不是只改一行 stamp 文字"
+    def test_shell_401_branch_stops_polling(self):
+        """主页面内的 401 分支（cookie 失效场景）也要停轮询。
+
+        那条路径虽然不是用户这次碰到的，但也存在：先成功打开、然后服务重启、
+        再刷新 —— 此时是带 cookie 撞 401。不停轮询会每 5 秒撞一次。
+        """
+        assert "clearInterval" in SHELL, (
+            "页面内 401 分支没停轮询 —— 会白刷日志"
         )
