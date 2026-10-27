@@ -270,7 +270,13 @@ EXAMPLE_CONFIG_PATH = "config/nxs.example.yaml"
 #: **新增配置项时，要么实现它，要么加到这里。**
 UNIMPLEMENTED: tuple[tuple[str, str], ...] = (
     ("params_schema", "参数 schema 只声明、未校验；格式错误的参数由执行节点自己承担失败"),
+    ("bytes_per_response",
+     "单次应答字节上限永不触发：check_quota 的 planned_bytes 参数无调用点，"
+     "永远收默认值 0。真实的体积硬上限是 server.max_body_bytes（约 186 KB 文件）"),
     ("bytes_per_day", "应答字节数未按节点累计，故按日字节配额永不触发"),
+    ("roles.relay",
+     "中继角色只声明、无实现逻辑。配置 roles.relay=true 不会让该节点转发任务"),
+    ("roles.observer", "观察者角色只声明、无实现逻辑（无只读订阅通道）"),
 )
 
 

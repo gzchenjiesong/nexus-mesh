@@ -500,7 +500,18 @@ hub 侧取 `min(矩阵上限, 节点上限, 能力等级)`。两级取最小，
 | 配置项 | 缺什么 | 影响 |
 |---|---|---|
 | `params_schema` | 参数校验未实现 | **格式错误的参数会被投递出去**，由执行节点自己承担失败 |
-| `bytes_per_day` | 应答字节数未按节点累计 | **按日字节配额永不触发**（`bytes_per_response` 在策略层有效） |
+| `bytes_per_response` | `check_quota(planned_bytes=…)` 无调用点，永远收 0 | **单次应答字节上限永不触发**。真实的体积硬上限是 `server.max_body_bytes`（约 186 KB 文件，见 [`artifact-size.md`](artifact-size.md)） |
+| `bytes_per_day` | 应答字节数未按节点累计 | **按日字节配额永不触发** |
+| `roles.relay` | 中继角色只声明、无实现逻辑 | 配 `relay: true` **不会**让该节点转发任务 |
+| `roles.observer` | 观察者角色只声明、无实现逻辑 | 没有只读订阅通道 |
+
+> ⚠ **`bytes_per_response` 这一行是 2026-10-27 修的一处文档错误。**
+> 原文写的是「按日字节配额永不触发（`bytes_per_response` 在策略层有效）」——
+> 那句括号里的断言是**错的**：策略层确实有这项检查，但
+> `planned_bytes` 参数在整个代码库里没有任何调用点，所以它永远收到 0。
+>
+> 这类错误比"漏记"危险得多：它明确告诉使用者"这项防护是有效的"，
+> 而实际上完全不生效。发现方式是审计时顺着 `check_quota` 的调用点查下去。
 
 > **v0.2 移出清单的三项**：`max_body_bytes`、`tls_cert / tls_key`、
 > `rate_limit_per_second`。传输层落地后它们都真的产生行为了：

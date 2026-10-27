@@ -271,6 +271,127 @@ class TestNumberClaims:
         )
 
 
+class TestAcceptanceGuideClaims:
+    """``docs/acceptance-guide.md`` 是"能验收什么"的权威说明。
+
+    ⚠ **这份文档的数字错了，比 README 错了更危险**：
+    使用者会照着它设计验收场景。如果它声称某项能力已实现、实际没有，
+    那个人会花一天去验一个不存在的东西，然后怀疑是自己配错了。
+    """
+
+    GUIDE = DOCS / "acceptance-guide.md"
+
+    @covers("M11.F1")
+    def test_module_and_feature_counts_are_current(self):
+        """模块数、功能点数、各状态分布必须与实际一致。"""
+        sys.path.insert(0, str(REPO_ROOT))
+        from collections import Counter
+
+        from traceability.registry import FEATURES, MODULES
+
+        n_modules = len(MODULES)
+        n_features = len(FEATURES)
+        status_count = Counter(m.status for m in MODULES)
+
+        text = _read(self.GUIDE)
+        # 「14 模块 / 105 功能点 / 23 模块需求 / 19 安全要求」
+        m = re.search(r"(\d+) 模块 / (\d+) 功能点", text)
+        assert m, "验收手册开头的能力账格式变了"
+        claimed_modules, claimed_features = map(int, m.groups())
+        assert claimed_modules == n_modules, (
+            f"验收手册说 {claimed_modules} 模块，实际 {n_modules}"
+        )
+        assert claimed_features == n_features, (
+            f"验收手册说 {claimed_features} 功能点，实际 {n_features}"
+        )
+
+        # 「| 已实现 | **11** | ...」
+        for status, claimed in re.findall(r"\| (已实现|部分实现|未实现) \| \*\*(\d+)\*\* \|",
+                                          text):
+            actual = status_count.get(status, 0)
+            assert int(claimed) == actual, (
+                f"验收手册说 {status} {claimed} 个模块，实际 {actual}"
+            )
+
+    @covers("M11.F1")
+    def test_unimplemented_module_is_named(self):
+        """★ 未实现的模块必须被点名，不能只说"1 个未实现"。
+
+        使用者需要知道**具体是哪个**——否则他会去试 A2A 协议适配，
+        然后发现根本没这条路。
+        """
+        sys.path.insert(0, str(REPO_ROOT))
+        from traceability.registry import MODULES
+
+        not_implemented = [m for m in MODULES if m.status == "未实现"]
+        text = _read(self.GUIDE)
+        for m in not_implemented:
+            assert f"{m.id}" in text, (
+                f"验收手册没有点名未实现的 {m.id} {m.name} —— "
+                f"使用者会去试这个能力"
+            )
+            # 名字也要出现，让人看懂是什么
+            keyword = m.name.split()[0]
+            assert keyword in text, (
+                f"验收手册提到了 {m.id} 但没说明它是什么（{m.name}）"
+            )
+
+    @covers("M11.F1")
+    def test_cannot_accept_list_matches_reality(self):
+        """★ 「不能验收的」清单必须与代码实况一致。
+
+        这类清单最容易腐化：实现了某个能力，却忘了从清单里删掉——
+        结果使用者被劝退去做本来能做的事。
+        """
+        text = _read(self.GUIDE)
+        section = text.split("## 二、")
+        assert len(section) > 1, "验收手册没有「不能验收的」一节"
+        body = section[1].split("## 三、")[0]
+
+        # 已经实现的能力，不该出现在"不能"清单里
+        already_done = {
+            "自动匹配": "M4 已实现",
+            "应答边界": "M10 已实现",
+            "运维接口": "M14 已实现",
+            "可观测": "M13 已实现",
+            "节点自注册": "M3.F8 已实现",
+            "续租": "M7.F9-F11 已实现",
+        }
+        wrongly = [f"{name}（{why}）" for name, why in already_done.items()
+                   if f"**{name}" in body]
+        assert not wrongly, (
+            "「不能验收」清单里列了已实现的能力 —— 使用者会被劝退：\n  "
+            + "\n  ".join(wrongly)
+        )
+
+        # 真正未实现的必须列出（抽查几个代表性的）
+        for must in ("mTLS", "A2A", "DAG", "Prometheus"):
+            assert must in body, (
+                f"「不能验收」清单漏了 {must} —— 使用者会白试一遍"
+            )
+
+    @covers("M11.F1")
+    def test_dead_config_list_matches_unimplemented(self):
+        """★ 「配了不生效」清单必须与 ``UNIMPLEMENTED`` 一致。
+
+        这是最危险的一类：配置被正常接受但不产生行为，
+        使用者以为自己获得了某项防护。
+        """
+        sys.path.insert(0, str(REPO_ROOT))
+        from nxs.mgmt.config import UNIMPLEMENTED
+
+        text = _read(self.GUIDE)
+        section = text.split("## 三、")
+        assert len(section) > 1, "验收手册没有「配了但不生效」一节"
+        body = section[1].split("## 四、")[0]
+
+        missing = [name for name, _ in UNIMPLEMENTED if name not in body]
+        assert not missing, (
+            f"验收手册的「配了不生效」清单漏了：{missing} —— "
+            f"使用者会以为这些配置有效"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 3. 「未实现」清单不能包含已完成的东西
 # ---------------------------------------------------------------------------
@@ -591,4 +712,42 @@ class TestDocumentedPathsExist:
                     problems.append(f"{path.name}:{i}  {rel}")
         assert not problems, (
             "文档引用了不存在的路径：\n  " + "\n  ".join(sorted(set(problems)))
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9. 验收手册与抽查脚本
+# ---------------------------------------------------------------------------
+
+class TestAcceptanceDrill:
+    """``examples/acceptance_drill.py`` 必须能跑通，且覆盖手册的关键条目。
+
+    一份跑不通的抽查脚本比没有更糟：人会以为"抽查过了就是好的"。
+    """
+
+    @covers("M11.F1")
+    def test_drill_runs_and_passes(self):
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "examples/acceptance_drill.py"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=300,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "全部通过" in result.stdout, result.stdout[-800:]
+        # 必须诚实声明它的边界
+        assert "必须手工验" in result.stdout, (
+            "抽查脚本没有说明它不覆盖什么 —— 读者会以为全验过了"
+        )
+
+    @covers("M11.F1")
+    def test_guide_references_the_drill(self):
+        """手册必须告诉读者先跑抽查脚本，否则那个脚本没人会用。"""
+        text = _read(DOCS / "acceptance-guide.md")
+        assert "acceptance_drill.py" in text, (
+            "验收手册没有引用抽查脚本 —— 它写了也不会有人跑"
+        )
+        assert "必须手工验" in text or "必须手工" in text, (
+            "手册没有说清哪些必须手工验"
         )

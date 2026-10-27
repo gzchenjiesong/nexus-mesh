@@ -63,7 +63,8 @@ Nexus Mesh 把这两件事作为核心，而不是附属功能。
 | [`traceability/registry.py`](traceability/registry.py) | **需求编号的唯一真相源**（可执行） |
 | [`docs/artifact-size.md`](docs/artifact-size.md) | 产物能多大：实测数据 + 决策表 |
 | [`docs/observability.md`](docs/observability.md) | 为什么这里没有阈值告警 |
-| [`docs/docs-audit.md`](docs/docs-audit.md) | **文档腐化审计**：方法与历史发现 |
+| [`docs/acceptance-guide.md`](docs/acceptance-guide.md) | **验收场景设计手册**：能验收什么 / 不能验收什么 / 配了不生效什么 |
+| [`docs/docs-audit.md`](docs/docs-audit.md) | 文档腐化审计：方法与历史发现 |
 | [`traceability/MATRIX.md`](traceability/MATRIX.md) | 追溯矩阵（由测试自动生成） |
 
 文档与代码的一致性由测试**自动校验**，不是靠人工维护，分两条链：
@@ -178,7 +179,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.8.1）
+### 已实现（v0.9.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -290,6 +291,15 @@ make demo
 See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
+
+**v0.9.0** — an acceptance guide, and a script that checks it.
+`docs/acceptance-guide.md` lists what can be verified (six groups, per-item
+pass criteria), what **cannot** (mTLS, A2A, DAG, Web UI…), and what
+**parses but does nothing** (`bytes_per_response`, `roles.relay`…).
+`examples/acceptance_drill.py` runs 21 of those checks for real — and it
+caught two mistakes **in the guide itself** on first run. Also fixed a
+dangerous doc error: the old text claimed `bytes_per_response` was enforced
+by the policy layer; its `planned_bytes` argument has no caller anywhere.
 
 **v0.8.1** — a docs audit. This project is vibecoding: the requirement docs
 are the real dependency. An audit of ~5300 lines of documentation against the
