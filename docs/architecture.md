@@ -110,7 +110,7 @@ G4（与具体 Agent 解耦）的直接要求，也是 M1/M2 存在的理由。
 | **M12** | 审计留痕 | `nxs/mgmt/audit` | 只记元数据，不记业务内容 | 已实现 |
 | **M13** | 可观测 | `nxs/mgmt/observ.py` | 指标 + **只报组合异常**（无阈值告警） | 已实现 |
 | **M14** | 运维接口 | `nxs/edge/gateway.py`（ops 端点）· `OpsClient` | 批准／吊销／释放租约／查节点／读指标 | 已实现 |
-| **M15** | 观察窗 WebUI | `nxs/ui`（未建） | **只读**节点列表与系统汇总，SSH 隧道访问 | 未实现 |
+| **M15** | 观察窗 WebUI | `nxs/ui/server.py` · `nxs/ui/page.py` · `cmd_ui` | **只读**节点列表与系统汇总，token 鉴权，只听 127.0.0.1 | 已实现 |
 
 ### Port 与 Backend
 

@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -57,9 +58,9 @@ def title(text: str) -> None:
 
 def drill_cli() -> None:
     """手册 G4：8 个命令全部可用。"""
-    title("G4 · CLI 全可用（手册说 8 个命令）")
+    title("G4 · CLI 全可用（手册说 9 个命令）")
     commands = ["verify", "doctor", "demo", "serve", "ops",
-                "candidates", "metrics", "status"]
+                "candidates", "metrics", "status", "ui"]
     for cmd in commands:
         result = subprocess.run(
             [sys.executable, "-m", "nxs", cmd, "--help"],
@@ -67,7 +68,7 @@ def drill_cli() -> None:
         )
         check(f"nxs {cmd} --help", result.returncode == 0,
               f"rc={result.returncode}")
-    check("命令数量与手册一致（8 个）", len(commands) == 8)
+    check("命令数量与手册一致（9 个）", len(commands) == 9)
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +87,18 @@ def _build_live():
         force_memory=True,
     )
     app.start()
+    # 运维通道要用**真实密钥**开启：留空等于关闭，观察窗就无从取数。
+    # （初版这里传了 b""，结果 drill_ui 里的指标检查失败 —— 抽查脚本
+    #  自己抓到了这个问题，正是它存在的意义。）
+    ops_secret = b"drill-ops-secret-0123456789abcdef"
     gateway = Gateway(app, server_config=ServerConfig(host="127.0.0.1", port=0),
-                      ops_secret=b"").start()
+                      ops_secret=ops_secret).start()
     transports = {
         name: HttpTransport(gateway.base_url, node_id=name,
                             secret=app.config.secrets[name])
         for name in ("hub", "node-a", "node-b")
     }
+    transports["_ops_secret"] = ops_secret
     return app, gateway, transports
 
 
@@ -218,6 +224,102 @@ def drill_observability(transports: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# M15 · 观察窗
+# ---------------------------------------------------------------------------
+
+def drill_ui(transports: dict) -> None:
+    """手册「怎么验观察窗」那一节的可自动化部分。"""
+    import http.cookiejar
+    import urllib.error
+    import urllib.request
+
+    from nxs.ui import UiServer
+
+    title("M15 · 观察窗（只读 · token · 只听本机）")
+    gateway_url = transports["hub"].base_url
+    secret = transports["_ops_secret"]
+    server = UiServer(gateway_url, secret, port=0).start()
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    def get(url, cookie=""):
+        opener = urllib.request.build_opener(_NoRedirect)
+        request = urllib.request.Request(url)
+        if cookie:
+            request.add_header("Cookie", cookie)
+        try:
+            with opener.open(request, timeout=10) as resp:
+                return resp.status, dict(resp.headers), resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers), exc.read()
+
+    try:
+        # ① 不带 token → 401
+        status, _, _ = get(f"{server.base_url}/")
+        check("不带 token 访问 → 401", status == 401, f"得到 {status}")
+
+        # ② 带 token → 303 + HttpOnly cookie
+        status, headers, _ = get(f"{server.base_url}/?t={server.token}")
+        cookie = headers.get("Set-Cookie", "")
+        check("token 换 cookie 并跳走", status == 303 and "Location" in headers,
+              f"得到 {status}")
+        check("cookie 是 HttpOnly + SameSite=Strict",
+              "HttpOnly" in cookie and "SameSite=Strict" in cookie, cookie[:60])
+
+        # ③ 带 cookie 能取页面与数据
+        jar = f"nxs_ui={server.token}"
+        status, headers, body = get(f"{server.base_url}/", jar)
+        check("带 cookie 取页面 → 200 text/html",
+              status == 200 and "text/html" in headers.get("Content-Type", ""))
+        status, _, raw = get(f"{server.base_url}/api/state", jar)
+        try:
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            data = {}
+        check("取 /api/state → 有节点与指标",
+              status == 200 and data.get("nodes") is not None
+              and data.get("metrics") is not None)
+        nodes = data.get("nodes") or []
+        # ⚠ 必须先要求非空：``all([])`` 恒为 True，会让这条空过。
+        #   初版就踩了 —— 指标取不到时节点是空列表，它照样"通过"。
+        check("节点行含名称与简介",
+              len(nodes) > 0
+              and all("display_name" in n and "description" in n for n in nodes),
+              f"{len(nodes)} 个节点")
+
+        # ④ 写方法一律 405
+        for method in ("POST", "PUT", "DELETE"):
+            opener = urllib.request.build_opener(_NoRedirect)
+            request = urllib.request.Request(
+                f"{server.base_url}/api/state", data=b"{}", method=method)
+            request.add_header("Cookie", jar)
+            try:
+                with opener.open(request, timeout=10) as resp:
+                    code = resp.status
+            except urllib.error.HTTPError as exc:
+                code = exc.code
+            check(f"{method} → 405（只读）", code == 405, f"得到 {code}")
+
+        # ⑤ 拒绝绑公网
+        try:
+            UiServer(gateway_url, secret, host="0.0.0.0", port=0)
+            check("拒绝绑定 0.0.0.0", False, "竟然接受了")
+        except Exception:  # noqa: BLE001
+            check("拒绝绑定 0.0.0.0", True)
+
+        # ⑥ token 不跨重启复用
+        another = UiServer(gateway_url, secret, port=0).start()
+        try:
+            check("每次启动换新 token", another.token != server.token)
+        finally:
+            another.stop()
+    finally:
+        server.stop()
+
+
+# ---------------------------------------------------------------------------
 # 三 · 配了不生效
 # ---------------------------------------------------------------------------
 
@@ -275,6 +377,7 @@ def main() -> int:
         drill_boundaries(transports)
         drill_observability(transports)
         drill_dead_config(transports)
+        drill_ui(transports)
     finally:
         gateway.stop()
 

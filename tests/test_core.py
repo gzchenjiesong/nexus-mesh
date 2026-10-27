@@ -362,7 +362,7 @@ class TestSelfReportedText:
         raw.update(overrides)
         return RoleCard.from_dict(raw)
 
-    @covers("M3.F1")
+    @covers("M3.F1", "M15.F7")
     def test_ansi_escape_is_rejected(self, config):
         """★ 终端注入：ANSI 序列能让运维看到伪造的输出。"""
         with pytest.raises(ConfigError) as ei:

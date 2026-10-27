@@ -761,62 +761,79 @@ class TestAcceptanceDrill:
 # 10. 「没有 Web UI」这一声称必须一直是真的
 # ---------------------------------------------------------------------------
 
-class TestNoWebUi:
-    """验收手册说「零前端代码」。这个声称必须可验证，否则就是空话。
+class TestWebUiBoundary:
+    """观察窗（M15）存在之后，「界面在哪、网关是否纯净」这两条边界。
 
-    为什么值得一条测试：一旦有人加了 HTML（哪怕是个临时调试页），
-    手册那句话就变成假的了；而读者会按"没有界面"去设计验收场景。
+    ⚠ **这个类是从 ``TestNoWebUi`` 改来的。**
+    原来的断言是"仓库里零前端文件"——那是当时的真相。现在有了 M15，
+    那句话变成了假的，于是断言跟着改。
+
+    这里刻意**没有删掉旧测试**，而是把它拆成两条更精确的：
+
+    * ``test_gateway_never_returns_html`` —— **保留原样**。观察窗是独立
+      进程，网关仍然一个 HTML 都不返回。这条边界比"整个仓库没有前端"
+      更本质，而且不会因为加了个 UI 就失效。
+    * ``test_page_shell_is_the_only_html`` —— 页面模板只有一个出处，
+      且不含服务端插值。
+
+    这个演进本身值得记下来：**测试跟着事实改是对的，删测试掩盖变化是错的。**
     """
 
-    #: 前端文件扩展名。加进来即意味着手册的声称失效。
-    FRONTEND_SUFFIXES = (".html", ".htm", ".css", ".scss", ".sass",
-                         ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte")
-
-    #: 允许的例外：(相对路径, 理由)
-    ALLOWED = ()
-
-    @covers("M11.F1")
-    def test_no_frontend_files_in_repo(self):
-        offenders: list[str] = []
-        for path in REPO_ROOT.rglob("*"):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(REPO_ROOT)
-            parts = set(rel.parts)
-            # 跳过依赖、虚拟环境、git 与构建产物
-            if parts & {".venv", ".git", "node_modules", "__pycache__", "build"}:
-                continue
-            if path.suffix.lower() not in self.FRONTEND_SUFFIXES:
-                continue
-            if any(str(rel) == allowed for allowed, _ in self.ALLOWED):
-                continue
-            offenders.append(str(rel))
-        assert not offenders, (
-            "仓库里出现了前端文件，但验收手册声称「零前端代码」：\n  "
-            + "\n  ".join(sorted(offenders))
-            + "\n要么删掉它们，要么更新 acceptance-guide.md 的说法。"
-        )
-
-    @covers("M11.F1")
+    @covers("M15.F6")
     def test_gateway_never_returns_html(self):
-        """网关不得返回 HTML —— 有 HTML 就说明"没有 Web UI"不成立。"""
+        """★ 网关不得返回 HTML —— 它只服务 HMAC 签名的机器身份。
+
+        观察窗（浏览器 cookie 那套）必须待在**另一个进程**里。
+        一旦网关开始返回 HTML，两套信任模型就共用了同一个进程，
+        UI 的漏洞会落在承载全部节点流量的地方。
+        """
         gateway = (REPO_ROOT / "nxs" / "edge" / "gateway.py").read_text(encoding="utf-8")
         forbidden = ["text/html", "<!DOCTYPE", "<html", "<div", "<body"]
         hits = [token for token in forbidden if token in gateway]
         assert not hits, (
-            f"网关里出现了 HTML 相关内容 {hits} —— "
-            f"验收手册说的「没有 Web UI」需要更新"
+            f"网关里出现了 HTML 相关内容 {hits} —— 观察窗必须独立于网关"
         )
 
-    @covers("M11.F1")
-    def test_guide_states_the_human_interfaces(self):
-        """手册必须说清「人机交互面有哪些」，而不只是「没有 UI」。"""
+    @covers("M15.F6")
+    def test_page_shell_is_the_only_html(self):
+        """页面模板只应有 ``nxs/ui/page.py`` 这一个出处。
+
+        多一份 HTML 就多一处需要同步 XSS 边界的文件。
+        """
+        html_files = [
+            str(p.relative_to(REPO_ROOT))
+            for p in REPO_ROOT.rglob("*.html")
+            if not ({"venv", "node_modules", "__pycache__"} & set(p.parts))
+        ]
+        assert not html_files, (
+            f"仓库里出现了独立的 HTML 文件 {html_files} —— "
+            f"页面模板应只有 nxs/ui/page.py 一处（内联字符串），"
+            f"便于把 XSS 边界收在一个文件里看"
+        )
+
+    @covers("M15.F6")
+    def test_page_has_no_server_side_interpolation(self):
+        """页面模板不得含服务端插值占位符。
+
+        数据全部走 /api/state + 前端 textContent 建 DOM。
+        一旦允许服务端拼 HTML，每个插值点都得记得转义一次——
+        "靠记得"的安全迟早会破。
+        """
+        from nxs.ui.page import SHELL
+
+        assert "{name}" not in SHELL and "%s" not in SHELL
+        assert "${" not in SHELL
+
+    @covers("M15.F4")
+    def test_acceptance_guide_describes_the_window(self):
+        """验收手册必须说清"界面在哪、怎么验"，而不只是"没有 UI"。"""
         text = _read(DOCS / "acceptance-guide.md")
-        for surface in ("nxs` CLI", "SDK", "/nxs/events"):
-            assert surface in text, (
-                f"验收手册没说明人机交互面包含 {surface} —— "
-                f"读者会不知道「那我怎么看状态」"
-            )
+        assert "nxs ui" in text, "验收手册没提观察窗"
+        assert "SSH" in text, "没说怎么从别的机器访问"
+        # 旧的"零前端"说法必须已经改掉
+        assert "零前端代码**" not in text.replace("**", ""), (
+            "验收手册还在说「零前端代码」—— 观察窗已经实现了"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -838,12 +855,39 @@ class TestDesignDocGaps:
     DESIGN = DOCS / "design" / "05-webui-design.md"
 
     @covers("M11.F1")
-    def test_design_doc_exists_and_is_marked_unimplemented(self):
+    def test_design_doc_status_matches_registry(self):
+        """★ 设计文档的状态标注必须与 registry 一致。
+
+        ⚠ **这条测试的判据改过一次，值得记下来。**
+        它原来断言"设计文档必须标明未实现"。M15 实现之后，
+        这条断言本身就是错的了 —— 但改成"必须标明已实现"同样会腐化，
+        下次如果 M15 被回退，又要改一次。
+
+        所以改成**跟随权威源**：registry 说未实现 → 文档要标未实现；
+        registry 说已实现 → 文档要标已实现。这样它永远不会因为
+        "实现状态变了"而失效，只在**两者不一致**时才红。
+        """
+        sys.path.insert(0, str(REPO_ROOT))
+        from traceability.registry import MODULES
+
         assert self.DESIGN.exists(), "WebUI 设计文档不见了"
         text = _read(self.DESIGN)
-        assert "设计稿，未实现" in text or "未实现" in text, (
-            "设计文档必须标明它还没实现 —— 否则读者会以为可以用了"
-        )
+
+        m15 = next(m for m in MODULES if m.id == "M15")
+        if m15.status == "未实现":
+            assert "未实现" in text, (
+                "registry 说 M15 未实现，但设计文档没标明 —— "
+                "读者会以为可以用了"
+            )
+        else:
+            assert "已实现" in text, (
+                f"registry 说 M15 是「{m15.status}」，但设计文档没标明 —— "
+                f"读者会以为还不能用"
+            )
+            # 已实现就得有实施记录，否则"怎么验的"无从追溯
+            assert "实施结果" in text, (
+                "文档说已实现，但没有实施与实测记录 —— 无法追溯验过什么"
+            )
 
     @covers("M11.F1")
     def test_gap_claims_are_marked_resolved_when_fixed(self):

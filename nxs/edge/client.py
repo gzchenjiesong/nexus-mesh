@@ -36,9 +36,9 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping
 
-from ..app import DeliveryResult
 from ..core.envelope import Envelope, envelope_for, task_to_wire
 from ..core.errors import ConfigError, PolicyDenied, RuleId
+from ..data.mailbox import DeliveryResult
 from ..core.models import Artifact, RoleCard, Task, TaskStatus
 from ..mgmt.config import OPS_NODE_ID
 from . import httpsig

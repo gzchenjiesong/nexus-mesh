@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **409** 个测试方法（已声明覆盖）· **128** 个纵向编号项（105 功能点 + 23 模块需求）
+共 **438** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -183,7 +183,7 @@ _（未实现，暂无功能点）_
 
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
-| **M11.F1** | 配置加载与严格校验（非法即拒绝启动） | `nxs/mgmt/config.py:load_config` | G4,G5 | P0 | — | 39 |
+| **M11.F1** | 配置加载与严格校验（非法即拒绝启动） | `nxs/mgmt/config.py:load_config` | G4,G5 | P0 | — | 36 |
 | **M11.F2** | 矩阵规则解析（拒绝裸通配） | `nxs/mgmt/config.py:MatrixRule.from_dict/matches_type` | G5 | P0 | S3 | 1 |
 | **M11.F3** | 凭据来源解析（环境变量优先） | `nxs/mgmt/config.py:load_config（凭据段）` | G2 | P0 | — | 3 |
 | **M11.F4** | 示例配置回退与临时凭据 | `nxs/mgmt/config.py:resolve_config_path/demo_env_for` | G4 | P2 | — | 4 |
@@ -244,9 +244,18 @@ _（未实现，暂无功能点）_
 
 ### M15 观察窗 WebUI
 
-平面 `管理面` · 实现 `nxs/ui（未建）· 设计见 docs/design/05-webui-design.md` · 状态 **未实现**
+平面 `管理面` · 实现 `nxs/ui/server.py · nxs/ui/page.py · nxs/__main__.py:cmd_ui` · 状态 **已实现**
 
-_（未实现，暂无功能点）_
+| 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
+|---|---|---|---|---|---|---|
+| **M15.F1** | 只读 UI 进程（只听 127.0.0.1，拒绝公网绑定） | `nxs/ui/server.py:UiServer` | G3 | P1 | — | 4 |
+| **M15.F2** | 一次性 token 鉴权（启动生成 · HttpOnly cookie · 不落盘） | `nxs/ui/server.py:_make_handler` | G3 | P1 | — | 8 |
+| **M15.F3** | 数据只经运维端点（不 import app／存储后端） | `nxs/ui/server.py:UiServer.snapshot` | G3 | P1 | — | 4 |
+| **M15.F4** | 节点列表视图（名称／简介／角色／状态／能力） | `nxs/ui/page.py:SHELL · nxs/ui/server.py:snapshot` | G3 | P1 | — | 3 |
+| **M15.F5** | 系统汇总视图（计数／延迟分位数／积压） | `nxs/ui/page.py:renderTiles` | G3 | P1 | — | 2 |
+| **M15.F6** | 自报字段安全渲染（textContent 建 DOM · 不用 innerHTML） | `nxs/ui/page.py:el` | G3 | P1 | — | 9 |
+| **M15.F7** | 自报字段服务端校验（长度上限 · 拒控制字符） | `nxs/core/models.py:_clean_self_reported` | G3 | P1 | — | 1 |
+| **M15.F8** | 只读保证（无写方法 · 405 带 Allow） | `nxs/ui/server.py:Handler.do_POST` | G3 | P1 | — | 4 |
 
 ## 代码准则
 
@@ -302,7 +311,6 @@ _（未实现，暂无功能点）_
 ## 尚未实现的模块
 
 - **M2** 协议适配 —— nxs/edge/proto（未建）
-- **M15** 观察窗 WebUI —— nxs/ui（未建）· 设计见 docs/design/05-webui-design.md
 
 > 这些模块暂无功能点，因此不参与覆盖统计。
 > 实现时应先在 `registry.py` 中登记功能点，再写测试并挂 `@covers`。

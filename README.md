@@ -180,7 +180,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.10.0）
+### 已实现（v0.11.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -203,7 +203,8 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 | **长任务续租**（`/nxs/ack`，不靠调大租约） | ✅ |
 | **远程运维**（批准 / 吊销 / 释放租约，走 HTTP + 审计） | ✅ |
 | **部署物**（systemd unit · 生产配置模板 · 部署自检 · 指南） | ✅ |
-| CLI | verify · **doctor** · demo · serve · **ops** · **candidates** · **metrics** · status |
+| **观察窗**（`nxs ui` 只读网页看板 · token 鉴权 · 只听 127.0.0.1） | ✅ |
+| CLI | verify · **doctor** · demo · serve · **ops** · **candidates** · **metrics** · status · **ui** |
 
 ### 尚未实现
 
@@ -222,8 +223,8 @@ make test        # 跑全部测试
 make demo        # 九步验收
 ```
 
-`traceability/MATRIX.md` 是可执行的追溯表 —— 由测试生成，覆盖 128 个
-编号项（105 功能点 + 23 模块需求），零缺口。
+`traceability/MATRIX.md` 是可执行的追溯表 —— 由测试生成，覆盖 136 个
+编号项（113 功能点 + 23 模块需求），零缺口。
 
 ### 许可证
 
@@ -292,6 +293,18 @@ make demo
 See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
+
+**v0.11.0** — `nxs ui`: a read-only watch window on `127.0.0.1`.
+M15 is done. Point your browser at it through an SSH tunnel and you get the
+node list (name, description, roles, state, capabilities) and the system
+summary (counts, latency percentiles, anomalies). It fetches everything
+**through the ops endpoints** — no storage import, no sqlite, and a test
+asserts `nxs.app` / `nxs.backends` never land in `sys.modules` just from
+importing it. Auth is a per-start token in an `HttpOnly; SameSite=Strict`
+cookie; no passwords, because anyone who can SSH in can already export the
+ops secret. The page builds DOM with `textContent`, so a node that names
+itself `<img src=x onerror=...>` shows up as literal text — verified in a
+real browser. Write methods return 405; `--host 0.0.0.0` is refused.
 
 **v0.10.0** — step 0 of the WebUI plan: make the data reachable.
 `RoleCard` gains `description`; `/nxs/ops/nodes` now returns `display_name`,

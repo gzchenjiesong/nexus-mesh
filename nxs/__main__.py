@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -50,7 +51,11 @@ def _color(text: str, key: str) -> str:
 
 
 def _info(msg: str) -> None:
-    print(msg)
+    # flush 是必需的，不是洁癖：``nxs ui`` 起完就常驻，若 stdout 被重定向
+    # （``nxs ui > log`` / ``| tee``），块缓冲会让**唯一那行 token 链接**
+    # 一直留在缓冲区里，直到进程退出 —— 而那时 token 已经没用了。
+    # 这是个真实踩过的坑：后台起服务时日志是空的，只有 401。
+    print(msg, flush=True)
 
 
 def _ok(msg: str) -> None:
@@ -325,6 +330,72 @@ def _metrics_remote(args: argparse.Namespace) -> int:
         _err(str(exc))
         return 1
     _render_metrics(payload, json_out=args.json)
+    return 0
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    """启动只读的系统观察窗（M15）。
+
+    与 ``nxs serve`` 的关系：**完全独立**。这个进程不碰存储、不参与调度，
+    只是用运维密钥定期去 hub 拉 "节点列表 + 指标" 然后画成网页。
+    它挂了不影响核心；核心挂了它会显示"hub 不可达"而不是白屏。
+
+    鉴权只有 token：每次启动重新生成、打印在终端、不落盘。
+    不做账号密码 —— 能 SSH 登录这台机器的人本来就能直接 curl 运维端点。
+    """
+    import os
+
+    from .mgmt.config import ENV_OPS_SECRET, MIN_SECRET_LENGTH
+    from .ui import UiServer
+
+    url = args.url or os.environ.get("NXS_HUB_URL", "")
+    if not url:
+        _err("缺少 hub 地址：用 --url 指定，或设置环境变量 NXS_HUB_URL")
+        _err("例如：--url http://127.0.0.1:18100/nxs")
+        return 2
+
+    raw_secret = os.environ.get(ENV_OPS_SECRET, "")
+    if len(raw_secret) < MIN_SECRET_LENGTH:
+        _err(f"缺少运维凭据：环境变量 {ENV_OPS_SECRET} 未设置或过短"
+             f"（需 ≥{MIN_SECRET_LENGTH} 字节）")
+        _err("hub 端必须用**同一个值**启动，否则运维端点不会开启")
+        return 2
+
+    try:
+        server = UiServer(url, raw_secret.encode(),
+                          host=args.host, port=args.port).start()
+    except ConfigError as exc:
+        _err(str(exc))
+        return 2
+    except OSError as exc:
+        _err(f"无法监听 {args.host}:{args.port}：{exc}")
+        _err("端口被占用？用 --port 换一个。")
+        return 2
+
+    _info("")
+    _info(_color("  观察窗已启动（只读）", "ok"))
+    _info("")
+    _info(f"  在本机打开：{_color(server.entry_url, 'b')}")
+    _info("")
+    _info(_color("  从别的机器访问，先建 SSH 隧道：", "dim"))
+    _info(_color(f"    ssh -N -L {server.port}:127.0.0.1:{server.port} "
+                 f"user@这台机器", "dim"))
+    _info(_color(f"    然后浏览器打开 http://127.0.0.1:{server.port}/?t=<上面那串>",
+                 "dim"))
+    _info("")
+    _info(_color("  ⚠ 链接里的 token 等于一次性钥匙，别贴到聊天或工单里。", "warn"))
+    _info(_color("    它不落盘、不跨重启 —— 重启后换新的。", "dim"))
+    _info("")
+    _info(_color("  按 Ctrl-C 停止。", "dim"))
+
+    try:
+        # 主线程只负责等待；HTTP 在 daemon 线程里跑
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        _info("")
+        _info("已停止。")
+    finally:
+        server.stop()
     return 0
 
 
@@ -866,6 +937,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="hub 地址，如 https://nxs.example.com/nxs"
                          "（也可用环境变量 NXS_HUB_URL）")
     sp.set_defaults(func=cmd_ops)
+
+    sp = sub.add_parser(
+        "ui", help="只读观察窗（网页看节点与指标，靠 SSH 隧道访问）")
+    sp.add_argument("--url", default=None,
+                    help="hub 地址，如 http://127.0.0.1:18100/nxs"
+                         "（也可用环境变量 NXS_HUB_URL）")
+    sp.add_argument("--host", default="127.0.0.1",
+                    help="监听地址（默认 127.0.0.1；只接受本机地址）")
+    sp.add_argument("--port", type=int, default=8080,
+                    help="监听端口（默认 8080）")
+    sp.set_defaults(func=cmd_ui)
 
     return p
 

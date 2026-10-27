@@ -187,8 +187,8 @@ MODULES: tuple[Module, ...] = (
            "nxs/edge/gateway.py（ops 端点）· nxs/edge/client.py:OpsClient",
            "已实现", ("G3",)),
     Module("M15", "观察窗 WebUI", "管理面",
-           "nxs/ui（未建）· 设计见 docs/design/05-webui-design.md",
-           "未实现", ("G3",)),
+           "nxs/ui/server.py · nxs/ui/page.py · nxs/__main__.py:cmd_ui",
+           "已实现", ("G3",)),
 )
 
 
@@ -541,6 +541,32 @@ FEATURES: tuple[Feature, ...] = (
             ("G3",), "P1"),
     Feature("M14.F8", "部署自检（nxs doctor：持久化／权限／TLS／运维通道）",
             "nxs/__main__.py:cmd_doctor",
+            ("G3",), "P1"),
+
+    # ---- M15 观察窗 WebUI -------------------------------------------
+    Feature("M15.F1", "只读 UI 进程（只听 127.0.0.1，拒绝公网绑定）",
+            "nxs/ui/server.py:UiServer",
+            ("G3",), "P1"),
+    Feature("M15.F2", "一次性 token 鉴权（启动生成 · HttpOnly cookie · 不落盘）",
+            "nxs/ui/server.py:_make_handler",
+            ("G3",), "P1"),
+    Feature("M15.F3", "数据只经运维端点（不 import app／存储后端）",
+            "nxs/ui/server.py:UiServer.snapshot",
+            ("G3",), "P1"),
+    Feature("M15.F4", "节点列表视图（名称／简介／角色／状态／能力）",
+            "nxs/ui/page.py:SHELL · nxs/ui/server.py:snapshot",
+            ("G3",), "P1"),
+    Feature("M15.F5", "系统汇总视图（计数／延迟分位数／积压）",
+            "nxs/ui/page.py:renderTiles",
+            ("G3",), "P1"),
+    Feature("M15.F6", "自报字段安全渲染（textContent 建 DOM · 不用 innerHTML）",
+            "nxs/ui/page.py:el",
+            ("G3",), "P1"),
+    Feature("M15.F7", "自报字段服务端校验（长度上限 · 拒控制字符）",
+            "nxs/core/models.py:_clean_self_reported",
+            ("G3",), "P1"),
+    Feature("M15.F8", "只读保证（无写方法 · 405 带 Allow）",
+            "nxs/ui/server.py:Handler.do_POST",
             ("G3",), "P1"),
 )
 
