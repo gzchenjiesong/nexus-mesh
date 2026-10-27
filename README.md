@@ -180,7 +180,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.11.0）
+### 已实现（v0.11.1）
 
 | 模块 | 状态 |
 |---|---|
@@ -293,6 +293,16 @@ make demo
 See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
+
+**v0.11.1** — two bugs that only show up on a real deployment.
+`nxs verify` derived its domain set from node cards and ignored the explicit
+`domains:` block — so the shipped production template **failed verification
+on step one**, because it declares `zone-work` with no node in it (work
+machines self-register later). It now calls `cfg.known_domains()`. The
+template also contradicted itself: a capability at `summary` level with
+`max_response_level: metadata`. 480 tests missed both because they tested the
+**library function** while `nxs verify` re-implemented it wrongly in the CLI.
+A new test runs the real CLI against every published template.
 
 **v0.11.0** — `nxs ui`: a read-only watch window on `127.0.0.1`.
 M15 is done. Point your browser at it through an SSH tunnel and you get the

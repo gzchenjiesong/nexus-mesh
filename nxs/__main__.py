@@ -130,11 +130,28 @@ def cmd_verify(args: argparse.Namespace) -> int:
                            "" if ok else
                            f"{cap.level} > {card.constraints.max_response_level}"))
 
-    # 3. 矩阵里引用的域都已定义（config.load 已校验，这里复述结论）
-    domains = {c.domain for c in cfg.nodes.values()}
+    # 3. 矩阵里引用的域都已定义
+    #
+    # ⚠ **这里曾经自己写了一遍域推导，而且写错了。**
+    # 原代码是 ``{c.domain for c in cfg.nodes.values()}`` —— 只从节点卡片
+    # 推导域，完全忽略了配置里显式的 ``domains:`` 段。
+    #
+    # 后果：生产部署必然失败。生产配置里 ``nodes`` 只有 hub 自己
+    # （工作电脑的节点靠自注册接入，启动时还不存在），而矩阵引用了
+    # ``zone-work`` —— 于是 verify 报"域不存在"。
+    # **而 ``domains:`` 段的存在意义，正是为了解决这个问题。**
+    #
+    # 正确做法是调用 :meth:`NexusConfig.known_domains`：它已经实现了
+    # "声明了就信声明，没声明才从节点推导"的完整逻辑。
+    # 这里原本是"同一件事两份实现，一份对一份错"。
+    known = cfg.known_domains()
     for i, rule in enumerate(cfg.policy.rules):
-        ok = rule.from_domain in domains and rule.to_domain in domains
-        checks.append((f"矩阵[{i}] {rule.from_domain}→{rule.to_domain} 域存在", ok, ""))
+        ok = rule.from_domain in known and rule.to_domain in known
+        checks.append((
+            f"矩阵[{i}] {rule.from_domain}→{rule.to_domain} 域存在", ok,
+            "" if ok else f"已知域 {sorted(known)}"
+                           f"（检查 domains: 段是否声明了它）",
+        ))
 
     # 4. 凭据长度
     for mid, secret in cfg.secrets.items():

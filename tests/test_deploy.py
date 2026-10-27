@@ -335,3 +335,89 @@ class TestArtifactSizeProbe:
         large = {"path": "/d/b.pdf", "sha256": "b" * 64, "size": 100 * 1024 * 1024}
         assert abs(len(json.dumps(small)) - len(json.dumps(large))) < 10
         assert len(json.dumps(small)) < 200
+
+
+class TestPublishedTemplatesPassVerify:
+    """★ 随仓库发布的每个配置模板，都必须能通过 ``nxs verify``。
+
+    ⚠ **这条测试是在真机部署时才发现该写的。**
+
+    2026-10-27 在云服务器上按文档部署，第一步 ``nxs verify`` 就 FAIL 三项：
+
+    * 矩阵域检查失败 —— ``verify`` 从**节点卡片**推导域，忽略了 ``domains:``
+      声明段。而生产配置里 ``nodes`` 只有 hub 自己（工作节点靠自注册接入），
+      矩阵却引用了 ``zone-work``。**``domains:`` 段的存在意义正是解决这个**，
+      verify 却没用它。
+    * hub 能力等级矛盾 —— 模板声明能力 ``level: summary``，
+      应答上限却写 ``max_response_level: metadata``，自相矛盾。
+
+    为什么 480 个测试没抓到？因为 ``TestProductionTemplate`` 测的是
+    **库函数** ``cfg.known_domains()``（它是对的），而 ``nxs verify``
+    在 CLI 里**自己另写了一遍错的推导**。
+
+    > 覆盖了实现，不等于覆盖了用户走的那条路。CLI 就是用户走的路。
+
+    所以这条测试**跑真实 CLI**，而不是调库函数。
+    """
+
+    TEMPLATES = (
+        ("deploy/local.yaml.example", "生产部署模板"),
+        ("config/nxs.example.yaml", "示例配置（demo 用）"),
+    )
+
+    @pytest.mark.parametrize("rel,label", TEMPLATES)
+    @covers("M11.F1")
+    def test_template_passes_verify(self, rel, label):
+        import os
+        import subprocess
+        import sys
+
+        from nxs.mgmt.config import EXAMPLE_CONFIG_PATH, demo_env_for
+
+        path = REPO_ROOT / rel
+        assert path.exists(), f"{label}不见了：{rel}"
+
+        env = dict(os.environ)
+        env.update(demo_env_for(EXAMPLE_CONFIG_PATH))
+
+        result = subprocess.run(
+            [sys.executable, "-m", "nxs", "verify", "--config", str(path)],
+            cwd=REPO_ROOT, capture_output=True, text=True, env=env, timeout=180,
+        )
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, (
+            f"{label}（{rel}）跑不过 nxs verify —— "
+            f"照文档部署第一步就会卡住：\n{output[-1500:]}"
+        )
+        assert "全部通过" in output, (
+            f"{label} 的 verify 输出了非预期内容：\n{output[-1500:]}"
+        )
+
+    @covers("M11.F1")
+    def test_verify_uses_declared_domains(self):
+        """★ 矩阵域检查必须认 ``domains:`` 声明，而不只是节点卡片。
+
+        这是上面那个 bug 的最小复现：生产模板里 zone-work 域
+        **没有任何节点**，只有声明。verify 必须通过。
+        """
+        import os
+        import subprocess
+        import sys
+
+        from nxs.mgmt.config import EXAMPLE_CONFIG_PATH, demo_env_for
+
+        env = dict(os.environ)
+        env.update(demo_env_for(EXAMPLE_CONFIG_PATH))
+        result = subprocess.run(
+            [sys.executable, "-m", "nxs", "verify",
+             "--config", str(DEPLOY / "local.yaml.example")],
+            cwd=REPO_ROOT, capture_output=True, text=True, env=env, timeout=180,
+        )
+        output = result.stdout + result.stderr
+        # 不能出现"域存在"失败
+        assert "✗ 矩阵" not in output, (
+            f"verify 仍报矩阵域检查失败 —— 它没有使用 cfg.known_domains()：\n{output}"
+        )
+        for domain in ("zone-work", "zone-home"):
+            assert f"{domain} 域存在" not in output or "✓" in output
+        assert "域存在" in output, "verify 应该逐条列出矩阵域检查结果"

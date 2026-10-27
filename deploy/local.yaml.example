@@ -129,7 +129,10 @@ nodes:
           inputs: "string"
         response_fields: [summary, level]
     constraints:
-      max_response_level: metadata
+      # ⚠ 必须 ≥ 上方能力的 level（summary），否则自相矛盾：
+      #   声明"我能产出 summary 级结论"却说"我最多返回 metadata 级"。
+      #   这个字段曾是 metadata，导致 nxs verify 直接 FAIL —— 模板自身的 bug。
+      max_response_level: summary
       # 不接收任何人的委托（它是发起方）
       can_receive_from: []
       can_issue_types: ["work.*"]
