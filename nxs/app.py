@@ -162,6 +162,40 @@ class NexusApp:
         """
         for card in self.config.nodes.values():
             self.registry.register(card, approved=card.domain in self._approved_domains)
+        self._pulse_local_node()
+
+    def _pulse_local_node(self) -> None:
+        """给**本进程承载的节点**续一次心跳。
+
+        ⭐ 为什么必须有人做这件事
+        ------------------------
+        存活判定是"超过 ``heartbeat_interval × 3`` 没有心跳 → stale"。
+        这条规则对远端节点是对的（它不心跳，多半是死了）。
+
+        但协调节点是**本进程内的节点**，没有任何东西会给它发心跳 ——
+        它自己就是服务端。于是启动 3 个心跳周期后它必然被判 stale。
+        实测就是这样：``state=stale，最后心跳 344 秒前，阈值 180 秒``。
+
+        后果一个误导一个真实：
+          * 观察窗里"协调中枢 ● stale"看着像核心挂了，其实完全正常
+          * ``capability_index`` 按 routable 过滤 → 它声明的能力
+            在匹配器眼里消失，变成"没有节点能提供 work.summary"
+
+        为什么只给 ``local_node`` 续命，而不是所有配置里的节点：
+        ``nodes:`` 段也可以登记**远端**节点（为了锁定信任域）。
+        替那种节点续命等于让一台已经死掉的机器永远显示 alive ——
+        那比 stale 更危险，因为它会让任务被投给一个不存在的对端。
+
+        所以"本进程承载哪一个"必须显式写在配置里，不能靠猜。
+        ``local_node`` 为空时本方法什么都不做（正确：这个进程不承载节点）。
+        """
+        node_id = self.config.local_node
+        if not node_id:
+            return
+        # heartbeat 只刷新 last_seen；从 stale 回到 alive 要靠 resurrect。
+        # 两个都要调 —— 漏掉 resurrect 的症状是"一直卡在 stale"。
+        self.registry.heartbeat(node_id)
+        self.registry.resurrect(node_id)
 
     def approve(self, node_id: str) -> None:
         self.registry.approve(node_id)
@@ -170,6 +204,10 @@ class NexusApp:
         self.registry.revoke(node_id)
 
     def sweep(self) -> dict[str, int]:
+        # ⚠ 顺序要紧：**先给自己续心跳，再扫 stale**。
+        # 反过来的话，这一轮会先把自己判成 stale（它的 last_seen 早就过期了），
+        # 然后才续上 —— 于是观察窗上会周期性闪一下 stale。
+        self._pulse_local_node()
         return self.mailbox.sweep()
 
     # ------------------------------------------------------------------

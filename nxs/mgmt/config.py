@@ -317,6 +317,28 @@ class NexusConfig:
     nodes: dict[str, RoleCard] = field(default_factory=dict)
     #: 节点凭据，按 node_id 索引。**只存在于内存，不写入任何日志。**
     secrets: dict[str, bytes] = field(default_factory=dict)
+    #: **本进程承载的那个节点**（通常是协调节点自己）。空表示"本进程不承载任何节点"。
+    #:
+    #: ⭐ 为什么需要它
+    #: ----------------
+    #: 存活判定是靠心跳的：``stale`` = 超过 ``heartbeat_interval × 3`` 没有心跳。
+    #: 这个判据对**远端节点**是对的 —— 它不发心跳，多半是死了/断网了。
+    #:
+    #: 但协调节点自己是一个进程内的节点，**没有任何东西会给它发心跳**
+    #: （它自己就是服务端）。于是在启动 3 个心跳周期之后，它必然被判成 stale。
+    #:
+    #: 后果有两个，一个误导一个真实：
+    #:   * 观察窗里"协调中枢 ● stale"看着像核心挂了，其实完全正常
+    #:   * ``capability_index`` 也按 routable 过滤 → 它声明的能力
+    #:     在匹配器眼里消失，变成"没有节点能提供 work.summary"
+    #:
+    #: 这里要区分两件事，不能一刀切"配置里写的节点都是本进程"：
+    #: ``nodes:`` 段也可以登记**远端**节点（为了锁定它的信任域）。
+    #: 那种节点该由它自己心跳，不是由协调节点替它续命 ——
+    #: 替它续命等于让一台死掉的机器永远显示 alive，那更危险。
+    #:
+    #: 所以"这台机器承载的是哪个节点"必须**显式写出来**，而不是猜。
+    local_node: str = ""
     source_path: str = ""
 
     # ------------------------------------------------------------------
@@ -503,8 +525,10 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
     # 归一化：后续读取凭据要用这个 dict，不能直接用调用方传入的 None
     env = dict(os.environ if env is None else env)
     raw = _load_yaml(resolved)
-    _reject_unknown(raw, ("server", "stores", "policy", "domains", "nodes"),
-                    f"{resolved.name}")
+    _reject_unknown(
+        raw, ("server", "stores", "policy", "domains", "nodes", "local_node"),
+        f"{resolved.name}",
+    )
 
     # ---- 节点与角色卡 ----
     raw_nodes = raw.get("nodes")
@@ -618,6 +642,26 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
                     f"可用的类型为 {sorted(available_types)}"
                 )
 
+    # ---- 本进程承载的节点 ----
+    #
+    # 校验存在性是刻意的：写错一个 node_id 时，如果静默忽略，症状是
+    # "协调节点过一会儿变 stale"——而那看起来完全与配置无关。
+    # 这类"配错了但不报错"的问题最难查，所以在加载时就拦住。
+    local_node = raw.get("local_node", "")
+    if local_node is None:
+        local_node = ""
+    if not isinstance(local_node, str):
+        raise ConfigError(f"local_node: 期望节点 ID 字符串，实际 {type(local_node).__name__}")
+    if local_node and local_node not in nodes:
+        raise ConfigError(
+            f"local_node: 引用了不存在的节点 '{local_node}'；"
+            f"已定义的节点为 {sorted(nodes)}"
+        )
+    if local_node == OPS_NODE_ID:
+        raise ConfigError(
+            f"local_node: '{OPS_NODE_ID}' 是运维身份，不能作为承载节点"
+        )
+
     cfg = NexusConfig(
         server=ServerConfig.from_dict(raw.get("server")),
         stores=StoreConfig.from_dict(raw.get("stores")),
@@ -625,6 +669,7 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
         domains=declared_domains,
         nodes=nodes,
         secrets=secrets,
+        local_node=local_node,
         source_path=str(resolved),
     )
     return cfg

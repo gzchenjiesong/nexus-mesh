@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **492** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
+共 **500** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -60,7 +60,7 @@ _（未实现，暂无功能点）_
 | **M3.F1** | 角色卡注册（默认不批准） | `nxs/control/registry.py:Registry.register` | G1,G5 | P0 | S9 | 11 |
 | **M3.F2** | 人工批准 | `nxs/control/registry.py:Registry.approve` | G1,G5 | P0 | S9 | 2 |
 | **M3.F3** | 凭据吊销（保留记录） | `nxs/control/registry.py:Registry.revoke` | G2 | P0 | S10 | 2 |
-| **M3.F4** | 心跳与三档存活状态 | `nxs/control/registry.py:Registry.heartbeat/sweep/resurrect` | G1 | P1 | — | 1 |
+| **M3.F4** | 心跳与三档存活状态 | `nxs/control/registry.py:Registry.heartbeat/sweep/resurrect` | G1 | P1 | — | 9 |
 | **M3.F5** | 能力索引（只含可路由节点） | `nxs/control/registry.py:Registry.capability_index` | G1,G5 | P1 | — | 1 |
 | **M3.F6** | 可路由性检查 | `nxs/control/registry.py:Registry.require_routable` | G3 | P0 | — | 1 |
 | **M3.F7** | 角色卡持久化（重启后注册表仍在） | `nxs/backends/sqlite/SqliteRegistryStore` | G1,G5 | P0 | — | 2 |
