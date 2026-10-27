@@ -62,7 +62,8 @@ class UiServer:
 
     def __init__(self, ops_url: str, ops_secret: bytes, *,
                  host: str = "127.0.0.1", port: int = 8080,
-                 refresh_hint_seconds: int = 5) -> None:
+                 refresh_hint_seconds: int = 5,
+                 ca_file: str | None = None) -> None:
         if host not in ALLOWED_HOSTS:
             raise ConfigError(
                 f"ui: 拒绝绑定 {host!r}。只允许 {sorted(ALLOWED_HOSTS)} —— "
@@ -76,7 +77,9 @@ class UiServer:
         self.host = host
         self.port = port
         self.refresh_hint_seconds = refresh_hint_seconds
-        self._ops = OpsClient(ops_url, secret=ops_secret)
+        # ca_file：hub 用自签证书时需要。观察窗自己在 systemd 里也有
+        # SSL_CERT_FILE，但显式传参更可控（且不依赖部署环境恰好设了变量）。
+        self._ops = OpsClient(ops_url, secret=ops_secret, ca_file=ca_file)
 
         #: 每次启动重新生成，**不落盘、不跨重启复用**。
         self.token = secrets.token_urlsafe(TOKEN_BYTES)
@@ -319,7 +322,9 @@ def _make_handler(server: UiServer) -> type[BaseHTTPRequestHandler]:
 # ---------------------------------------------------------------------------
 
 def serve_ui(ops_url: str, ops_secret: bytes, *, host: str = "127.0.0.1",
-             port: int = 8080) -> tuple[UiServer, str]:
+             port: int = 8080, ca_file: str | None = None
+             ) -> tuple[UiServer, str]:
     """启动并返回 ``(server, entry_url)``。调用方负责打印 entry_url。"""
-    server = UiServer(ops_url, ops_secret, host=host, port=port).start()
+    server = UiServer(ops_url, ops_secret, host=host, port=port,
+                      ca_file=ca_file).start()
     return server, server.entry_url

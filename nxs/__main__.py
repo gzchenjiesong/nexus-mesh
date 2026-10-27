@@ -342,7 +342,8 @@ def _metrics_remote(args: argparse.Namespace) -> int:
         _err(f"缺少运维凭据：环境变量 {ENV_OPS_SECRET} 未设置或过短")
         return 2
     try:
-        ops = OpsClient(args.url, secret=raw.encode())
+        ops = OpsClient(args.url, secret=raw.encode(),
+                        ca_file=_ca_file_for(args))
         payload = ops.metrics()
     except NexusError as exc:
         _err(str(exc))
@@ -381,7 +382,8 @@ def cmd_ui(args: argparse.Namespace) -> int:
 
     try:
         server = UiServer(url, raw_secret.encode(),
-                          host=args.host, port=args.port).start()
+                          host=args.host, port=args.port,
+                          ca_file=_ca_file_for(args)).start()
     except ConfigError as exc:
         _err(str(exc))
         return 2
@@ -583,6 +585,26 @@ def cmd_candidates(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # doctor（部署自检）
 # ---------------------------------------------------------------------------
+
+def _ca_file_for(args: argparse.Namespace) -> str | None:
+    """解析客户端要信任的 CA 文件。
+
+    三种途径，优先级从高到低：
+
+    1. ``--ca-file`` 命令行
+    2. ``NXS_CA_FILE`` 环境变量
+    3. 不指定 —— 用系统 CA 库（公网证书的正常情况）
+
+    ⚠ **为什么不直接建议用户设 ``SSL_CERT_FILE``**：那是 OpenSSL 的
+    进程级变量，一设就影响该进程**所有** HTTPS 请求。而这里只想让
+    ``nxs`` 客户端信任那一张自签 CA。语义窄一点、影响面小一点。
+    """
+    import os
+
+    if getattr(args, "ca_file", None):
+        return args.ca_file
+    return os.environ.get("NXS_CA_FILE") or None
+
 
 def socket_probe_host(host: str) -> str:
     """把监听地址换成可主动连接的地址。
@@ -848,7 +870,8 @@ def cmd_ops(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        ops = OpsClient(url, secret=raw_secret.encode())
+        ops = OpsClient(url, secret=raw_secret.encode(),
+                        ca_file=_ca_file_for(args))
         if args.action == "nodes":
             rows = ops.nodes()
             if args.json:
@@ -982,6 +1005,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "仅在同进程运行时有数据")
     sp.add_argument("--json", action="store_true",
                     help="输出 JSON（便于喂给其他工具）")
+    sp.add_argument("--ca-file", default=None,
+                    help="信任的 CA 证书（hub 用自签证书时必需；"
+                         "也可用环境变量 NXS_CA_FILE）")
     sp.set_defaults(func=cmd_metrics)
 
     sp = sub.add_parser(
@@ -1002,6 +1028,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--url", default=None,
                     help="hub 地址，如 https://nxs.example.com/nxs"
                          "（也可用环境变量 NXS_HUB_URL）")
+    sp.add_argument("--ca-file", default=None,
+                    help="信任的 CA 证书（hub 用自签证书时必需；"
+                         "也可用环境变量 NXS_CA_FILE）")
     sp.set_defaults(func=cmd_ops)
 
     sp = sub.add_parser(
@@ -1013,6 +1042,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="监听地址（默认 127.0.0.1；只接受本机地址）")
     sp.add_argument("--port", type=int, default=8080,
                     help="监听端口（默认 8080）")
+    sp.add_argument("--ca-file", default=None,
+                    help="信任的 CA 证书（hub 用自签证书时必需；"
+                         "也可用环境变量 NXS_CA_FILE）")
     sp.set_defaults(func=cmd_ui)
 
     return p

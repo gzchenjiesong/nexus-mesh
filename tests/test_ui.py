@@ -645,3 +645,64 @@ class TestSelfSignedCaSupport:
         ops = OpsClient("https://example.com/nxs", secret=b"x" * 32,
                         ca_file="/etc/nexus-mesh/tls/ca.pem")
         assert ops.ca_file == "/etc/nexus-mesh/tls/ca.pem"
+
+    @covers("M14.F7")
+    def test_cli_exposes_ca_file(self):
+        """★ CLI 必须暴露 ``--ca-file``。
+
+        ⚠ 这条是被真机部署打回来的：我先只给 ``HttpTransport`` /
+        ``OpsClient`` 类加了 ``ca_file`` 参数，CLI 却没开口子。
+        结果在服务器上跑 ``nxs ops nodes`` 仍然
+        ``CERTIFICATE_VERIFY_FAILED`` —— **库支持了，用户用不上**。
+
+        "能配" 和 "用户能配到" 是两件事。CLI 是用户实际接触的那个面。
+        """
+        import subprocess
+        import sys
+
+        for cmd in ("ops", "metrics", "ui"):
+            result = subprocess.run(
+                [sys.executable, "-m", "nxs", cmd, "--help"],
+                cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+            )
+            assert result.returncode == 0
+            assert "--ca-file" in result.stdout, (
+                f"`nxs {cmd}` 没有 --ca-file —— 自签部署的用户没法用"
+            )
+
+    @covers("M14.F7")
+    def test_cli_ca_file_env_fallback(self):
+        """``NXS_CA_FILE`` 应作为环境变量兜底（省得每次都打字）。"""
+        import argparse
+        import os
+
+        from nxs.__main__ import _ca_file_for
+
+        # 命令行优先
+        args = argparse.Namespace(ca_file="/explicit/ca.pem")
+        old = os.environ.get("NXS_CA_FILE")
+        os.environ["NXS_CA_FILE"] = "/env/ca.pem"
+        try:
+            assert _ca_file_for(args) == "/explicit/ca.pem"
+            # 命令行没给时读环境变量
+            assert _ca_file_for(argparse.Namespace(ca_file=None)) == "/env/ca.pem"
+        finally:
+            if old is None:
+                os.environ.pop("NXS_CA_FILE", None)
+            else:
+                os.environ["NXS_CA_FILE"] = old
+
+    @covers("M14.F7")
+    def test_cli_ca_file_default_is_none(self):
+        """都不给时为 None —— 走系统 CA 库（公网证书的正常情况）。"""
+        import argparse
+        import os
+
+        from nxs.__main__ import _ca_file_for
+
+        old = os.environ.pop("NXS_CA_FILE", None)
+        try:
+            assert _ca_file_for(argparse.Namespace(ca_file=None)) is None
+        finally:
+            if old is not None:
+                os.environ["NXS_CA_FILE"] = old
