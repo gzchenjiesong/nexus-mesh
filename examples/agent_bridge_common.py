@@ -56,6 +56,38 @@ DEFAULT_TIMEOUT = 180
 Runner = Callable[[str], str]
 
 
+#: 传给 Agent 子进程时**必须剔除**的环境变量前缀。
+#:
+#: ⚠ **这是一条真实的教训。** 桥接的 systemd unit 用
+#: ``EnvironmentFile=/etc/nexus-mesh/nxs.env`` 加载凭据，那会把**整个文件**
+#: 塞进桥接进程的环境 —— 包括运维密钥和别人的节点密钥。
+#: 而 ``_hermes_env`` 用 ``dict(os.environ)`` 继承，于是全部传给了 Agent。
+#:
+#: Agent 能通过 exec 读自己的环境，所以那一刻起：
+#:   · 它能拿到 NXS_OPS_SECRET（能批准/吊销任何节点）
+#:   · 它能拿到别的节点的密钥（能冒充别人发任务）
+#:
+#: 这与"密钥不进 Agent 上下文"的设计直接矛盾。
+#:
+#: 我原来的测试 ``test_hermes_env_does_not_carry_secret`` 是**假阳性**：
+#: 它跑在测试进程里，那个环境本来就没有这些变量，所以断言永远成立。
+#: 现在改成显式注入再断言（见 TestActorInjection）。
+_SECRET_ENV_PREFIXES = ("NXS_SECRET", "NXS_OPS")
+
+
+def scrub_secrets(env: dict[str, str]) -> dict[str, str]:
+    """剔除环境里的全部凭据变量。
+
+    **白名单式思考的反面**：这里用黑名单（按前缀剔除）而不是白名单，
+    因为子进程可能需要任意其他变量（PATH、HOME、语言设置……），
+    逐个列举会漏。而凭据的命名有统一前缀，黑名单在这里是可靠的。
+    """
+    return {
+        k: v for k, v in env.items()
+        if not any(k.startswith(prefix) for prefix in _SECRET_ENV_PREFIXES)
+    }
+
+
 def truncate_utf8(text: str, limit: int) -> str:
     """按字节上限截断，不切碎 UTF-8 字符。"""
     encoded = text.encode("utf-8")

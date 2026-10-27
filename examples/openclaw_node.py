@@ -92,6 +92,7 @@ from examples.agent_bridge_common import (
     MAX_ANSWER_BYTES,
     make_ask_handler,
     run_subprocess,
+    scrub_secrets,
 )
 
 #: OpenClaw CLI 的入口脚本。node 需要用它来跑。
@@ -204,6 +205,21 @@ def extract_answer(payload: dict) -> str:
     )
 
 
+def _secret_for(node_id: str) -> str:
+    """取本节点的网格凭据（优先凭据文件，环境变量兜底）。
+
+    理由同 hermes_node._secret_for：桥接 unit 加载了 nxs.env 全文，
+    进程环境里不该持有别人的密钥。
+    """
+    try:
+        from nxs.cli.actor import load_actor
+
+        return load_actor(node_id).secret.decode("utf-8")
+    except Exception:  # noqa: BLE001
+        return os.environ.get(
+            "NXS_SECRET_" + node_id.upper().replace("-", "_"), "")
+
+
 def _actor_env(node_id: str) -> dict[str, str]:
     """子进程环境：继承全部 + 只加 ``NXS_ACTOR``。
 
@@ -216,7 +232,8 @@ def _actor_env(node_id: str) -> dict[str, str]:
     问别的 Agent 时，``nxs-cli`` 靠这个名字查凭据。
     **密钥不进 Agent 的上下文** —— 它只知道自己的名字。
     """
-    env = dict(os.environ)
+    # ★ 剔掉全部凭据 —— 理由同 hermes_node._hermes_env
+    env = scrub_secrets(dict(os.environ))
     env["NXS_ACTOR"] = node_id
     return env
 
@@ -368,8 +385,15 @@ def main() -> int:
         log.error("缺少 --url 或 NXS_COORDINATOR_URL")
         return 2
 
-    secret = os.environ.get(
-        "NXS_SECRET_" + args.node_id.upper().replace("-", "_"), "")
+    # ★ 优先从**凭据文件**读，而不是从环境变量。
+    #
+    # 为什么：桥接的 systemd unit 用 EnvironmentFile 加载 nxs.env 全文，
+    # 于是进程环境里有全部密钥（运维密钥 + 别人的节点密钥）。
+    # 虽然传给 Agent 子进程时已经剔除，但**根因是它本不该在进程环境里**。
+    #
+    # 从 /etc/nexus-mesh/agents/<id>.env 读，只需要自己那一把；
+    # 环境变量作为向后兼容的兜底（本地手工运行时用）。
+    secret = _secret_for(args.node_id)
     if not secret:
         log.error("缺少凭据：请设置环境变量 NXS_SECRET_%s",
                   args.node_id.upper().replace("-", "_"))

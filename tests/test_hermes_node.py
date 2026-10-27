@@ -403,14 +403,52 @@ class TestActorInjection:
     def test_hermes_env_does_not_carry_secret(self):
         """★ 只给名字，**不给密钥**。
 
-        密钥一旦进了子进程环境，就可能被 Agent 打印出来、
-        写进会话历史、或者在 prompt 里出现 —— 那时它就不再是秘密。
+        ⚠ **这条测试原来是个假阳性。** 初版直接检查 ``_hermes_env()``
+        的返回里有没有 key 名含 SECRET —— 但它跑在测试进程里，
+        那个环境本来就没有 ``NXS_SECRET_*``，所以断言永远成立。
+
+        真实情况是：桥接的 systemd unit 用
+        ``EnvironmentFile=/etc/nexus-mesh/nxs.env`` 加载了**整个文件**，
+        于是桥接进程环境里有运维密钥和所有节点的密钥；
+        ``_hermes_env`` 用 ``dict(os.environ)`` 继承 —— 全传给了 Agent。
+
+        那是实测发现的：``tr '\0' '\n' < /proc/<pid>/environ`` 里
+        赫然躺着 NXS_OPS_SECRET 和别人的 NXS_SECRET_*。
+
+        修法：现在这条测试**先真的注入**密钥变量，再断言它们被剔除。
+        只有这样它才能抓到回归。
         """
+        import os
+
         from examples.hermes_node import _hermes_env
 
-        env = _hermes_env("/tmp/profile", "taskflow")
-        leaked = [k for k in env if "SECRET" in k.upper()]
-        assert not leaked, f"这些密钥变量不该进 Agent 环境：{leaked}"
+        injected = {
+            "NXS_SECRET_TASKFLOW": "s" * 64,
+            "NXS_SECRET_COORDINATOR": "c" * 64,
+            "NXS_OPS_SECRET": "o" * 64,
+            "NXS_SECRET_HERMES_WORKING": "h" * 64,
+            # 一个不该被剔的作对照
+            "NXS_ACTOR_KEEP_ME": "keep",
+        }
+        saved = {k: os.environ.get(k) for k in injected}
+        os.environ.update(injected)
+        try:
+            env = _hermes_env("/tmp/profile", "taskflow")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        leaked = sorted(k for k in env if k.startswith(("NXS_SECRET", "NXS_OPS")))
+        assert not leaked, (
+            f"这些凭据泄漏到了 Agent 的子进程环境：{leaked}\n"
+            f"  Agent 能 exec，所以它读得到 —— 等于给了它运维密钥与别人的身份。"
+        )
+        # 对照：非凭据的变量必须保留（否则会破坏 Agent 的运行环境）
+        assert env.get("NXS_ACTOR_KEEP_ME") == "keep"
+        assert env.get("NXS_ACTOR") == "taskflow"
 
     @covers("M14.F3")
     def test_actor_reaches_subprocess(self, workdir):

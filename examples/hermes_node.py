@@ -88,6 +88,7 @@ from examples.agent_bridge_common import (  # noqa: F401 - 部分符号供外部
     finalize_answer,
     make_ask_handler,
     run_subprocess,
+    scrub_secrets,
     truncate_utf8 as _truncate_utf8,
     validate_question,
 )
@@ -165,6 +166,26 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
 # 业务处理器
 # ---------------------------------------------------------------------------
 
+def _secret_for(node_id: str) -> str:
+    """取本节点的网格凭据。
+
+    **优先读凭据文件**（``/etc/nexus-mesh/agents/<id>.env``），
+    环境变量只作兜底。理由见 main() 里的说明 ——
+    桥接的 unit 加载了 nxs.env 全文，进程环境里有全部密钥，
+    那是不该有的暴露面。
+
+    读文件失败时不抛异常，回落到环境变量：本地手工跑的时候
+    常常只有环境变量、没有文件。
+    """
+    try:
+        from nxs.cli.actor import load_actor
+
+        return load_actor(node_id).secret.decode("utf-8")
+    except Exception:  # noqa: BLE001 - 任何失败都回落到环境变量
+        return os.environ.get(
+            "NXS_SECRET_" + node_id.upper().replace("-", "_"), "")
+
+
 def _hermes_env(hermes_home: str, node_id: str) -> dict[str, str]:
     """子进程的环境变量。
 
@@ -180,7 +201,11 @@ def _hermes_env(hermes_home: str, node_id: str) -> dict[str, str]:
     **不在这里塞凭据**：Hermes 自己从 profile 的 ``.env`` 读 key，
     桥接不该碰那些东西；同理也不该把 mesh 密钥塞给 Agent。
     """
-    env = dict(os.environ)
+    # ★ scrub_secrets：**必须剔掉全部凭据**。
+    # 桥接的 systemd unit 用 EnvironmentFile 加载了 nxs.env 全文，
+    # 所以 os.environ 里有运维密钥和别人的节点密钥 ——
+    # 原封不动继承就等于把它们交给 Agent（见 agent_bridge_common 的说明）。
+    env = scrub_secrets(dict(os.environ))
     env["HERMES_HOME"] = hermes_home
     env["NXS_ACTOR"] = node_id
     return env
@@ -320,8 +345,15 @@ def main() -> int:
         log.error("缺少 --url 或 NXS_COORDINATOR_URL")
         return 2
 
-    secret = os.environ.get(
-        "NXS_SECRET_" + args.node_id.upper().replace("-", "_"), "")
+    # ★ 优先从**凭据文件**读，而不是从环境变量。
+    #
+    # 为什么：桥接的 systemd unit 用 EnvironmentFile 加载 nxs.env 全文，
+    # 于是进程环境里有全部密钥（运维密钥 + 别人的节点密钥）。
+    # 虽然传给 Agent 子进程时已经剔除，但**根因是它本不该在进程环境里**。
+    #
+    # 从 /etc/nexus-mesh/agents/<id>.env 读，只需要自己那一把；
+    # 环境变量作为向后兼容的兜底（本地手工运行时用）。
+    secret = _secret_for(args.node_id)
     if not secret:
         log.error("缺少凭据：请设置环境变量 NXS_SECRET_%s",
                   args.node_id.upper().replace("-", "_"))
