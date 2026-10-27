@@ -1024,11 +1024,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"nodes": [
                 {
                     "node_id": rec.card.node_id,
+                    # 自报展示字段。**已在上游校验过**（长度与控制字符），
+                    # 但仍是不可信文本 —— 消费方渲染时必须转义（见 models
+                    # 的 _clean_self_reported 说明：转义是渲染层的责任）。
+                    "display_name": rec.card.display_name,
+                    "description": rec.card.description,
                     "domain": rec.card.domain,
                     "state": rec.state,
                     "approved": rec.approved,
                     "revision": rec.revision,
                     "last_seen": rec.last_seen,
+                    "roles": {
+                        "issuer": rec.card.roles.issuer,
+                        "executor": rec.card.roles.executor,
+                        "relay": rec.card.roles.relay,
+                        "observer": rec.card.roles.observer,
+                        "human_interface": rec.card.roles.human_interface,
+                    },
                     "capabilities": [c.type for c in rec.card.capabilities],
                     "max_response_level": str(rec.card.constraints.max_response_level),
                 }

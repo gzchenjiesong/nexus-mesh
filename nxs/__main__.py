@@ -714,16 +714,32 @@ def cmd_ops(args: argparse.Namespace) -> int:
         ops = OpsClient(url, secret=raw_secret.encode())
         if args.action == "nodes":
             rows = ops.nodes()
+            if args.json:
+                import json as _json
+                print(_json.dumps({"nodes": rows}, ensure_ascii=False, indent=2))
+                return 0
             if not rows:
                 _info(_color("（注册表为空）", "dim"))
                 return 0
-            _info(_color(f"{'节点':<14}{'域':<12}{'状态':<10}{'批准':<6}"
-                         f"{'版本':<6}能力", "b"))
+            # 运维看节点，最先要看懂的是「它叫什么、是不是活着、能不能用」。
+            # 所以名称与批准状态在左侧；能力放最后（它是长文本，会挤掉前面）。
+            _info(_color("  " + _pad("名称", 20) + _pad("节点", 14)
+                         + _pad("域", 12) + _pad("状态", 10)
+                         + _pad("批准", 6) + "能力", "b"))
             for r in rows:
                 mark = _color("✓", "ok") if r["approved"] else _color("·", "warn")
                 caps = ",".join(r["capabilities"]) or "-"
-                _info(f"{r['node_id']:<14}{r['domain']:<12}{r['state']:<10}"
-                      f"{mark:<6}{r['revision']:<6}{caps}")
+                name = r.get("display_name") or "—"
+                _info("  " + _pad(name, 20) + _pad(r["node_id"], 14)
+                      + _pad(r["domain"], 12) + _pad(r["state"], 10)
+                      + _pad(mark, 6) + caps)
+                # 简介单独一行：它是自由文本，塞进表格会拖垮列宽。
+                # ⚠ 这里**不清洗**——控制字符已在卡片解析时被拒，
+                #   但若将来有别的入口绕过，终端注入的风险仍在。
+                if r.get("description"):
+                    _info(_color(f"  {'':20}{r['description']}", "dim"))
+            _info("")
+            _info(_color("  用 --json 取完整字段（含简介、角色、应答上限）", "dim"))
             return 0
 
         if args.action in ("approve", "revoke"):
@@ -842,6 +858,8 @@ def build_parser() -> argparse.ArgumentParser:
         "ops", help="远程运维：批准 / 吊销 / 释放租约 / 查节点")
     sp.add_argument("action", choices=["approve", "revoke", "release", "nodes"],
                     help="运维动作")
+    sp.add_argument("--json", action="store_true",
+                    help="JSON 输出（仅 nodes 动作；便于喂给其他工具）")
     sp.add_argument("node", nargs="?", default=None,
                     help="节点 ID（approve / revoke 需要）")
     sp.add_argument("--url", default=None,

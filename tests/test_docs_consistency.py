@@ -846,38 +846,39 @@ class TestDesignDocGaps:
         )
 
     @covers("M11.F1")
-    def test_gap_claims_still_true(self):
-        """★ 文档声称的两个缺口，若已被补上，就必须更新文档。
+    def test_gap_claims_are_marked_resolved_when_fixed(self):
+        """★ 缺口一旦补上，设计文档必须**标注已处置**。
 
-        当前缺口（2026-10-27 实测）：
-        * ``ops nodes`` 不返回 ``display_name``
-        * ``RoleCard`` 没有 ``description``
+        判据选择说明（这里踩过一次）：
+        最初我写的是"补上后不许再提这个缺口"——太脆。它逼人删掉
+        历史描述，而那些描述**有解释价值**：不知道"名称曾经拿不到"，
+        就看不懂为什么方案要先补接口再写 UI。
 
-        一旦补上，这条测试会红，提示去改设计文档。
+        正确的判据不是"不许提历史"，而是"**提了历史就必须标明现状**"。
+        所以这里检查：代码已补上时，文档里必须出现「已处置」标记。
         """
         sys.path.insert(0, str(REPO_ROOT))
         from nxs.core.models import RoleCard
 
         gateway = (REPO_ROOT / "nxs" / "edge" / "gateway.py").read_text(encoding="utf-8")
-
-        # 缺口一：ops nodes 的返回块里有没有 display_name
-        nodes_block = gateway.split('elif action == "nodes":')[1].split("elif action")[0]
-        has_display_name = "display_name" in nodes_block
         text = _read(self.DESIGN)
 
-        if has_display_name:
-            assert "没返回" not in text and "没有这个字段" not in text, (
-                "「ops nodes 不返回 display_name」这个缺口已经补上了，"
-                "但设计文档还写着缺 —— 请更新 docs/design/05-webui-design.md 第一节"
-            )
+        nodes_block = gateway.split('elif action == "nodes":')[1].split("elif action")[0]
+        has_display_name = "display_name" in nodes_block
+        has_description = "description" in str(RoleCard._FIELDS)  # noqa: SLF001
 
-        # 缺口二：RoleCard 有没有 description
-        fields = str(RoleCard._FIELDS)  # noqa: SLF001
-        has_description = "description" in fields
+        if has_display_name or has_description:
+            assert "已处置" in text, (
+                "缺口已经补上了，但设计文档第一节没有任何「已处置」标记 —— "
+                "读者会把历史描述当成现状，去重复实现已经存在的东西"
+            )
+        if has_display_name:
+            assert "ops nodes` 现在返回" in text or "现在返回" in text, (
+                "`ops nodes` 已返回 display_name，但文档没说清现状"
+            )
         if has_description:
-            assert "根本没有这个字段" not in text, (
-                "「RoleCard 没有 description」这个缺口已经补上了，"
-                "但设计文档还写着缺 —— 请更新设计文档第一节"
+            assert "已加 `description`" in text or "已加 description" in text, (
+                "`RoleCard` 已有 description，但文档没说清现状"
             )
 
     @covers("M11.F1")

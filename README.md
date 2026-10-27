@@ -64,6 +64,7 @@ Nexus Mesh 把这两件事作为核心，而不是附属功能。
 | [`docs/artifact-size.md`](docs/artifact-size.md) | 产物能多大：实测数据 + 决策表 |
 | [`docs/observability.md`](docs/observability.md) | 为什么这里没有阈值告警 |
 | [`docs/acceptance-guide.md`](docs/acceptance-guide.md) | **验收场景设计手册**：能验收什么 / 不能验收什么 / 配了不生效什么 |
+| [`docs/design/05-webui-design.md`](docs/design/05-webui-design.md) | WebUI（M15）设计：只读观察窗 + SSH 隧道 |
 | [`docs/docs-audit.md`](docs/docs-audit.md) | 文档腐化审计：方法与历史发现 |
 | [`traceability/MATRIX.md`](traceability/MATRIX.md) | 追溯矩阵（由测试自动生成） |
 
@@ -179,7 +180,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.9.2）
+### 已实现（v0.10.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -291,6 +292,18 @@ make demo
 See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
+
+**v0.10.0** — step 0 of the WebUI plan: make the data reachable.
+`RoleCard` gains `description`; `/nxs/ops/nodes` now returns `display_name`,
+`description` and `roles`, so `nxs ops nodes` shows names in the terminal
+today — before any UI exists. Self-reported text is validated server-side:
+length caps and control characters rejected, because ANSI escapes can forge
+`nxs ops nodes` output and `\n` can forge an audit NDJSON line. `<` `>` are
+**kept** — escaping belongs to the render layer. Also fixed two
+duplicate-implementation bugs found on the way (a hand-copied card
+serialiser that silently dropped new fields, and a terminology guard that
+only scanned one directory level, missing 80 retired terms in
+`docs/design/`).
 
 **v0.9.2** — a design (not code) for the WebUI watch window.
 `docs/design/05-webui-design.md`. Checking facts first changed the plan:

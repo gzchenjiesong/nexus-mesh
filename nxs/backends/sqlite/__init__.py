@@ -97,46 +97,17 @@ def _lease_deadline(seconds: int, *, now: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 def _card_to_json(card: RoleCard) -> str:
-    return json.dumps({
-        "node_id": card.node_id,
-        "domain": card.domain,
-        "display_name": card.display_name,
-        "card_version": card.card_version,
-        "reachability": card.reachability,
-        "heartbeat_interval": card.heartbeat_interval,
-        "roles": {
-            "issuer": card.roles.issuer,
-            "executor": card.roles.executor,
-            "relay": card.roles.relay,
-            "observer": card.roles.observer,
-            "human_interface": card.roles.human_interface,
-        },
-        "capabilities": [
-            {
-                "type": c.type,
-                "level": str(c.level),
-                "mode": c.mode,
-                "description": c.description,
-                "params_schema": dict(c.params_schema),
-                "response_fields": list(c.response_fields),
-                "freetext_fields": list(c.freetext_fields),
-            }
-            for c in card.capabilities
-        ],
-        "constraints": {
-            "max_response_level": str(card.constraints.max_response_level),
-            "can_issue_types": list(card.constraints.can_issue_types),
-            "can_receive_from": list(card.constraints.can_receive_from),
-            "can_delegate_to": list(card.constraints.can_delegate_to),
-            "quota": {
-                "tasks_per_day": card.constraints.quota.tasks_per_day,
-                "bytes_per_response": card.constraints.quota.bytes_per_response,
-                "bytes_per_day": card.constraints.quota.bytes_per_day,
-                "concurrent_tasks": card.constraints.quota.concurrent_tasks,
-            },
-        },
-    }, ensure_ascii=False)
+    """落盘用的卡片序列化。
 
+    ⚠ **不要在这里手写字段**。这里曾经是一份完整的手抄序列化，
+    与 :meth:`RoleCard.to_dict` 逐字段重复——两份实现注定分叉：
+    2026-10-27 给 RoleCard 加 ``description`` 时，只有 to_dict 变了，
+    这份手抄版没跟上，落盘的卡片就少了字段（读回来是空串，静默丢数据）。
+
+    已核实两者在原字段上**完全等价**，所以合并成一处。
+    以后加卡片字段只需要改 :meth:`RoleCard.to_dict`。
+    """
+    return json.dumps(card.to_dict())
 
 def _task_payload(task: Task) -> tuple[str, str]:
     params = json.dumps(dict(task.params), ensure_ascii=False)

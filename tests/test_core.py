@@ -333,3 +333,102 @@ class TestLevelCannotBeSpecifiedByCaller:
         d1 = engine.check_delivery("hub", "node-a", "demo.echo")
         d2 = engine.check_delivery("hub", "node-a", "demo.echo")
         assert d1.effective_max_level == d2.effective_max_level == Level.METADATA
+
+
+# ---------------------------------------------------------------------------
+# 自报展示字段的清洗
+# ---------------------------------------------------------------------------
+
+class TestSelfReportedText:
+    """``display_name`` / ``description`` 是**节点自己填**的，属于不可信输入。
+
+    与配置字段的区别：配置是你写的，这两个是别人提交的（自注册入口）。
+    所以它们必须在进入注册表时就被清洗，而不是指望每个下游各自防。
+
+    ⚠ 优先防的是**终端注入**与**日志注入**，不是 XSS：
+
+    * ANSI 转义能操纵 ``nxs ops nodes`` 的终端输出（伪造颜色/清屏/覆盖内容），
+      运维看终端时会被骗
+    * ``\\n`` 能伪造审计 NDJSON 的整行 —— 审计是 append-only 的可取证记录
+
+    XSS 归渲染层管：``<`` ``>`` 是合法文本，这里**不做** HTML 转义。
+    """
+
+    @staticmethod
+    def _card_with(config, **overrides):
+        from nxs.core.models import RoleCard
+
+        raw = dict(config.nodes["node-a"].to_dict())
+        raw.update(overrides)
+        return RoleCard.from_dict(raw)
+
+    @covers("M3.F1")
+    def test_ansi_escape_is_rejected(self, config):
+        """★ 终端注入：ANSI 序列能让运维看到伪造的输出。"""
+        with pytest.raises(ConfigError) as ei:
+            self._card_with(config, display_name="\x1b[2J\x1b[1;31m假警告")
+        assert "控制字符" in str(ei.value)
+        assert "0x1b" in str(ei.value)
+
+    @covers("M3.F1")
+    def test_newline_is_rejected(self, config):
+        """★ 日志注入：换行能让审计 NDJSON 一行变两行。"""
+        with pytest.raises(ConfigError) as ei:
+            self._card_with(config, display_name="名字\n{outcome: completed}")
+        assert "控制字符" in str(ei.value)
+
+    @covers("M3.F1")
+    def test_overlong_is_rejected(self, config):
+        """超长会撑爆任何表格布局。"""
+        from nxs.core.models import MAX_DISPLAY_NAME_CHARS
+
+        with pytest.raises(ConfigError) as ei:
+            self._card_with(config, display_name="长" * (MAX_DISPLAY_NAME_CHARS + 1))
+        assert "超过" in str(ei.value)
+
+    @covers("M3.F1")
+    def test_description_has_its_own_limit(self, config):
+        from nxs.core.models import MAX_DESCRIPTION_CHARS
+
+        # 允许更长的简介
+        card = self._card_with(config, description="简" * MAX_DESCRIPTION_CHARS)
+        assert len(card.description) == MAX_DESCRIPTION_CHARS
+        # 超一点就拒
+        with pytest.raises(ConfigError):
+            self._card_with(config, description="简" * (MAX_DESCRIPTION_CHARS + 1))
+
+    @covers("M3.F1")
+    def test_html_angle_brackets_are_kept(self, config):
+        """★ ``<`` ``>`` 是**合法文本**，不该在这里被改掉。
+
+        转义是渲染层的责任。若服务端擅自把 ``<`` 变成 ``&lt;``：
+        * 合法的名字被破坏（``A <-> B`` 变成一堆实体）
+        * 而且等于替所有下游决定了渲染方式
+        """
+        card = self._card_with(config, display_name="A <-> B",
+                              description="处理 <任务> 与 & 符号")
+        assert card.display_name == "A <-> B"
+        assert "<" in card.description
+
+    @covers("M3.F1")
+    def test_whitespace_is_trimmed_and_empty_becomes_blank(self, config):
+        card = self._card_with(config, display_name="  工作笔记本  ")
+        assert card.display_name == "工作笔记本"
+        # 纯空格 Trim 后为空 —— 不应该报错，只是没有名字
+        assert self._card_with(config, display_name="   ").display_name == ""
+
+    @covers("M3.F1")
+    def test_non_string_is_rejected(self, config):
+        with pytest.raises(ConfigError):
+            self._card_with(config, display_name=123)
+
+    @covers("M3.F1")
+    def test_chinese_name_within_limit_passes(self, config):
+        """★ 长度按**字符**算，不是字节。
+
+        中文一字符三字节。若按字节限 100，就只够 33 个汉字——中文使用者吃亏。
+        """
+        name = "工" * 60      # 60 字符 = 180 字节，超过 100 字节但没超 100 字符
+        assert len(name.encode("utf-8")) > 100
+        card = self._card_with(config, display_name=name)
+        assert card.display_name == name

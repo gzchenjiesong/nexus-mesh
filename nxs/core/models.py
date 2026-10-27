@@ -160,6 +160,68 @@ def _reject_unknown(obj: Mapping[str, Any], allowed: Iterable[str], where: str) 
         )
 
 
+#: 自报展示字段的长度上限（按**字符数**，不是字节数）。
+#:
+#: 中文一字符三字节，按字节限会让中文使用者吃亏（一个 100 字节的
+#: 上限只够 33 个汉字）。按字符数才符合"人能写多少字"的直觉。
+MAX_DISPLAY_NAME_CHARS = 100
+MAX_DESCRIPTION_CHARS = 500
+
+
+def _clean_self_reported(value: Any, *, field_name: str, limit: int,
+                         where: str) -> str:
+    """清洗**节点自报**的展示文本（display_name / description）。
+
+    这类字段与配置里的字段完全不同：配置是你写的，这是**别人提交的**。
+    自注册入口不受信任，所以它进来时就要过一遍。
+
+    三道处理，各有具体理由：
+
+    **① 去首尾空白**：避免"名字看起来是空的但其实是空格"。
+
+    **② 拒绝控制字符** —— 这条比 XSS 更贴近本项目，理由很硬：
+
+    * **终端注入**：ANSI 转义序列（``\x1b[...m``）能操纵
+      ``nxs ops nodes`` 的终端输出——可以伪造颜色、清屏，
+      甚至把后面的输出覆盖成看起来像别的内容。运维看终端时会被骗。
+    * **日志注入**：``\n`` / ``\r`` 能让审计 NDJSON 的一行变成两行。
+      审计是 append-only 的可取证记录，能插行就意味着能伪造记录。
+
+    这两条都在"数据离开系统之前"发生，所以必须在这里拦，
+    不能指望下游（终端、日志、任何消费方）各自防。
+
+    **③ 长度上限**：防撑爆（一个 10 万字符的名字会毁掉任何表格布局）。
+
+    ⚠ **不做 HTML 转义**。``<`` ``>`` ``&`` 是合法文本内容——
+    把它们在这里改掉，等于替所有下游决定了渲染方式，而且会破坏
+    合法的名字（比如 ``A <-> B``）。转义是**渲染层的责任**，
+    WebUI 必须自己转义。这两件事的边界要分清。
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"{where}.{field_name}: 期望字符串，实际 {type(value).__name__}"
+        )
+
+    text = value.strip()
+    if len(text) > limit:
+        raise ConfigError(
+            f"{where}.{field_name}: 超过 {limit} 字符（实际 {len(text)}）"
+        )
+
+    # 控制字符：C0（0x00-0x1F）与 DEL（0x7F）。
+    # 不含常见的空白转义（\t 也在 C0 里，所以一并拒绝——展示文本不该有制表符）。
+    bad = [ch for ch in text if ord(ch) < 0x20 or ord(ch) == 0x7F]
+    if bad:
+        codes = ", ".join(f"0x{ord(ch):02x}" for ch in bad[:3])
+        raise ConfigError(
+            f"{where}.{field_name}: 含控制字符（{codes}）—— "
+            f"控制字符可用于伪造终端输出或伪造审计日志行"
+        )
+    return text
+
+
 def _as_str_list(value: Any, where: str) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -350,6 +412,13 @@ class RoleCard:
     node_id: str
     domain: str
     display_name: str = ""
+    #: 一句人话简介，给运维看「这个节点是干什么的」。
+    #:
+    #: ⚠ **语义约束**：只放**静态描述**（如"处理日历与待办"），
+    #: 不得承载业务数据（如"今天处理了张三的简历"）。
+    #: 否则它会变成一条数据外泄通道——hub 运维能看到所有节点的简介。
+    #: 这一点无法用代码强制（那是语义），只能在协议文档里约定并靠自觉。
+    description: str = ""
     card_version: str = "1.0.0"
     #: 可达性。当前所有节点均为 egress-only（无入站端口）。
     reachability: str = "egress-only"
@@ -359,8 +428,9 @@ class RoleCard:
     constraints: Constraints = field(default_factory=Constraints)
 
     _FIELDS = (
-        "card_version", "node_id", "display_name", "domain", "reachability",
-        "heartbeat_interval", "roles", "capabilities", "constraints",
+        "card_version", "node_id", "display_name", "description", "domain",
+        "reachability", "heartbeat_interval", "roles", "capabilities",
+        "constraints",
     )
 
     @classmethod
@@ -395,7 +465,14 @@ class RoleCard:
         return cls(
             node_id=node_id,
             domain=domain,
-            display_name=str(obj.get("display_name", "")),
+            display_name=_clean_self_reported(
+                obj.get("display_name"), field_name="display_name",
+                limit=MAX_DISPLAY_NAME_CHARS, where=where,
+            ),
+            description=_clean_self_reported(
+                obj.get("description"), field_name="description",
+                limit=MAX_DESCRIPTION_CHARS, where=where,
+            ),
             card_version=str(obj.get("card_version", "1.0.0")),
             reachability=str(obj.get("reachability", "egress-only")),
             heartbeat_interval=hb,
@@ -419,6 +496,7 @@ class RoleCard:
         return {
             "node_id": self.node_id,
             "display_name": self.display_name,
+            "description": self.description,
             "domain": self.domain,
             "roles": {
                 "issuer": self.roles.issuer,
@@ -444,6 +522,7 @@ class RoleCard:
             "card_version": self.card_version,
             "node_id": self.node_id,
             "display_name": self.display_name,
+            "description": self.description,
             "domain": self.domain,
             "reachability": self.reachability,
             "heartbeat_interval": self.heartbeat_interval,

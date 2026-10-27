@@ -383,22 +383,62 @@ class TestTerminology:
             f"配置里出现已弃用标识符：{offenders}\n配置键应为 nodes / node_id。"
         )
 
+    #: 历史快照：用当时的术语是**如实反映当时**，不是错误。
+    #: 豁免须写明理由（与 docs-audit 里 HISTORICAL_SNAPSHOTS 的约定一致）。
+    HISTORICAL = {
+        "03-traceability-review.md": "2026-10-08 的审查快照，刻意不改写",
+        "04-mvp-plan.md": "2026-10-07 的 MVP 规划快照，用它当时的术语",
+    }
+
     @covers("C1")
     def test_no_retired_chinese_term_in_docs(self):
-        """中文文档里不得出现"成员"（术语表除外）。"""
-        offenders = []
+        """中文文档里不得出现"成员"（术语表与历史快照除外）。
+
+        ⚠ **这条测试原先用 ``glob("*.md")``，只扫 ``docs/`` 第一层，
+        漏掉了 ``docs/design/``** —— 而那正是旧术语最多的地方。
+
+        2026-10-27 发现 ``01-system-definition.md`` 里有 80 处「成员」，
+        从未被任何守门检查过。修法不是只改文档，而是**把扫描范围改对**：
+        用 ``rglob`` 递归，显式豁免历史快照。
+
+        这是"修根因不修表象"的典型：漏扫一个目录，等于给它永久豁免。
+        """
+        offenders: list[str] = []
         targets = [REPO_ROOT / "README.md", REPO_ROOT / "CONTRIBUTING.md"]
-        targets += sorted((REPO_ROOT / "docs").glob("*.md"))
+        targets += sorted((REPO_ROOT / "docs").rglob("*.md"))
+
         for path in targets:
+            if path.name in self.HISTORICAL:
+                continue
             for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if any(t in line for t in self.RETIRED_TERMS):
-                    rel = path.name
+                    rel = str(path.relative_to(REPO_ROOT))
                     # 术语表的"不要写成"列允许出现反例
-                    if rel in self.ALLOWED_IN and ("不要写成" in line or "~~" in line):
+                    if path.name in self.ALLOWED_IN and ("不要写成" in line or "~~" in line):
                         continue
                     offenders.append(f"{rel}:{i}  {line.strip()[:60]}")
         assert not offenders, (
             "文档里出现已弃用术语（应统一为「节点」）：\n  " + "\n  ".join(offenders)
+        )
+
+    @covers("C1")
+    def test_retired_identifier_not_in_docs(self):
+        """``member_id`` 这类旧标识符也不该出现在文档里。
+
+        ``test_no_retired_identifier_in_code`` 只查代码；
+        文档里写一个不存在的字段名，读者会照着去配置，然后发现没有这个键。
+        """
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "docs").rglob("*.md")):
+            if path.name in self.HISTORICAL:
+                continue
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "member_id" in line:
+                    rel = str(path.relative_to(REPO_ROOT))
+                    offenders.append(f"{rel}:{i}")
+        assert not offenders, (
+            "文档里出现已弃用的标识符 member_id（实际字段是 node_id）：\n  "
+            + "\n  ".join(offenders)
         )
 
     @covers("C1", "C8")
