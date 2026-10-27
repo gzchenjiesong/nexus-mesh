@@ -180,7 +180,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.11.1）
+### 已实现（v0.11.2）
 
 | 模块 | 状态 |
 |---|---|
@@ -293,6 +293,13 @@ make demo
 See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
+
+**v0.11.2** — `doctor --production` no longer fails on a healthy deployment.
+It reported "port in use" as unacceptable — but on a machine where the service
+is already running, that is exactly what success looks like. It now probes the
+port and asks `/nxs/health` whether it is nexus-mesh answering: itself → ok,
+something else → fail. Found by deploying for real, then running the
+post-deploy self-check and getting a FAIL on a working system.
 
 **v0.11.1** — two bugs that only show up on a real deployment.
 `nxs verify` derived its domain set from node cards and ignored the explicit

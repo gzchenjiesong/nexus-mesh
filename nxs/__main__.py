@@ -33,6 +33,7 @@ from .edge.gateway import Gateway
 from .mgmt.config import (
     DEFAULT_CONFIG_PATH,
     EXAMPLE_CONFIG_PATH,
+    NexusConfig,
     demo_env_for,
     is_example_config,
     resolve_config_path,
@@ -583,6 +584,37 @@ def cmd_candidates(args: argparse.Namespace) -> int:
 # doctor（部署自检）
 # ---------------------------------------------------------------------------
 
+def socket_probe_host(host: str) -> str:
+    """把监听地址换成可主动连接的地址。
+
+    ``0.0.0.0`` / ``::`` 是"监听所有地址"，不是能连的目标 —— 连它没意义。
+    探活要换成回环地址。
+    """
+    return "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+
+
+def _port_serves_nexus(host: str, port: int, cfg: NexusConfig) -> bool:
+    """探一下这个端口上是不是 nexus-mesh 在服务。
+
+    **只用于本机自省**，所以刻意跳过证书校验：这里要回答的是
+    "是不是我们的进程占着端口"，不是"对方的身份是否可信"。
+    真的身份校验发生在每个请求的 HMAC 签名上，不靠这一步。
+    """
+    import json as _json
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    scheme = "https" if cfg.server.tls_cert else "http"
+    url = f"{scheme}://{host}:{port}/nxs/health"
+    context = ssl._create_unverified_context() if scheme == "https" else None
+    try:
+        with urllib.request.urlopen(url, timeout=3, context=context) as resp:
+            return _json.loads(resp.read()).get("status") == "ok"
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        return False
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """部署前自检。**专门检查那些"能启动但会出事"的配置。**
 
@@ -680,9 +712,26 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 probe.bind((host, port))
             add(f"端口可用（{host}:{port}）", "ok")
         except OSError as exc:
-            # 服务正在运行时端口被占是**正常的**，所以只算提示
-            add(f"端口可用（{host}:{port}）", "warn",
-                f"已被占用（若服务正在运行则正常）: {exc}")
+            # ★ 端口被占用有两种完全不同的含义，必须区分：
+            #
+            #   * 是 nexus-mesh 自己在跑 → **正常**，而且正是"部署完成后
+            #     自检"的典型场景（服务刚起来，你想确认一切就绪）
+            #   * 是别的程序占着 → **生产环境必然启动失败**，要拦住
+            #
+            # 原先一律判 warn，而 --production 把 warn 当失败 ——
+            # 于是"部署成功了"和"端口被占了"会得到同样的 FAIL，
+            # 用户只能自己去 ps 里翻。
+            #
+            # 判断方式：真去问一声。连上去看那个端口是不是在对
+            # /nxs/health 回 {"status": "ok"}。这比解析 ss/ps 输出可靠，
+            # 也不依赖外部命令。
+            ours = _port_serves_nexus(socket_probe_host(host), port, cfg)
+            if ours:
+                add(f"端口在使用中（{host}:{port}）", "ok",
+                    "nexus-mesh 正在运行 —— 部署后自检的正常状态")
+            else:
+                add(f"端口可用（{host}:{port}）", "fail",
+                    f"被**别的程序**占用，启动会失败: {exc}")
 
     # ---- TLS ----
     # ⭐ 分两种情况，不能一刀切：

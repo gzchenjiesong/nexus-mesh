@@ -421,3 +421,116 @@ class TestPublishedTemplatesPassVerify:
         for domain in ("zone-work", "zone-home"):
             assert f"{domain} 域存在" not in output or "✓" in output
         assert "域存在" in output, "verify 应该逐条列出矩阵域检查结果"
+
+
+class TestDoctorDistinguishesSelfOccupation:
+    """★ ``doctor --production`` 要能区分"自己在跑"与"别人占着端口"。
+
+    ⚠ **这条来自真机部署的体验问题。**
+
+    服务装好、systemd 起来了，然后跑 ``nxs doctor --production`` 想确认
+    一切就绪 —— 结果 FAIL，理由是"端口已被占用"。
+
+    但端口正是 nexus-mesh 自己在用！**"部署成功后自检"的典型场景，
+    得到的却是失败。** 用户只能自己去 ``ps`` 里翻，而两种情况的
+    后果完全不同：
+
+    * 自己在跑 → 一切正常，这是**好**消息
+    * 别人占着 → 生产环境必然启动失败，要拦住
+
+    判据必须能分开这两件事，否则这个检查在它最该有用的时刻给错答案。
+    """
+
+    @covers("M14.F8")
+    def test_socket_probe_host_maps_wildcard_to_loopback(self):
+        """``0.0.0.0`` 是监听地址，不是可连接目标 —— 探活要换成回环。"""
+        from nxs.__main__ import socket_probe_host
+
+        assert socket_probe_host("0.0.0.0") == "127.0.0.1"
+        assert socket_probe_host("::") == "127.0.0.1"
+        assert socket_probe_host("") == "127.0.0.1"
+        # 具体地址原样返回
+        assert socket_probe_host("192.168.1.5") == "192.168.1.5"
+        assert socket_probe_host("127.0.0.1") == "127.0.0.1"
+
+    @covers("M14.F8")
+    def test_probe_recognises_running_nexus(self):
+        """★ 真的起一个 nexus-mesh，探测要认出它 —— 端到端，不是 mock。
+
+        用 ``Gateway`` 起真实 HTTP，端口交给系统分配（``port=0``），
+        所以不会和别的测试撞车。
+        """
+        from dataclasses import replace
+
+        from nxs.__main__ import _port_serves_nexus
+        from nxs.app import NexusApp
+        from nxs.edge.gateway import Gateway
+        from nxs.mgmt.config import (
+            EXAMPLE_CONFIG_PATH, ServerConfig, demo_env_for,
+        )
+
+        env = demo_env_for(EXAMPLE_CONFIG_PATH)
+        app = NexusApp.from_config_path(
+            str(EXAMPLE_CONFIG_PATH), env=env, force_memory=True)
+        app.start()
+
+        gateway = Gateway(
+            app, server_config=ServerConfig(host="127.0.0.1", port=0),
+            ops_secret=b"",
+        ).start()
+        try:
+            real_port = gateway.port          # 系统分配的真实端口
+            # 探测用的配置要指向这个端口、且不带 TLS（Gateway 这里没配 TLS）
+            cfg = replace(app.config, server=ServerConfig(
+                host="127.0.0.1", port=real_port, tls_cert=None, tls_key=None))
+            assert _port_serves_nexus("127.0.0.1", real_port, cfg), (
+                "探测没能认出自己起的 nexus-mesh —— 部署后自检会误报失败"
+            )
+            # 顺带确认 0.0.0.0 也会被正确换成回环
+            cfg_wild = replace(cfg, server=replace(cfg.server, host="0.0.0.0"))
+            from nxs.__main__ import socket_probe_host
+            assert _port_serves_nexus(
+                socket_probe_host(cfg_wild.server.host), real_port, cfg_wild)
+        finally:
+            gateway.stop()
+
+    @covers("M14.F8")
+    def test_probe_returns_false_for_foreign_port(self):
+        """★ 别人占着端口时，探测必须返回 False（从而判 fail）。
+
+        起一个普通 HTTP 服务（不是 nexus-mesh）占住端口，
+        探测应该认不出它 —— 因为 /nxs/health 的响应形状不同。
+        """
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import threading
+
+        from nxs.__main__ import _port_serves_nexus
+        from nxs.mgmt.config import load_config, EXAMPLE_CONFIG_PATH, demo_env_for
+
+        class Foreign(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                body = b'{"hello": "not nexus"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Foreign)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            cfg = load_config(str(EXAMPLE_CONFIG_PATH),
+                              env=demo_env_for(EXAMPLE_CONFIG_PATH))
+            # 这个配置没有 TLS，探测会用 http，正好打到这个外来服务
+            assert cfg.server.tls_cert is None, "测试前提：示例配置不带 TLS"
+            assert not _port_serves_nexus("127.0.0.1", port, cfg), (
+                "把外来服务误认成了 nexus-mesh —— 生产环境会把"
+                "「端口被别人占了」当成「一切正常」"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
