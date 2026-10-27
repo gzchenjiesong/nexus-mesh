@@ -43,7 +43,7 @@ def make_card(node_id: str = "work-laptop", *, domain: str = "zone-work") -> Rol
             "response_fields": ["events", "level"],
         }],
         "constraints": {"max_response_level": "summary",
-                        "can_receive_from": ["hub"]},
+                        "can_receive_from": ["cloud"]},
     })
 
 
@@ -180,7 +180,7 @@ class TestOpsSurfaceIsOptIn:
 
         raw = (REPO_ROOT / "config" / "nxs.example.yaml").read_text(encoding="utf-8")
         # 把某个节点的 node_id 改成保留身份
-        tampered = raw.replace("node_id: hub", f"node_id: {OPS_NODE_ID}", 1)
+        tampered = raw.replace("node_id: coordinator", f"node_id: {OPS_NODE_ID}", 1)
         assert tampered != raw, "测试自身要求替换必须生效"
 
         import tempfile

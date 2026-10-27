@@ -2,11 +2,11 @@
 
 这个文件要证明的是一件具体的事
 ------------------------------
-不是"边界会拒绝越界数据"（那 v0.1 就有，在 hub 上跑），
+不是"边界会拒绝越界数据"（那 v0.1 就有，在 coordinator 上跑），
 而是**越界数据根本没有离开节点**。
 
-为什么要区分这两件事：本系统的威胁模型是「**hub 被攻破**」。
-那时 hub 上的检查形同虚设——攻击者可以改代码跳过它。
+为什么要区分这两件事：本系统的威胁模型是「**coordinator 被攻破**」。
+那时 coordinator 上的检查形同虚设——攻击者可以改代码跳过它。
 所以真正保护数据的只有"数据离开节点之前"那一次裁剪。
 
 验证方法
@@ -53,14 +53,14 @@ def make_card(*, level: str = "summary", max_level: str = "summary",
         "roles": {"executor": True},
         "capabilities": [cap],
         "constraints": {"max_response_level": max_level,
-                        "can_receive_from": ["hub"]},
+                        "can_receive_from": ["cloud"]},
     })
 
 
 def make_task(task_type: str = "work.calendar") -> Task:
     return Task(
         id="t-local-1", idempotency_key="idem-local-1", type=task_type,
-        session_id="ses-local", from_node="hub", to_node="node-x",
+        session_id="ses-local", from_node="coordinator", to_node="node-x",
         status=TaskStatus.WORKING,
     )
 
@@ -184,9 +184,9 @@ class TestNothingLeavesTheNode:
     def test_stray_field_never_sent(self):
         """★ 越界字段：`complete` **一次都没被调用**。
 
-        这是"节点侧"与"hub 侧"边界的根本区别：
-        hub 侧边界是"发出去、被拒"；节点侧是"根本没发"。
-        前者在 hub 被攻破时什么都没保住。
+        这是"节点侧"与"coordinator 侧"边界的根本区别：
+        coordinator 侧边界是"发出去、被拒"；节点侧是"根本没发"。
+        前者在 coordinator 被攻破时什么都没保住。
         """
         transport = RecordingTransport()
         client = NodeClient(
@@ -292,8 +292,8 @@ class TestKindMatchesDeclaration:
         assert excinfo.value.rule_id is RuleId.WL_FREETEXT_NOT_ALLOWED
 
     @covers("M10.F7", "S17")
-    def test_hub_boundary_rejects_it_too(self):
-        """hub 侧独立拒绝 —— 纵深防御，不依赖节点诚实。
+    def test_coordinator_boundary_rejects_it_too(self):
+        """coordinator 侧独立拒绝 —— 纵深防御，不依赖节点诚实。
 
         与节点侧用**同一个函数**（``check_kind_matches_declaration``）：
         两份实现迟早分叉，而分叉的那一侧就是绕过口。

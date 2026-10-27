@@ -80,11 +80,11 @@ class HttpTransport:
         self.base_url = base_url.rstrip("/")
         self.node_id = node_id
         self._secret = secret
-        #: 信任的 CA 证书路径。用于 hub 使用**自签证书**的场景（无域名时）。
+        #: 信任的 CA 证书路径。用于 coordinator 使用**自签证书**的场景（无域名时）。
         #:
         #: 为什么不靠 ``SSL_CERT_FILE`` 环境变量：那是**进程全局**的，
         #: 一旦设置就影响该进程的所有 HTTPS 请求。而信任哪个 CA 应该是
-        #: **每个连接**的决定 —— 同一进程连两个用不同 CA 的 hub 时，
+        #: **每个连接**的决定 —— 同一进程连两个用不同 CA 的 coordinator 时，
         #: 环境变量根本表达不了。显式参数也更难被意外泄漏的环境变量带偏。
         self.ca_file = ca_file
         self.timeout = timeout

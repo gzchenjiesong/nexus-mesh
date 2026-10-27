@@ -240,7 +240,7 @@ nxs metrics --url ... --json | jq '.totals'
      "backlog_ratio": 0.0, "bytes_out": 175, "failure_rate": 0.0}
   ],
   "anomalies": [
-    {"rule": "probe_pattern", "severity": "critical", "subject": "hub",
+    {"rule": "probe_pattern", "severity": "critical", "subject": "coordinator",
      "message": "...", "rationale": "...", "suggestion": "..."}
   ]
 }

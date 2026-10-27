@@ -26,7 +26,9 @@ EXAMPLE_CONFIG = REPO_ROOT / "config" / "nxs.example.yaml"
 #: demo 用的确定性凭据。
 #: 真实部署请用环境变量（NXS_SECRET_*），不要像这里一样写死。
 DEMO_SECRETS = {
-    "hub": "hub-demo-secret-0123456789abcdef",
+    # 协调节点的 ID 是 coordinator（术语表规定的叫法）。
+    # 域叫 cloud —— 域是**位置**，节点是**角色**，两者刻意不同名。
+    "coordinator": "coordinator-demo-secret-0123456789abcdef",
     "node-a": "node-a-demo-secret-0123456789abcdef",
     "node-b": "node-b-demo-secret-0123456789abcdef",
 }

@@ -71,7 +71,7 @@ sudo -u nxs .venv/bin/pip install -e .
 ```bash
 sudo install -m 600 -o root -g nxs /dev/null /etc/nexus-mesh/nxs.env
 sudo tee /etc/nexus-mesh/nxs.env >/dev/null <<EOF
-NXS_SECRET_HUB=$(openssl rand -hex 32)
+NXS_SECRET_COORDINATOR=$(openssl rand -hex 32)
 NXS_OPS_SECRET=$(openssl rand -hex 32)
 EOF
 sudo chmod 600 /etc/nexus-mesh/nxs.env
@@ -107,7 +107,7 @@ memory 后端跑起来完全正常，但重启后所有节点注册、所有在�
 节点要重新注册、重新批准。`nxs doctor --production` 会拦住这个错误。
 
 ⚠ **`domains` 段不能省。** 工作电脑上的节点是自注册的——它在协调节点
-启动时还不存在。域必须显式声明，否则矩阵里写不出 `hub → zone-work`。
+启动时还不存在。域必须显式声明，否则矩阵里写不出 `coordinator → zone-work`。
 
 ---
 
@@ -216,9 +216,9 @@ sudo journalctl -u nexus-mesh -f
 好消息是**不用改 yaml、不用写角色卡**（那是自注册解决的）。
 坏消息是仍需重启——环境变量在进程启动时固定。
 
-**② hub 自己也要批准。** `auto_approve_domains: []` 意味着默认拒绝对
-所有人一视同仁，包括 hub。首次部署后必须先 `nxs ops approve hub`，
-否则 hub 发不出任何任务。这是设计使然，不是 bug。
+**② coordinator 自己也要批准。** `auto_approve_domains: []` 意味着默认拒绝对
+所有人一视同仁，包括 coordinator。首次部署后必须先 `nxs ops approve coordinator`，
+否则 coordinator 发不出任何任务。这是设计使然，不是 bug。
 
 **③ 自注册的节点默认未批准。** 注册成功只代表"我来了"，
 不代表"我可以干活"。必须运维显式批准。
@@ -247,7 +247,7 @@ CARD = RoleCard.from_dict({
     }],
     "constraints": {
         "max_response_level": "summary",
-        "can_receive_from": ["hub"],
+        "can_receive_from": ["coordinator"],
         "can_issue_types": [],
         "quota": {"tasks_per_day": 200, "concurrent_tasks": 2},
     },
@@ -292,10 +292,10 @@ sudo -u nxs sh -c 'set -a && . /etc/nexus-mesh/nxs.env && set +a && \
 
 ### 不指定目标也能派活（v0.6）
 
-批准之后，hub 就可以不指定 `to_node` 直接投递，由系统按能力选目标：
+批准之后，coordinator 就可以不指定 `to_node` 直接投递，由系统按能力选目标：
 
 ```python
-hub.publish(from_node="hub", task_type="work.calendar",
+coordinator.publish(from_node="coordinator", task_type="work.calendar",
             params={"day": "2026-10-27"}, idempotency_key="daily-1")
 # to_node 省略 → 自动匹配
 ```
@@ -304,7 +304,7 @@ hub.publish(from_node="hub", task_type="work.calendar",
 所以"为什么派给了它"是一个可以复现的问题：
 
 ```bash
-nxs candidates --type work.calendar --from-node hub \
+nxs candidates --type work.calendar --from-node coordinator \
   -c /etc/nexus-mesh/local.yaml
 ```
 
@@ -328,25 +328,25 @@ nxs ops nodes --url https://nxs.example.com/nxs
 
 ```
 节点            域          状态      批准  版本  能力
-hub             hub         alive    ✓    1     work.summary
+coordinator             coordinator         alive    ✓    1     work.summary
 work-laptop     zone-work   alive    ✓    1     work.calendar
 ```
 
 再确认"谁能干某类活"（自动投递的前提）：
 
 ```bash
-nxs candidates --type work.calendar --from-node hub \
+nxs candidates --type work.calendar --from-node coordinator \
   -c /etc/nexus-mesh/local.yaml
 ```
 
 ```
-候选执行者 · work.calendar  （来源 hub）
+候选执行者 · work.calendar  （来源 coordinator）
   #  节点          域          等级      负载    同域
   1  work-laptop   zone-work   summary   0/2     -
 排序依据：① 同域优先 ② 等级刚好够用 ③ 负载率（工作/并发上限）④ 节点 ID 字典序
 ```
 
-> ⚠ 候选名单**只在 hub 本机可见**，没有对应 HTTP 端点——
+> ⚠ 候选名单**只在 coordinator 本机可见**，没有对应 HTTP 端点——
 > "谁能干这个活"是拓扑信息。节点侧拿不到，也不需要拿。
 
 最后看系统健康度：
@@ -383,7 +383,7 @@ nxs metrics --url https://nxs.example.com/nxs
 
 ```bash
 # 在服务器上（注意只听 127.0.0.1）
-export NXS_OPS_SECRET=...            # 与 hub 启动时同一个值
+export NXS_OPS_SECRET=...            # 与 coordinator 启动时同一个值
 nxs ui --url https://nxs.example.com/nxs --port 8080
 ```
 
@@ -411,9 +411,9 @@ ssh -N -L 8080:127.0.0.1:8080 root@你的服务器
 
 ### 想长期开着？
 
-它和 hub 是两个进程，可以各写一个 systemd unit。注意 `nxs ui` 的
+它和 coordinator 是两个进程，可以各写一个 systemd unit。注意 `nxs ui` 的
 进程环境里要有 `NXS_OPS_SECRET`（这就是它能读运维端点的原因），
-所以 unit 里用 `EnvironmentFile=` 读与 hub 同一份 env 文件即可。
+所以 unit 里用 `EnvironmentFile=` 读与 coordinator 同一份 env 文件即可。
 
 > ⚠ 别把 token 链接贴到聊天、工单或文档里。它等于一把钥匙。
 > 重启 `nxs ui` 就换新的，旧链接自动失效。
@@ -426,11 +426,11 @@ ssh -N -L 8080:127.0.0.1:8080 root@你的服务器
 |---|---|
 | 节点注册返回 **401 `AU-SIG-01`** | **最常见**：服务端 `/etc/nexus-mesh/nxs.env` 里没有这个节点的 `NXS_SECRET_<ID>`。注意 ID 转大写下划线：`work-laptop` → `NXS_SECRET_WORK_LAPTOP`。加完**必须重启服务** |
 | 节点注册返回 401 | 两边的 `NXS_SECRET_<节点ID>` 是否一致；节点 ID 拼写（含大小写与连字符） |
-| hub 发不出任务 `MX-RECEIVE-03` | **hub 自己没批准**。`auto_approve_domains: []` 时谁都要批，先 `nxs ops approve hub` |
+| coordinator 发不出任务 `MX-RECEIVE-03` | **coordinator 自己没批准**。`auto_approve_domains: []` 时谁都要批，先 `nxs ops approve coordinator` |
 | 注册成功但一直"未批准" | `nxs ops nodes` 看有没有待批准；批准后节点下一次心跳会变 ✓ |
-| 任务投递被拒 `MX-DOMAIN-02` | 矩阵里有没有 `hub → zone-work` 这条规则；`allow_types` 是否覆盖该类型 |
+| 任务投递被拒 `MX-DOMAIN-02` | 矩阵里有没有 `coordinator → zone-work` 这条规则；`allow_types` 是否覆盖该类型 |
 | 任务投递被拒 `WL-TYPE-404` | 节点的角色卡里有没有声明该能力；声明后要重新批准 |
-| **自动投递总报 `WL-TYPE-404`** | 用 `nxs candidates --type <类型>` 看候选。若显示"无候选"且提示有节点待批准，先去 `nxs ops approve`。注意：候选全被矩阵拒绝时**也**报这个码（防止泄漏"有人但不给你"），所以要去 hub 的审计日志里看真实的拒绝码 |
+| **自动投递总报 `WL-TYPE-404`** | 用 `nxs candidates --type <类型>` 看候选。若显示"无候选"且提示有节点待批准，先去 `nxs ops approve`。注意：候选全被矩阵拒绝时**也**报这个码（防止泄漏"有人但不给你"），所以要去 coordinator 的审计日志里看真实的拒绝码 |
 | 产出被拒 `WL-FIELD-001` | 产出的字段是否都在 `response_fields` 里（**只报数量不报字段名**，去节点侧日志看） |
 | 产出被拒 `WL-LEVEL-002` | 等级超过能力声明或卡片上限。**注意节点侧边界会先拦**，看节点日志而不是中心日志 |
 | 长任务反复重试 | 节点 `renew_interval` 是否设置；续租失败会丢产出 |

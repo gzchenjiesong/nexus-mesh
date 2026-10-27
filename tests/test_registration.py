@@ -74,7 +74,7 @@ def make_card(node_id: str = "work-laptop", *, domain: str = "zone-work",
         }],
         "constraints": {
             "max_response_level": level,
-            "can_receive_from": ["hub"],
+            "can_receive_from": ["cloud"],
             "can_issue_types": [],
             "quota": {"tasks_per_day": 100, "concurrent_tasks": 1},
         },
@@ -252,11 +252,11 @@ class TestPrivilegeEscalationBlocked:
         """★ 节点自报的信任域被配置覆盖。
 
         ``domain`` 决定适用哪组矩阵规则。若节点能自选，
-        它可以声称 ``domain="hub"``——而 hub 域通常有发布权。
+        它可以声称 ``domain="cloud"``——而 cloud 域通常有发布权。
         **信任域是运维划的边界，不是节点自己挑的房间。**
         """
         secret = b"node-a-demo-secret-0123456789abcdef"
-        claimed = make_card(node_id="node-a", domain="hub")   # 自称高权限域
+        claimed = make_card(node_id="node-a", domain="cloud")   # 自称高权限域
         client = HttpTransport(gateway.base_url, node_id="node-a", secret=secret)
 
         result = client.register(claimed)

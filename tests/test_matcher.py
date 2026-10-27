@@ -37,7 +37,7 @@ from nxs.mgmt.config import load_config
 
 def card(node_id: str, *, domain: str = "zone-a", task_type: str = "job.run",
          level: str = "summary", max_level: str = "full_text",
-         can_receive_from: tuple[str, ...] = ("hub",),
+         can_receive_from: tuple[str, ...] = ("cloud",),
          concurrent: int = 1) -> RoleCard:
     """造一张最小角色卡。
 
@@ -83,7 +83,7 @@ def make_matcher(workdir):
                 from nxs.core.models import Task, TaskStatus
                 queue.enqueue(Task(
                     id=f"t-{node_id}-{i}", idempotency_key=f"k-{node_id}-{i}",
-                    type="job.run", session_id="s", from_node="hub",
+                    type="job.run", session_id="s", from_node="coordinator",
                     to_node=node_id, status=TaskStatus.WORKING,
                 ))
         return {
@@ -156,11 +156,11 @@ class TestFiltering:
     def test_respects_can_receive_from(self, make_matcher):
         """节点自己声明的"谁可以给我派活"要被尊重。"""
         s = make_matcher(
-            card("open", can_receive_from=("hub",)),
+            card("open", can_receive_from=("cloud",)),
             card("closed", can_receive_from=("zone-z",)),
         )
         ids = [c.node_id for c in s["matcher"].candidates(
-            Requirement(task_type="job.run", from_domain="hub"))]
+            Requirement(task_type="job.run", from_domain="cloud"))]
         assert ids == ["open"]
 
     @covers("M4.F1")
@@ -393,9 +393,9 @@ class TestAutoDelivery:
     def test_publish_without_to_node_picks_a_provider(self, live):
         from nxs.edge.client import HttpTransport
 
-        hub = HttpTransport(live["gateway"].base_url, node_id="hub",
-                            secret=live["app"].config.secrets["hub"])
-        result = hub.publish(from_node="hub", task_type="demo.echo",
+        coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
+                            secret=live["app"].config.secrets["coordinator"])
+        result = coordinator.publish(from_node="coordinator", task_type="demo.echo",
                              params={"text": "x"}, idempotency_key="auto-1")
         assert result.task.to_node in ("node-a", "node-b")
 
@@ -404,9 +404,9 @@ class TestAutoDelivery:
         """只有一个节点能干的类型，自动模式必须选中它。"""
         from nxs.edge.client import HttpTransport
 
-        hub = HttpTransport(live["gateway"].base_url, node_id="hub",
-                            secret=live["app"].config.secrets["hub"])
-        result = hub.publish(from_node="hub", task_type="demo.count",
+        coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
+                            secret=live["app"].config.secrets["coordinator"])
+        result = coordinator.publish(from_node="coordinator", task_type="demo.count",
                              params={}, idempotency_key="auto-2")
         assert result.task.to_node == "node-a"
 
@@ -419,17 +419,17 @@ class TestAutoDelivery:
         from nxs.edge.client import HttpTransport
 
         app = live["app"]
-        hub = HttpTransport(live["gateway"].base_url, node_id="hub",
-                            secret=app.config.secrets["hub"])
+        coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
+                            secret=app.config.secrets["coordinator"])
         node_a = HttpTransport(live["gateway"].base_url, node_id="node-a",
                                secret=app.config.secrets["node-a"])
 
-        first = hub.publish(from_node="hub", task_type="demo.echo",
+        first = coordinator.publish(from_node="coordinator", task_type="demo.echo",
                             params={"text": "1"}, idempotency_key="auto-3")
         assert first.task.to_node == "node-a"
 
         node_a.poll("node-a")      # node-a 现在 working，1/1 满
-        second = hub.publish(from_node="hub", task_type="demo.echo",
+        second = coordinator.publish(from_node="coordinator", task_type="demo.echo",
                              params={"text": "2"}, idempotency_key="auto-4")
         assert second.task.to_node == "node-b", "忙的节点没有被避开"
 
@@ -437,10 +437,10 @@ class TestAutoDelivery:
     def test_no_provider_reports_type_not_registered(self, live):
         from nxs.edge.client import HttpTransport
 
-        hub = HttpTransport(live["gateway"].base_url, node_id="hub",
-                            secret=live["app"].config.secrets["hub"])
+        coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
+                            secret=live["app"].config.secrets["coordinator"])
         with pytest.raises(PolicyDenied) as excinfo:
-            hub.publish(from_node="hub", task_type="demo.nonexistent",
+            coordinator.publish(from_node="coordinator", task_type="demo.nonexistent",
                         params={}, idempotency_key="auto-5")
         assert excinfo.value.rule_id is RuleId.WL_TYPE_NOT_REGISTERED
 
@@ -452,17 +452,17 @@ class TestAutoDelivery:
         那是权限布局的泄漏。真实原因只进本地审计。
 
         构造方式刻意用**真实场景**而不是篡改配置：注册一个位于
-        ``zone-z`` 的节点提供专属任务类型，但矩阵里没有 ``hub → zone-z``。
+        ``zone-z`` 的节点提供专属任务类型，但矩阵里没有 ``coordinator → zone-z``。
         于是"有候选、但全部被拒"——正是要测的那条路径。
         """
         from nxs.core.models import RoleCard
         from nxs.edge.client import HttpTransport
 
         app = live["app"]
-        hub = HttpTransport(live["gateway"].base_url, node_id="hub",
-                            secret=app.config.secrets["hub"])
+        coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
+                            secret=app.config.secrets["coordinator"])
 
-        # 一个只在 zone-z 的节点，能干活，但没有 hub→zone-z 的矩阵规则
+        # 一个只在 zone-z 的节点，能干活，但没有 coordinator→zone-z 的矩阵规则
         app.registry.register(RoleCard.from_dict({
             "node_id": "node-z", "domain": "zone-z",
             "roles": {"executor": True},
@@ -472,19 +472,19 @@ class TestAutoDelivery:
             }],
             "constraints": {
                 "max_response_level": "metadata",
-                "can_receive_from": ["hub"],
+                "can_receive_from": ["cloud"],
                 "quota": {"concurrent_tasks": 1},
             },
         }), approved=True)
 
         # 前提确认：候选确实存在（否则这条测试测的是另一个分支）
-        cands = app.transport.candidates(task_type="demo.only-z", from_node="hub")
+        cands = app.transport.candidates(task_type="demo.only-z", from_node="coordinator")
         assert [c["node_id"] for c in cands] == ["node-z"], (
             "测试前提不成立：候选集为空，测不到「全被拒」这条路径"
         )
 
         with pytest.raises(PolicyDenied) as excinfo:
-            hub.publish(from_node="hub", task_type="demo.only-z",
+            coordinator.publish(from_node="coordinator", task_type="demo.only-z",
                         params={}, idempotency_key="deny-all-1")
         assert excinfo.value.rule_id is RuleId.WL_TYPE_NOT_REGISTERED, (
             "候选全被拒时报了别的码 —— 可用来区分「有人但不给」与「没人」"
@@ -502,10 +502,10 @@ class TestAutoDelivery:
         from nxs.edge.client import HttpTransport
 
         app = live["app"]
-        hub = HttpTransport(live["gateway"].base_url, node_id="hub",
-                            secret=app.config.secrets["hub"])
+        coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
+                            secret=app.config.secrets["coordinator"])
 
-        first = hub.publish(from_node="hub", task_type="demo.count",
+        first = coordinator.publish(from_node="coordinator", task_type="demo.count",
                             params={}, idempotency_key="same-key")
         assert first.created is True
 
@@ -513,7 +513,7 @@ class TestAutoDelivery:
         app.registry.revoke("node-a")
         app.registry.revoke("node-b")
 
-        again = hub.publish(from_node="hub", task_type="demo.count",
+        again = coordinator.publish(from_node="coordinator", task_type="demo.count",
                             params={}, idempotency_key="same-key")
         assert again.created is False
         assert again.task.id == first.task.id, "幂等重试返回了不同的任务"
@@ -528,19 +528,19 @@ class TestAutoDelivery:
         from nxs.edge.client import HttpTransport
 
         app = live["app"]
-        hub = HttpTransport(live["gateway"].base_url, node_id="hub",
-                            secret=app.config.secrets["hub"])
+        coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
+                            secret=app.config.secrets["coordinator"])
         node_b = HttpTransport(live["gateway"].base_url, node_id="node-b",
                                secret=app.config.secrets["node-b"])
 
-        hub.publish(from_node="hub", task_type="demo.echo",
-                    params={"text": "机密"}, idempotency_key="hub-secret-key")
+        coordinator.publish(from_node="coordinator", task_type="demo.echo",
+                    params={"text": "机密"}, idempotency_key="coordinator-secret-key")
 
         # node-b 用自己的身份 + 别人的幂等键
         with pytest.raises(PolicyDenied):
             node_b.publish(from_node="node-b", task_type="demo.echo",
                            params={"text": "x"},
-                           idempotency_key="hub-secret-key")
+                           idempotency_key="coordinator-secret-key")
 
     @covers("M4.F8", "S15")
     def test_candidates_not_exposed_over_http(self, live):
@@ -570,7 +570,7 @@ class TestAutoDelivery:
     def test_candidates_available_to_operator(self, live):
         """运维视角要看得到（否则排查时无从下手）。"""
         rows = live["app"].transport.candidates(
-            task_type="demo.echo", from_node="hub")
+            task_type="demo.echo", from_node="coordinator")
         assert {r["node_id"] for r in rows} == {"node-a", "node-b"}
         assert all("load" in r and "capacity" in r for r in rows)
 
@@ -589,7 +589,7 @@ class TestAutoDelivery:
         result = subprocess.run(
             [sys.executable, "-m", "nxs", "candidates",
              "--config", "config/nxs.example.yaml",
-             "--type", "demo.echo", "--from-node", "hub"],
+             "--type", "demo.echo", "--from-node", "coordinator"],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=120,
         )
         assert result.returncode == 0, result.stdout + result.stderr
@@ -610,12 +610,12 @@ class TestAutoDelivery:
         # 用一份包含 node-a / node-b 且已批准的配置走 CLI
         config = workdir / "cli.yaml"
         original = (REPO_ROOT / "config" / "nxs.example.yaml").read_text(encoding="utf-8")
-        assert "auto_approve_domains: [hub]" in original, (
+        assert "auto_approve_domains: [cloud]" in original, (
             "示例配置的自动批准写法变了，本测试的替换需要跟着改"
         )
         config.write_text(
-            original.replace("auto_approve_domains: [hub]",
-                             "auto_approve_domains: [hub, zone-a, zone-b]"),
+            original.replace("auto_approve_domains: [cloud]",
+                             "auto_approve_domains: [cloud, zone-a, zone-b]"),
             encoding="utf-8",
         )
         env = {**os.environ}
@@ -625,7 +625,7 @@ class TestAutoDelivery:
         result = subprocess.run(
             [sys.executable, "-m", "nxs", "candidates",
              "--config", str(config),
-             "--type", "demo.echo", "--from-node", "hub"],
+             "--type", "demo.echo", "--from-node", "coordinator"],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=120, env=env,
         )
         assert result.returncode == 0, result.stdout + result.stderr
@@ -637,9 +637,9 @@ class TestAutoDelivery:
         """显式指定 to_node 时完全不经过匹配器（Direct 模式保留）。"""
         from nxs.edge.client import HttpTransport
 
-        hub = HttpTransport(live["gateway"].base_url, node_id="hub",
-                            secret=live["app"].config.secrets["hub"])
-        result = hub.publish(from_node="hub", to_node="node-b",
+        coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
+                            secret=live["app"].config.secrets["coordinator"])
+        result = coordinator.publish(from_node="coordinator", to_node="node-b",
                              task_type="demo.echo", params={"text": "x"},
                              idempotency_key="direct-1")
         assert result.task.to_node == "node-b"

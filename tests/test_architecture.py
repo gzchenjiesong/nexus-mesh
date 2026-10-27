@@ -37,7 +37,7 @@ PKG = REPO_ROOT / "nxs"
 #: 示例配置里出现的节点名与域名。
 #: 这些名字**只允许**出现在配置、示例与测试夹具里，
 #: 不允许出现在 ``nxs/`` 包的源代码中。
-SAMPLE_NODE_IDS = ("node-a", "node-b", "hub")
+SAMPLE_NODE_IDS = ("node-a", "node-b", "coordinator")
 SAMPLE_DOMAINS = ("zone-a", "zone-b")
 
 #: 示例任务类型的前缀。同样只允许出现在配置与示例里。
@@ -159,7 +159,7 @@ class TestNoNodeHardcoding:
         assert "probe-node" in engine.providers_of("demo.echo")
         # 但没有为 zone-probe 配置矩阵规则，所以仍不可达（默认拒绝）
         with pytest.raises(PolicyDenied) as ei:
-            engine.check_delivery("hub", "probe-node", "demo.echo")
+            engine.check_delivery("coordinator", "probe-node", "demo.echo")
         assert ei.value.rule_id == RuleId.MX_DOMAIN_FORBIDDEN
 
 
@@ -289,11 +289,11 @@ class TestCoreHasNoIO:
         from nxs.core.models import Artifact, Level
 
         engine = PolicyEngine(config)     # 没有传任何存储
-        engine.check_delivery("hub", "node-a", "demo.echo")
+        engine.check_delivery("coordinator", "node-a", "demo.echo")
         engine.check_quota("node-a", usage=Usage(tasks_today=1))
 
         task = make_task(task_id="t", idempotency_key="i", task_type="demo.echo",
-                         from_node="hub", to_node="node-a", params={},
+                         from_node="coordinator", to_node="node-a", params={},
                          artifacts=[Artifact(level=Level.METADATA, kind="structured",
                                              data={"echo": "x", "level": "metadata"})])
         engine.check_response("node-a", task)   # 同样不需要存储
@@ -774,3 +774,139 @@ class TestIdentifierNaming:
         assert Level.parse("summary") is Level.SUMMARY
         assert Level.parse("SUMMARY") is Level.SUMMARY
         assert Level.parse("Full_Text") is Level.FULL_TEXT
+
+
+# ---------------------------------------------------------------------------
+# 纪律 9：命名层级不得混淆（服务 / 节点 / 域 / 运维身份）
+# ---------------------------------------------------------------------------
+
+class TestNamingLayers:
+    """★ 四个名字层级必须分明，且与术语表一致。
+
+    ⚠ **这一条来自用户的真实困惑。** 他问：「项目叫 Nexus Mesh，
+    为啥运行的服务不叫 mesh，而是叫 hub？」
+
+    查下去发现这不是他的误解，而是项目里的**术语漂移**：
+
+    * 术语表（CONTRIBUTING.md · C1）早已定了「协调节点 = coordinator」
+    * 但配置里一路沿用早期的 `node_id: hub`（`hub` 根本不在术语表里）
+    * 而 `hub` **同时**还指：README 英文叙述里的"整个协调进程"、
+      一个信任域名 `domain: hub`
+
+    一个词承担三件事，每次遇到都要消歧 —— 正是 C1「一术语一含义」
+    要防的那种腐化。而且它是**看不见的**：不报错、不告警，
+    只是让读者慢慢搞不清"hub 到底指什么"。
+
+    现在四个层级是：
+
+    ==================  ==================  ==========================
+    层级                 名字                 说明
+    ==================  ==================  ==========================
+    项目 / 服务           nexus-mesh          = 项目名
+    协调节点 ID           coordinator         术语表定义
+    协调节点的域          cloud               域是**位置**，不是角色
+    运维身份              __ops__             保留标识，不能给节点用
+    ==================  ==================  ==========================
+    """
+
+    #: 术语表规定的协调节点标识
+    COORDINATOR_ID = "coordinator"
+    #: 协调节点所在的域。刻意**不**叫 coordinator ——
+    #: 域是位置（这台机器在哪），节点是角色（它干什么）。
+    COORDINATOR_DOMAIN = "cloud"
+
+    @covers("C1")
+    def test_retired_name_not_used_as_node_or_domain(self):
+        """★ ``hub`` 不得再作为节点 ID 或域名出现在任何配置里。
+
+        允许它作为**架构叙述**（"协调进程"的通俗说法）保留在历史文档中，
+        但**不许**再是配置值 —— 配置值是机器读的，一词一义在这里是硬要求。
+        """
+        import re
+
+        offenders: list[str] = []
+        for path in list(REPO_ROOT.rglob("*.yaml")) + list(REPO_ROOT.rglob("*.example")):
+            if {".venv", ".git", "node_modules"} & set(path.parts):
+                continue
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                if re.search(
+                    r'(node_id|domain|from_domain|to_domain|name):\s*"?hub"?\s*$'
+                    r'|can_receive_from:\s*\[[^\]]*"hub"'
+                    r'|auto_approve_domains:\s*\[[^\]]*"hub"',
+                    line,
+                ):
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{i}  {line.strip()[:60]}")
+        assert not offenders, (
+            "配置里仍把 hub 当作节点 ID 或域名 —— 术语表规定协调节点叫 coordinator，"
+            "它的域叫 cloud：\n  " + "\n  ".join(offenders)
+        )
+
+    @covers("C1")
+    def test_coordinator_and_domain_names_are_distinct(self, config):
+        """★ 节点 ID 与它的域名必须不同。
+
+        两者同名会让人（和代码）分不清「这是节点还是域」。
+        `can_receive_from` 匹配的是 **域**，而 `to_node` 匹配的是 **节点** ——
+        同名时这个区别彻底看不出来。
+        """
+        coordinator = config.nodes.get(self.COORDINATOR_ID)
+        assert coordinator is not None, (
+            f"示例/生产配置里应有节点 {self.COORDINATOR_ID!r}"
+        )
+        assert coordinator.domain == self.COORDINATOR_DOMAIN, (
+            f"协调节点的域应是 {self.COORDINATOR_DOMAIN!r}，"
+            f"实际 {coordinator.domain!r}"
+        )
+        assert coordinator.node_id != coordinator.domain, (
+            "节点 ID 与域名相同 —— 应区分「角色」与「位置」两个概念"
+        )
+
+    @covers("C1")
+    def test_terminology_table_lists_coordinator(self):
+        """术语表必须保留 coordinator 这一条 —— 它是本次改名与守门的依据。"""
+        text = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        assert "coordinator" in text, (
+            "术语表里没有 coordinator —— 那本次改名就失去了依据"
+        )
+        # 并且要说明它对应"协调节点"
+        assert "协调节点" in text
+
+    @covers("C1")
+    def test_eventhub_is_not_renamed(self):
+        """★ ``EventHub`` 是**另一个概念**，不能被术语统一波及。
+
+        它是 SSE 事件广播器（把"有活了"的通知推给订阅者），
+        与"协调节点"完全无关。批量替换术语时最容易误伤这种撞词。
+        """
+        gateway = (PKG / "edge" / "gateway.py").read_text(encoding="utf-8")
+        assert "EventHub" in gateway, (
+            "EventHub 被误改名了 —— 它是事件广播器，与协调节点无关"
+        )
+        assert "EventCoordinator" not in gateway
+
+    @covers("C1")
+    def test_github_urls_untouched(self):
+        """★ 仓库地址里的 GitHub 不能被术语替换波及。
+
+        ``hub`` 是 ``GitHub`` 的子串，无脑替换会把仓库链接改坏 ——
+        这类错误在 CI 里不会报，但让人 clone 不下来。
+        """
+        text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        assert "github.com/gzchenjiesong/nexus-mesh" in text, (
+            "pyproject.toml 里的仓库地址被改坏了"
+        )
+        assert "gitcoordinator" not in text.lower(), "GitHub 被误替换成 gitCoordinator"
+
+    @covers("C1")
+    def test_secret_env_names_follow_node_ids(self):
+        """凭据环境变量名必须与节点 ID 对应（NXS_SECRET_<NODE_ID>）。"""
+        assert (REPO_ROOT / "config" / "nxs.example.yaml").exists()
+        text = (REPO_ROOT / "config" / "nxs.example.yaml").read_text(encoding="utf-8")
+        assert "NXS_SECRET_COORDINATOR" in text, (
+            "示例配置的凭据说明应给出 NXS_SECRET_COORDINATOR"
+        )
+        assert "NXS_SECRET_HUB" not in text, (
+            "示例配置仍提 NXS_SECRET_HUB —— 节点已改名 coordinator"
+        )

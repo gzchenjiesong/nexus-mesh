@@ -140,7 +140,7 @@ SHELL = """<!DOCTYPE html>
 <footer>
   只读视图 —— 这里没有任何写操作。批准 / 吊销请用
   <code>nxs ops</code>。<br>
-  数据经 hub 的运维端点取得，每 5 秒刷新。指标为内存态，重启归零。
+  数据经 coordinator 的运维端点取得，每 5 秒刷新。指标为内存态，重启归零。
 </footer>
 
 <script>
@@ -275,7 +275,7 @@ async function refresh() {
     }
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
-    showError(data.error ? ("hub 不可达：" + data.error) : "");
+    showError(data.error ? ("coordinator 不可达：" + data.error) : "");
     renderTiles(data.metrics);
     renderNodes(data.nodes || []);
     renderAnomalies(data.metrics ? data.metrics.anomalies : []);

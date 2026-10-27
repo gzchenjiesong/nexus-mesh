@@ -137,7 +137,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # 原代码是 ``{c.domain for c in cfg.nodes.values()}`` —— 只从节点卡片
     # 推导域，完全忽略了配置里显式的 ``domains:`` 段。
     #
-    # 后果：生产部署必然失败。生产配置里 ``nodes`` 只有 hub 自己
+    # 后果：生产部署必然失败。生产配置里 ``nodes`` 只有 coordinator 自己
     # （工作电脑的节点靠自注册接入，启动时还不存在），而矩阵引用了
     # ``zone-work`` —— 于是 verify 报"域不存在"。
     # **而 ``domains:`` 段的存在意义，正是为了解决这个问题。**
@@ -331,7 +331,7 @@ def cmd_metrics(args: argparse.Namespace) -> int:
 
 
 def _metrics_remote(args: argparse.Namespace) -> int:
-    """从运行中的 hub 读指标（走运维通道）。"""
+    """从运行中的 coordinator 读指标（走运维通道）。"""
     import os
 
     from .edge.client import OpsClient
@@ -356,8 +356,8 @@ def cmd_ui(args: argparse.Namespace) -> int:
     """启动只读的系统观察窗（M15）。
 
     与 ``nxs serve`` 的关系：**完全独立**。这个进程不碰存储、不参与调度，
-    只是用运维密钥定期去 hub 拉 "节点列表 + 指标" 然后画成网页。
-    它挂了不影响核心；核心挂了它会显示"hub 不可达"而不是白屏。
+    只是用运维密钥定期去 coordinator 拉 "节点列表 + 指标" 然后画成网页。
+    它挂了不影响核心；核心挂了它会显示"coordinator 不可达"而不是白屏。
 
     鉴权只有 token：每次启动重新生成、打印在终端、不落盘。
     不做账号密码 —— 能 SSH 登录这台机器的人本来就能直接 curl 运维端点。
@@ -367,9 +367,9 @@ def cmd_ui(args: argparse.Namespace) -> int:
     from .mgmt.config import ENV_OPS_SECRET, MIN_SECRET_LENGTH
     from .ui import UiServer
 
-    url = args.url or os.environ.get("NXS_HUB_URL", "")
+    url = args.url or os.environ.get("NXS_COORDINATOR_URL", "")
     if not url:
-        _err("缺少 hub 地址：用 --url 指定，或设置环境变量 NXS_HUB_URL")
+        _err("缺少 coordinator 地址：用 --url 指定，或设置环境变量 NXS_COORDINATOR_URL")
         _err("例如：--url http://127.0.0.1:18100/nxs")
         return 2
 
@@ -377,7 +377,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
     if len(raw_secret) < MIN_SECRET_LENGTH:
         _err(f"缺少运维凭据：环境变量 {ENV_OPS_SECRET} 未设置或过短"
              f"（需 ≥{MIN_SECRET_LENGTH} 字节）")
-        _err("hub 端必须用**同一个值**启动，否则运维端点不会开启")
+        _err("coordinator 端必须用**同一个值**启动，否则运维端点不会开启")
         return 2
 
     try:
@@ -518,7 +518,7 @@ def _render_metrics(data: dict, *, json_out: bool = False) -> None:
 def cmd_candidates(args: argparse.Namespace) -> int:
     """列出某任务类型的候选执行者，以及**为什么是这个顺序**。
 
-    ⚠ 这是**运维视角**的命令：它读的是 hub 本地状态，
+    ⚠ 这是**运维视角**的命令：它读的是 coordinator 本地状态，
     不经 HTTP 暴露。"谁能干这个活"是拓扑信息。
 
     设计意图：让"自动匹配为什么投给了 A 而不是 B"成为一个
@@ -562,7 +562,7 @@ def cmd_candidates(args: argparse.Namespace) -> int:
                 f"  其中 {len(pending)} 个节点声明了该能力但**尚未批准**："
                 f"{', '.join(sorted(pending))}", "warn"))
             _info(_color(
-                "  批准：nxs ops approve <节点ID> --url <hub-url>", "dim"))
+                "  批准：nxs ops approve <节点ID> --url <coordinator-url>", "dim"))
         return 0
 
     _info(_color(
@@ -848,17 +848,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_ops(args: argparse.Namespace) -> int:
     """运维动作：批准 / 吊销 / 释放租约 / 查节点。
 
-    **通过 HTTP 打到运行中的 hub**，所以不需要停服务、不需要碰它的数据库。
-    凭据来自环境变量 ``NXS_OPS_SECRET``；未配置时 hub 的运维端点整体关闭。
+    **通过 HTTP 打到运行中的 coordinator**，所以不需要停服务、不需要碰它的数据库。
+    凭据来自环境变量 ``NXS_OPS_SECRET``；未配置时 coordinator 的运维端点整体关闭。
     """
     import os
 
     from .edge.client import OpsClient
     from .mgmt.config import ENV_OPS_SECRET, MIN_SECRET_LENGTH
 
-    url = args.url or os.environ.get("NXS_HUB_URL", "")
+    url = args.url or os.environ.get("NXS_COORDINATOR_URL", "")
     if not url:
-        _err("缺少 hub 地址：用 --url 指定，或设置环境变量 NXS_HUB_URL")
+        _err("缺少 coordinator 地址：用 --url 指定，或设置环境变量 NXS_COORDINATOR_URL")
         _err("例如：--url https://nxs.example.com/nxs")
         return 2
 
@@ -866,7 +866,7 @@ def cmd_ops(args: argparse.Namespace) -> int:
     if len(raw_secret) < MIN_SECRET_LENGTH:
         _err(f"缺少运维凭据：环境变量 {ENV_OPS_SECRET} 未设置或过短"
              f"（需 ≥{MIN_SECRET_LENGTH} 字节）")
-        _err("hub 端必须用**同一个值**启动，否则运维端点不会开启")
+        _err("coordinator 端必须用**同一个值**启动，否则运维端点不会开启")
         return 2
 
     try:
@@ -1001,12 +1001,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="运行时指标与系统级关联异常（本机进程状态，或 --url 读远端）")
     add_common(sp)
     sp.add_argument("--url", default=None,
-                    help="读运行中的 hub（走运维通道）。省略时读本进程内存，"
+                    help="读运行中的 coordinator（走运维通道）。省略时读本进程内存，"
                          "仅在同进程运行时有数据")
     sp.add_argument("--json", action="store_true",
                     help="输出 JSON（便于喂给其他工具）")
     sp.add_argument("--ca-file", default=None,
-                    help="信任的 CA 证书（hub 用自签证书时必需；"
+                    help="信任的 CA 证书（coordinator 用自签证书时必需；"
                          "也可用环境变量 NXS_CA_FILE）")
     sp.set_defaults(func=cmd_metrics)
 
@@ -1026,24 +1026,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("node", nargs="?", default=None,
                     help="节点 ID（approve / revoke 需要）")
     sp.add_argument("--url", default=None,
-                    help="hub 地址，如 https://nxs.example.com/nxs"
-                         "（也可用环境变量 NXS_HUB_URL）")
+                    help="coordinator 地址，如 https://nxs.example.com/nxs"
+                         "（也可用环境变量 NXS_COORDINATOR_URL）")
     sp.add_argument("--ca-file", default=None,
-                    help="信任的 CA 证书（hub 用自签证书时必需；"
+                    help="信任的 CA 证书（coordinator 用自签证书时必需；"
                          "也可用环境变量 NXS_CA_FILE）")
     sp.set_defaults(func=cmd_ops)
 
     sp = sub.add_parser(
         "ui", help="只读观察窗（网页看节点与指标，靠 SSH 隧道访问）")
     sp.add_argument("--url", default=None,
-                    help="hub 地址，如 http://127.0.0.1:18100/nxs"
-                         "（也可用环境变量 NXS_HUB_URL）")
+                    help="coordinator 地址，如 http://127.0.0.1:18100/nxs"
+                         "（也可用环境变量 NXS_COORDINATOR_URL）")
     sp.add_argument("--host", default="127.0.0.1",
                     help="监听地址（默认 127.0.0.1；只接受本机地址）")
     sp.add_argument("--port", type=int, default=8080,
                     help="监听端口（默认 8080）")
     sp.add_argument("--ca-file", default=None,
-                    help="信任的 CA 证书（hub 用自签证书时必需；"
+                    help="信任的 CA 证书（coordinator 用自签证书时必需；"
                          "也可用环境变量 NXS_CA_FILE）")
     sp.set_defaults(func=cmd_ui)
 

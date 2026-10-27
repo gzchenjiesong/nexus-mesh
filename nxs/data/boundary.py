@@ -180,7 +180,7 @@ def sanitize_artifact(cap: Capability, art: Artifact) -> Artifact:
     * 自由文本字段：剥控制字符、剥指令性前缀、按字节截断
     * 其余字段：原样透传（结构化字段由白名单控制，不需要内容处理）
 
-    提到模块级是为了让**节点侧与 hub 侧用同一份逻辑**。
+    提到模块级是为了让**节点侧与 coordinator 侧用同一份逻辑**。
     两份实现迟早会分叉，而分叉的那一侧就是绕过口。
     """
     if not cap.freetext_fields:
@@ -263,8 +263,8 @@ class LocalBoundary:
 
     为什么需要第二道边界
     --------------------
-    :class:`ResponseBoundary` 跑在协调节点（hub）上。但本系统的核心威胁模型
-    是"**hub 被攻破**"——那时 hub 上的任何检查都形同虚设，因为攻击者可以
+    :class:`ResponseBoundary` 跑在协调节点（coordinator）上。但本系统的核心威胁模型
+    是"**coordinator 被攻破**"——那时 coordinator 上的任何检查都形同虚设，因为攻击者可以
     直接改代码跳过它。
 
     所以真正能保护数据的是**数据离开节点之前**的那一次裁剪。
@@ -276,7 +276,7 @@ class LocalBoundary:
     层              回答的问题                          需要的输入
     ==============  ==================================  ==============================
     节点侧（本类）  **我能承诺什么**                    自己的角色卡
-    hub 侧           **你能得到什么**                    域 × 类型矩阵 + 全部角色卡
+    coordinator 侧           **你能得到什么**                    域 × 类型矩阵 + 全部角色卡
     ==============  ==================================  ==============================
 
     节点侧检查不出"域矩阵只允许 metadata"——那需要知道对方是谁，
@@ -284,13 +284,13 @@ class LocalBoundary:
 
     这正是"声明即承诺"的执行点：能力注册时声明 level=summary，
     实现就必须真的只产出 summary。**在数据离开节点前就裁剪，
-    而不是让 hub 事后拦。**
+    而不是让 coordinator 事后拦。**
 
     上限怎么算
     ----------
     ``ceiling = min(角色卡的数据等级上限, 该能力声明的等级)``
 
-    hub 侧的上限是 ``min(矩阵上限, 节点上限, 能力等级)``，比这里更严格。
+    coordinator 侧的上限是 ``min(矩阵上限, 节点上限, 能力等级)``，比这里更严格。
     **两级取最小，最终结果与单级三者取最小完全等价**，
     所以节点侧不会放宽任何东西——它只是把裁剪提前了。
     """
@@ -340,7 +340,7 @@ class LocalBoundary:
             allowed = set(cap.response_fields)
             stray = _extract_fields(artifact.data) - allowed
             if stray:
-                # 只报数量不报字段名 —— 与 hub 侧一致，字段名本身可能带信息
+                # 只报数量不报字段名 —— 与 coordinator 侧一致，字段名本身可能带信息
                 raise PolicyDenied(
                     RuleId.WL_FIELD_NOT_ALLOWED,
                     f"local boundary: {len(stray)} field(s) outside allow-list",

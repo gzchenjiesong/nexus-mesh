@@ -38,7 +38,7 @@ SECRET = b"unit-test-secret-0123456789abcdef"
 def make_task(**kw) -> Task:
     base = dict(
         id="t-1", idempotency_key="i-1", type="demo.echo",
-        session_id="ses-1", from_node="hub", to_node="node-a",
+        session_id="ses-1", from_node="coordinator", to_node="node-a",
         params={"text": "hi"},
     )
     base.update(kw)
@@ -124,20 +124,20 @@ class TestDefaultsAreDeny:
 class TestEnvelope:
     @covers("M1.F1", "M1.F2")
     def test_sign_and_verify(self):
-        env = envelope_for(SECRET, "hub", make_task())
+        env = envelope_for(SECRET, "coordinator", make_task())
         env.verify(SECRET)
         assert env.sig.startswith("hmac-sha256:")
 
     @covers("M1.F4")
     def test_survives_serialization_roundtrip(self):
         """规范 JSON 必须稳定，否则跨进程/跨实现的签名校验会失败。"""
-        env = envelope_for(SECRET, "hub", make_task(params={"a": 1, "b": [2, 3]}))
+        env = envelope_for(SECRET, "coordinator", make_task(params={"a": 1, "b": [2, 3]}))
         revived = Envelope.from_dict(env.to_dict())
         revived.verify(SECRET)
 
     @covers("M1.F2")
     def test_detects_tampered_payload(self):
-        env = envelope_for(SECRET, "hub", make_task())
+        env = envelope_for(SECRET, "coordinator", make_task())
         data = env.to_dict()
         data["task"]["params"]["text"] = "TAMPERED"
         with pytest.raises(AuthFailed) as ei:
@@ -146,7 +146,7 @@ class TestEnvelope:
 
     @covers("M1.F2")
     def test_detects_impersonated_sender(self):
-        env = envelope_for(SECRET, "hub", make_task())
+        env = envelope_for(SECRET, "coordinator", make_task())
         data = env.to_dict()
         data["sender"] = "node-a"
         with pytest.raises(AuthFailed) as ei:
@@ -155,20 +155,20 @@ class TestEnvelope:
 
     @covers("M1.F2")
     def test_rejects_wrong_secret(self):
-        env = envelope_for(SECRET, "hub", make_task())
+        env = envelope_for(SECRET, "coordinator", make_task())
         with pytest.raises(AuthFailed):
             env.verify(b"a-different-secret-0123456789")
 
     @covers("M1.F2")
     def test_rejects_missing_signature(self):
-        env = envelope_for(SECRET, "hub", make_task())
+        env = envelope_for(SECRET, "coordinator", make_task())
         env.sig = ""
         with pytest.raises(AuthFailed):
             env.verify(SECRET)
 
     @covers("M1.F3")
     def test_rejects_stale_timestamp(self):
-        env = envelope_for(SECRET, "hub", make_task())
+        env = envelope_for(SECRET, "coordinator", make_task())
         env.ts = (datetime.now(timezone.utc)
                   - timedelta(seconds=600)).astimezone().isoformat(timespec="seconds")
         env.sign(SECRET)
@@ -178,7 +178,7 @@ class TestEnvelope:
 
     @covers("M1.F3")
     def test_clock_skew_window_is_configurable(self):
-        env = envelope_for(SECRET, "hub", make_task())
+        env = envelope_for(SECRET, "coordinator", make_task())
         env.ts = (datetime.now(timezone.utc)
                   - timedelta(seconds=600)).astimezone().isoformat(timespec="seconds")
         env.sign(SECRET)
@@ -188,12 +188,12 @@ class TestEnvelope:
     def test_ttl_expiry(self):
         task = make_task(ttl=(datetime.now(timezone.utc)
                               - timedelta(seconds=1)).astimezone().isoformat(timespec="seconds"))
-        env = envelope_for(SECRET, "hub", task)
+        env = envelope_for(SECRET, "coordinator", task)
         assert env.is_expired()
 
     @covers("M1.F8")
     def test_rejects_incompatible_major_version(self):
-        env = envelope_for(SECRET, "hub", make_task())
+        env = envelope_for(SECRET, "coordinator", make_task())
         data = env.to_dict()
         data["envelope_version"] = "9.0"
         with pytest.raises(ConfigError, match="主版本"):
@@ -313,7 +313,7 @@ class TestLevelCannotBeSpecifiedByCaller:
         # demo.echo 的能力声明是元数据级；发起方试图在 params 里"要"片段级
         task = Task(
             id="t", idempotency_key="i", type="demo.echo",
-            session_id="", from_node="hub", to_node="node-a",
+            session_id="", from_node="coordinator", to_node="node-a",
             params={"text": "x", "level": "fragment", "max_response_level": "full_text"},
             artifacts=[Artifact(level=Level.FRAGMENT, kind="structured",
                                 data={"echo": "x", "level": "fragment"})],
@@ -330,8 +330,8 @@ class TestLevelCannotBeSpecifiedByCaller:
         from nxs.control import PolicyEngine
         engine = PolicyEngine(config)
         # 同一个类型、同一个目标，无论请求怎么变，上限恒定
-        d1 = engine.check_delivery("hub", "node-a", "demo.echo")
-        d2 = engine.check_delivery("hub", "node-a", "demo.echo")
+        d1 = engine.check_delivery("coordinator", "node-a", "demo.echo")
+        d2 = engine.check_delivery("coordinator", "node-a", "demo.echo")
         assert d1.effective_max_level == d2.effective_max_level == Level.METADATA
 
 

@@ -27,7 +27,7 @@ class TestSecurityAssertion1_TypeAllowlist:
     @covers("M5.F1")
     def test_unregistered_type_is_denied(self, policy: PolicyEngine):
         with pytest.raises(PolicyDenied) as ei:
-            policy.check_delivery("hub", "node-a", "demo.unknown")
+            policy.check_delivery("coordinator", "node-a", "demo.unknown")
         assert ei.value.rule_id == RuleId.WL_TYPE_NOT_REGISTERED
 
     @covers("M5.F1")
@@ -35,18 +35,18 @@ class TestSecurityAssertion1_TypeAllowlist:
         """demo.search 存在，但 node-a 不提供它。"""
         assert "demo.search" in policy.registered_types
         with pytest.raises(PolicyDenied) as ei:
-            policy.check_delivery("hub", "node-a", "demo.search")
+            policy.check_delivery("coordinator", "node-a", "demo.search")
         assert ei.value.rule_id == RuleId.WL_TYPE_NOT_REGISTERED
 
     @covers("M5.F1")
     def test_registered_and_provided_is_allowed(self, policy: PolicyEngine):
-        d = policy.check_delivery("hub", "node-a", "demo.echo")
+        d = policy.check_delivery("coordinator", "node-a", "demo.echo")
         assert d.task_type == "demo.echo"
 
     @covers("M5.F2", "M11.F2")
     def test_wildcard_does_not_over_match(self, policy: PolicyEngine, config):
         """``demo.*`` 匹配 demo.echo，但不该匹配 demoX.y —— 前缀边界要准。"""
-        rule = config.policy.find("hub", "zone-b")
+        rule = config.policy.find("cloud", "zone-b")   # find() 的参数是**域**
         assert rule is not None
         assert rule.matches_type("demo.echo")
         assert rule.matches_type("demo.search")
@@ -69,7 +69,7 @@ class TestSecurityAssertion2_ResponseBoundary:
         )
         return make_task(
             task_id="t", idempotency_key="i", task_type="demo.echo",
-            from_node="hub", to_node="node-a", params={"text": "hi"},
+            from_node="coordinator", to_node="node-a", params={"text": "hi"},
             artifacts=[art],
         )
 
@@ -106,7 +106,7 @@ class TestSecurityAssertion2_ResponseBoundary:
         art = Artifact(level=Level.FRAGMENT, kind="freetext",
                        data={"results": [], "freetext_summary": "A" * 5000})
         task = make_task(task_id="t", idempotency_key="i", task_type="demo.search",
-                         from_node="hub", to_node="node-b",
+                         from_node="coordinator", to_node="node-b",
                          params={"query": "x"}, artifacts=[art])
         with pytest.raises(PolicyDenied) as ei:
             policy.check_response("node-b", task)
@@ -117,7 +117,7 @@ class TestSecurityAssertion2_ResponseBoundary:
         art = Artifact(level=Level.FRAGMENT, kind="freetext",
                        data={"results": [], "freetext_summary": "short"})
         task = make_task(task_id="t", idempotency_key="i", task_type="demo.search",
-                         from_node="hub", to_node="node-b",
+                         from_node="coordinator", to_node="node-b",
                          params={"query": "x"}, artifacts=[art])
         policy.check_response("node-b", task)
 
@@ -153,19 +153,19 @@ class TestSecurityAssertion3_DefaultDeny:
     def test_zone_a_has_no_outbound_rule(self, policy: PolicyEngine):
         """即使绕过角色层（直接查矩阵），zone-a 也没有出向规则。"""
         with pytest.raises(PolicyDenied) as ei:
-            policy.check_delivery("node-a", "hub", "demo.synthesize")
+            policy.check_delivery("node-a", "coordinator", "demo.synthesize")
         assert ei.value.rule_id == RuleId.MX_DOMAIN_FORBIDDEN
 
     @covers("M5.F3")
-    def test_zone_b_to_hub_blocked_by_receiver_not_matrix(self, policy: PolicyEngine):
-        """zone-b → hub 有矩阵规则，但 hub 的 can_receive_from 为空。
+    def test_zone_b_to_coordinator_blocked_by_receiver_not_matrix(self, policy: PolicyEngine):
+        """zone-b → coordinator 有矩阵规则，但 coordinator 的 can_receive_from 为空。
 
         两种拒绝是**不同层次**的原因，不应混为一谈：
-        * zone-a → hub：矩阵层没有规则（``MX-DOMAIN-02``）
-        * zone-b → hub：矩阵层有规则，但接收方不接受（``MX-RECEIVE-03``）
+        * zone-a → coordinator：矩阵层没有规则（``MX-DOMAIN-02``）
+        * zone-b → coordinator：矩阵层有规则，但接收方不接受（``MX-RECEIVE-03``）
         """
         with pytest.raises(PolicyDenied) as ei:
-            policy.check_delivery("node-b", "hub", "demo.synthesize")
+            policy.check_delivery("node-b", "coordinator", "demo.synthesize")
         assert ei.value.rule_id == RuleId.MX_RECEIVE_NOT_ALLOWED
 
     @covers("M5.R1")
@@ -202,21 +202,21 @@ class TestTripleCeiling:
     @covers("M5.F5", "M5.R2")
     def test_capability_declaration_can_tighten_below_matrix(self, policy: PolicyEngine):
         """矩阵允许摘要级，节点上限摘要级，但 demo.echo 只声明元数据级 → 实际上限元数据级。"""
-        d = policy.check_delivery("hub", "node-a", "demo.echo")
+        d = policy.check_delivery("coordinator", "node-a", "demo.echo")
         assert d.effective_max_level == Level.METADATA
 
     @covers("M5.F5", "M5.R2")
     def test_matrix_and_declaration_agree(self, policy: PolicyEngine):
-        d = policy.check_delivery("hub", "node-a", "demo.count")
+        d = policy.check_delivery("coordinator", "node-a", "demo.count")
         assert d.effective_max_level == Level.SUMMARY
 
     @covers("M5.F5", "M5.R2")
     def test_looser_domain_still_bounded_by_node(self, policy: PolicyEngine):
         """zone-b 的矩阵给到片段级，demo.echo 只声明元数据级 → 仍受元数据级约束。"""
-        d = policy.check_delivery("hub", "node-b", "demo.echo")
+        d = policy.check_delivery("coordinator", "node-b", "demo.echo")
         assert d.effective_max_level == Level.METADATA
         # demo.search 声明片段级，与矩阵一致
-        d2 = policy.check_delivery("hub", "node-b", "demo.search")
+        d2 = policy.check_delivery("coordinator", "node-b", "demo.search")
         assert d2.effective_max_level == Level.FRAGMENT
 
 
@@ -226,9 +226,9 @@ class TestTripleCeiling:
 
 class TestPublishPermission:
     @covers("M5.F6")
-    def test_hub_can_publish_wildcard_covered_type(self, policy: PolicyEngine):
-        policy.check_publish("hub", "demo.echo")
-        policy.check_publish("hub", "demo.synthesize")
+    def test_coordinator_can_publish_wildcard_covered_type(self, policy: PolicyEngine):
+        policy.check_publish("coordinator", "demo.echo")
+        policy.check_publish("coordinator", "demo.synthesize")
 
     @covers("M5.F6")
     def test_node_without_issuer_role_cannot_publish(self, policy: PolicyEngine):
@@ -237,9 +237,9 @@ class TestPublishPermission:
         assert ei.value.rule_id == RuleId.MX_ISSUER_NOT_ALLOWED
 
     @covers("M5.F6")
-    def test_hub_cannot_publish_outside_its_allowlist(self, policy: PolicyEngine):
+    def test_coordinator_cannot_publish_outside_its_allowlist(self, policy: PolicyEngine):
         with pytest.raises(PolicyDenied) as ei:
-            policy.check_publish("hub", "other.thing")
+            policy.check_publish("coordinator", "other.thing")
         assert ei.value.rule_id == RuleId.MX_ISSUER_NOT_ALLOWED
 
 
@@ -293,7 +293,7 @@ class TestDenyLeaksNothing:
         art = Artifact(level=Level.METADATA, kind="structured",
                        data={"echo": "hi", "level": "metadata", "salary_band": "P7"})
         task = make_task(task_id="t", idempotency_key="i", task_type="demo.echo",
-                         from_node="hub", to_node="node-a",
+                         from_node="coordinator", to_node="node-a",
                          params={"text": "hi"}, artifacts=[art])
         with pytest.raises(PolicyDenied) as ei:
             policy.check_response("node-a", task)
@@ -341,7 +341,7 @@ class TestRoleFieldsAreLabelsNotGates:
         """构造策略引擎：目标节点用改过的卡，其余节点用配置里的原卡。
 
         ⚠ resolver 必须覆盖**所有**节点，不能只解析目标节点：
-        否则 from_node（如 hub）会被判成 `AU-NODE-04` 未知节点，
+        否则 from_node（如 coordinator）会被判成 `AU-NODE-04` 未知节点，
         测试挂在一个与本意无关的检查上。
         """
         def resolve(node_id: str):
@@ -375,7 +375,7 @@ class TestRoleFieldsAreLabelsNotGates:
 
         engine = self._engine_with(config, card)
         # 能力还在 → 不该被拒
-        engine.check_delivery("hub", card.node_id, card.capabilities[0].type)
+        engine.check_delivery("coordinator", card.node_id, card.capabilities[0].type)
 
     @covers("M5.F1")
     def test_capabilities_are_the_real_gate(self, config: NexusConfig):
@@ -391,7 +391,7 @@ class TestRoleFieldsAreLabelsNotGates:
         engine = self._engine_with(config, card)
 
         with pytest.raises(PolicyDenied) as ei:
-            engine.check_delivery("hub", card.node_id, "demo.echo")
+            engine.check_delivery("coordinator", card.node_id, "demo.echo")
         assert ei.value.rule_id == RuleId.WL_TYPE_NOT_REGISTERED
 
     @covers("M5.F6")

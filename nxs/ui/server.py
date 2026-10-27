@@ -10,7 +10,7 @@
 
 **② 数据只经运维端点**
 不 import 存储后端、不 import ``nxs.app``、不读 sqlite、不碰活的注册表。
-只做一件事：用运维密钥调 hub 的 ``/nxs/ops/nodes`` 与 ``/nxs/ops/metrics``。
+只做一件事：用运维密钥调 coordinator 的 ``/nxs/ops/nodes`` 与 ``/nxs/ops/metrics``。
 
 为什么这条不能妥协：直读存储等于**新增一条绕过策略层的数据通道**。
 本项目的铁律是"所有安全策略的唯一裁决处"——数据出口也必须唯一。
@@ -71,13 +71,13 @@ class UiServer:
                 f"ssh -N -L {port}:127.0.0.1:{port} user@server"
             )
         if not ops_url.rstrip("/").endswith("/nxs"):
-            raise ConfigError(f"ui: hub 地址必须以 /nxs 结尾: {ops_url!r}")
+            raise ConfigError(f"ui: coordinator 地址必须以 /nxs 结尾: {ops_url!r}")
 
         self.ops_url = ops_url
         self.host = host
         self.port = port
         self.refresh_hint_seconds = refresh_hint_seconds
-        # ca_file：hub 用自签证书时需要。观察窗自己在 systemd 里也有
+        # ca_file：coordinator 用自签证书时需要。观察窗自己在 systemd 里也有
         # SSL_CERT_FILE，但显式传参更可控（且不依赖部署环境恰好设了变量）。
         self._ops = OpsClient(ops_url, secret=ops_secret, ca_file=ca_file)
 
@@ -131,17 +131,17 @@ class UiServer:
         """拉一次节点与指标。
 
         **失败不抛异常**，而是把错误放进 ``error`` 字段：
-        观察窗最需要工作的时候恰恰是 hub 出问题的时候。
-        如果这里抛 500，浏览器只有一个空白页，看不出"是 hub 停了"
+        观察窗最需要工作的时候恰恰是 coordinator 出问题的时候。
+        如果这里抛 500，浏览器只有一个空白页，看不出"是 coordinator 停了"
         还是"UI 自己坏了"。
         """
         out: dict[str, Any] = {
             "at": datetime.now(timezone.utc).astimezone().isoformat(
                 timespec="seconds"),
-            # 键名用 hub_url 而不是 hub：后者与示例配置里的节点名撞词，
-            # 会让「节点名不得硬编码」的守门（C3）报红，读代码时也容易
-            # 误以为这里指的是某个叫 hub 的节点。这里指的是 hub 的地址。
-            "hub_url": self.ops_url,
+            # 键名用 coordinator_url 而不是裸 coordinator：
+            # 前者明确表示"协调节点的地址"，后者会被误读成某个叫 coordinator
+            # 的**节点对象**。加 _url 后缀消掉这个歧义。
+            "coordinator_url": self.ops_url,
             "nodes": [],
             "metrics": None,
             "error": None,

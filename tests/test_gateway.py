@@ -130,10 +130,10 @@ class TestProtocolSemantics:
 
         这是传输层存在的唯一理由，也是"三套 Agent 能连进来"的最小证明。
         """
-        hub, node_a = clients["hub"], clients["node-a"]
+        coordinator, node_a = clients["coordinator"], clients["node-a"]
 
-        published = hub.publish(
-            from_node="hub", to_node="node-a", task_type="demo.echo",
+        published = coordinator.publish(
+            from_node="coordinator", to_node="node-a", task_type="demo.echo",
             params={"text": "hello-over-http"}, session_id="ses-net-1",
             idempotency_key="idem-net-1",
         )
@@ -151,7 +151,7 @@ class TestProtocolSemantics:
     @covers("M1.F11", "M1.F16")
     def test_sdk_runs_unchanged_over_http(self, clients):
         """`NodeClient` 走网络时**一行都不用改** —— 传输可替换是设计目标。"""
-        hub, node_a = clients["hub"], clients["node-a"]
+        coordinator, node_a = clients["coordinator"], clients["node-a"]
 
         client = NodeClient(
             NodeConfig(
@@ -162,7 +162,7 @@ class TestProtocolSemantics:
             ),
             node_a,
         )
-        hub.publish(from_node="hub", to_node="node-a", task_type="demo.echo",
+        coordinator.publish(from_node="coordinator", to_node="node-a", task_type="demo.echo",
                     params={"text": "sdk-over-http"}, idempotency_key="idem-sdk")
 
         task = client.run_once()
@@ -223,9 +223,9 @@ class TestProtocolSemantics:
 
         多一个字段就多一条信道——字段名、长度、前缀都能用来推断被拒内容。
         """
-        hub = clients["hub"]
+        coordinator = clients["coordinator"]
         with pytest.raises(PolicyDenied) as excinfo:
-            hub.publish(from_node="hub", to_node="node-a",
+            coordinator.publish(from_node="coordinator", to_node="node-a",
                         task_type="demo.unknown", params={},
                         idempotency_key="idem-denied")
         assert excinfo.value.rule_id is RuleId.WL_TYPE_NOT_REGISTERED
@@ -356,7 +356,7 @@ class TestEventStream:
         time.sleep(0.2)
 
         # 触发一次通知
-        clients["hub"].publish(from_node="hub", to_node="node-a",
+        clients["coordinator"].publish(from_node="coordinator", to_node="node-a",
                                task_type="demo.echo", params={"text": "x"},
                                idempotency_key="idem-sse")
         assert stop.wait(timeout=5), "10 秒内没有收到通知"
@@ -491,11 +491,11 @@ class TestDegradationAndShutdown:
     def test_poll_works_without_push(self, gateway, app):
         """**不订阅也能完整协作** —— 纯短轮询路径始终可用。"""
         secrets = app.config.secrets
-        hub = HttpTransport(gateway.base_url, node_id="hub",
-                            secret=secrets["hub"])
+        coordinator = HttpTransport(gateway.base_url, node_id="coordinator",
+                            secret=secrets["coordinator"])
         node_b = HttpTransport(gateway.base_url, node_id="node-b",
                                secret=secrets["node-b"])
-        hub.publish(from_node="hub", to_node="node-b", task_type="demo.echo",
+        coordinator.publish(from_node="coordinator", to_node="node-b", task_type="demo.echo",
                     params={"text": "no-push"}, idempotency_key="idem-nopush")
         task = node_b.poll("node-b")
         assert task is not None

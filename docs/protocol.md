@@ -80,7 +80,7 @@ payload = { "sender", "ts", "nonce", "task" }
   "idempotency_key": "idem-3f2a91",   // ★ 必填，见下
   "type": "demo.echo",                // 必须已注册，命名 <verb>.<object>
   "session_id": "ses-9c2e41",
-  "from_node": "hub",
+  "from_node": "coordinator",
   "to_node": "node-a",
   "status": "submitted",
   "mode": "sync",                     // sync | async
@@ -381,7 +381,7 @@ POST /nxs/register            # 请求签名（无任务可签）
 ### 信任域由运维裁定（v0.3）
 
 `domain` 决定节点适用哪一组「域 × 类型」矩阵规则，因此**不能由节点自选**。
-否则它可以声称 `domain="hub"`，而 hub 域通常拥有发布权。
+否则它可以声称 `domain="coordinator"`，而 cloud 域通常拥有发布权。
 
 规则：**配置里有的节点，域一律以配置为准**（节点自报被覆盖）；
 配置里没有的新节点才采信自报域，但**必然处于未批准状态**，
@@ -419,7 +419,7 @@ POST /nxs/register            # 请求签名（无任务可签）
      "capacity": 2, "backlog_ratio": 0.5, "bytes_out": 350}
   ],
   "anomalies": [
-    {"rule": "probe_pattern", "severity": "critical", "subject": "hub",
+    {"rule": "probe_pattern", "severity": "critical", "subject": "coordinator",
      "message": "…", "rationale": "…", "suggestion": "…"}
   ]
 }
@@ -499,7 +499,7 @@ POST /nxs/register            # 请求签名（无任务可签）
 那是**权限布局与网络拓扑**的泄漏。"谁能干这个活"本身就是敏感信息。
 真实原因（候选数量、逐个拒绝码）只写本地审计。
 
-> 候选名单**没有 HTTP 端点**。运维可在 hub 本机用
+> 候选名单**没有 HTTP 端点**。运维可在 coordinator 本机用
 > `nxs candidates --type <类型>` 查看，但节点拿不到。
 
 ### 幂等与匹配的顺序

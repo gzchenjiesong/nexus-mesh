@@ -55,7 +55,7 @@ def stack(config):
 
 @pytest.fixture
 def unapproved_stack(config):
-    """只批准 hub 域。用于验证"新节点不能自行加入"。"""
+    """只批准 cloud 域。用于验证"新节点不能自行加入"。"""
     return _build_stack(config)
 
 
@@ -83,7 +83,7 @@ class TestEndToEnd:
     def test_happy_path(self, stack):
         mb = stack["mailbox"]
 
-        d = mb.deliver(from_node="hub", to_node="node-a",
+        d = mb.deliver(from_node="coordinator", to_node="node-a",
                        task_type="demo.echo", params={"text": "hello"},
                        session_id="ses-1")
         assert d.created
@@ -111,7 +111,7 @@ class TestEndToEnd:
     def test_poll_marks_working_and_second_poll_is_empty(self, stack):
         """领取即加锁——同一任务不会被取两次。"""
         mb = stack["mailbox"]
-        mb.deliver(from_node="hub", to_node="node-a",
+        mb.deliver(from_node="coordinator", to_node="node-a",
                    task_type="demo.echo", params={"text": "x"})
         assert mb.poll("node-a") is not None
         assert mb.poll("node-a") is None
@@ -119,7 +119,7 @@ class TestEndToEnd:
     @covers("M7.F1")
     def test_idempotency_prevents_duplicate(self, stack):
         mb = stack["mailbox"]
-        kw = dict(from_node="hub", to_node="node-a", task_type="demo.echo",
+        kw = dict(from_node="coordinator", to_node="node-a", task_type="demo.echo",
                   params={"text": "x"}, idempotency_key="same-key")
         d1 = mb.deliver(**kw)
         d2 = mb.deliver(**kw)
@@ -140,7 +140,7 @@ class TestEndToEnd:
         """未批准的节点也不能被投递——否则任务会进队列却无人领取。"""
         s = unapproved_stack
         with pytest.raises(PolicyDenied) as ei:
-            s["mailbox"].deliver(from_node="hub", to_node="node-a",
+            s["mailbox"].deliver(from_node="coordinator", to_node="node-a",
                                  task_type="demo.echo", params={"text": "x"})
         assert ei.value.rule_id == RuleId.MX_RECEIVE_NOT_ALLOWED
 
@@ -161,7 +161,7 @@ class TestEndToEnd:
     def test_policy_denied_never_enters_queue(self, stack):
         """被拒的任务不能在队列里留下任何痕迹。"""
         with pytest.raises(PolicyDenied):
-            stack["mailbox"].deliver(from_node="hub", to_node="node-a",
+            stack["mailbox"].deliver(from_node="coordinator", to_node="node-a",
                                      task_type="demo.unknown", params={})
         assert stack["queue"].claim("node-a", lease_seconds=1,
                                     now="9999-01-01T00:00:00+00:00") is None
@@ -178,7 +178,7 @@ class TestLeaseRecovery:
         mb, lc = stack["mailbox"], stack["lifecycle"]
         stack["registry"].approve("node-a")
 
-        mb.deliver(from_node="hub", to_node="node-a",
+        mb.deliver(from_node="coordinator", to_node="node-a",
                    task_type="demo.echo", params={"text": "x"})
         first = mb.poll("node-a")
         assert first is not None
@@ -200,7 +200,7 @@ class TestLeaseRecovery:
         """反复被租约超时的任务最终会失败，不会无限重试。"""
         mb, lc = stack["mailbox"], stack["lifecycle"]
         stack["registry"].approve("node-a")
-        mb.deliver(from_node="hub", to_node="node-a",
+        mb.deliver(from_node="coordinator", to_node="node-a",
                    task_type="demo.echo", params={"text": "x"})
 
         future = (datetime.now(timezone.utc)
@@ -216,7 +216,7 @@ class TestLeaseRecovery:
     def test_sweep_is_the_recovery_driver(self, stack):
         """sweep 是恢复的驱动源：只要它定期跑，中断的任务就会自动回来。"""
         mb, lc = stack["mailbox"], stack["lifecycle"]
-        mb.deliver(from_node="hub", to_node="node-a",
+        mb.deliver(from_node="coordinator", to_node="node-a",
                    task_type="demo.echo", params={"text": "x"})
         claimed = mb.poll("node-a")
         assert claimed is not None
@@ -242,8 +242,8 @@ class TestRegistry:
         assert rec is not None and not rec.approved and not rec.routable
 
     @covers("M3.F2", "M11.F1")
-    def test_hub_domain_auto_approved(self, stack):
-        rec = stack["registry"].record("hub")
+    def test_coordinator_domain_auto_approved(self, stack):
+        rec = stack["registry"].record("coordinator")
         assert rec is not None and rec.approved and rec.routable
 
     @covers("M3.F5")
@@ -327,19 +327,19 @@ class TestAuthenticator:
     def test_valid_envelope_accepted(self, config):
         auth = Authenticator(config.secrets)
         from nxs.control import make_task
-        env = envelope_for(config.secrets["hub"], "hub",
+        env = envelope_for(config.secrets["coordinator"], "coordinator",
                            make_task(task_id="t", idempotency_key="i",
-                                     task_type="demo.echo", from_node="hub",
+                                     task_type="demo.echo", from_node="coordinator",
                                      to_node="node-a", params={}))
-        assert auth.verify(env) == "hub"
+        assert auth.verify(env) == "coordinator"
 
     @covers("M1.F2", "M1.F7")
     def test_tampered_envelope_rejected(self, config):
         auth = Authenticator(config.secrets)
         from nxs.control import make_task
-        env = envelope_for(config.secrets["hub"], "hub",
+        env = envelope_for(config.secrets["coordinator"], "coordinator",
                            make_task(task_id="t", idempotency_key="i",
-                                     task_type="demo.echo", from_node="hub",
+                                     task_type="demo.echo", from_node="coordinator",
                                      to_node="node-a", params={}))
         env.task.params["text"] = "TAMPERED"
         with pytest.raises(AuthFailed):
@@ -350,9 +350,9 @@ class TestAuthenticator:
         """同一个信封发两次，第二次必须被拒。"""
         from nxs.control import make_task
         auth = Authenticator(config.secrets)
-        env = envelope_for(config.secrets["hub"], "hub",
+        env = envelope_for(config.secrets["coordinator"], "coordinator",
                            make_task(task_id="t", idempotency_key="i",
-                                     task_type="demo.echo", from_node="hub",
+                                     task_type="demo.echo", from_node="coordinator",
                                      to_node="node-a", params={}))
         auth.verify(env)
         with pytest.raises(AuthFailed) as ei:
@@ -363,10 +363,10 @@ class TestAuthenticator:
     def test_revoked_credential_rejected(self, config):
         from nxs.control import make_task
         auth = Authenticator(config.secrets)
-        auth.revoke("hub")
-        env = envelope_for(config.secrets["hub"], "hub",
+        auth.revoke("coordinator")
+        env = envelope_for(config.secrets["coordinator"], "coordinator",
                            make_task(task_id="t", idempotency_key="i",
-                                     task_type="demo.echo", from_node="hub",
+                                     task_type="demo.echo", from_node="coordinator",
                                      to_node="node-a", params={}))
         with pytest.raises(AuthFailed) as ei:
             auth.verify(env)
@@ -376,7 +376,7 @@ class TestAuthenticator:
     def test_unknown_node_reports_auth_failure_not_unknown(self, config):
         """未知节点报"认证失败"而非"节点不存在"——避免枚举节点 ID。"""
         from nxs.control import make_task
-        auth = Authenticator({"hub": config.secrets["hub"]})
+        auth = Authenticator({"coordinator": config.secrets["coordinator"]})
         env = envelope_for(b"some-secret-0123456789abcdef", "ghost",
                            make_task(task_id="t", idempotency_key="i",
                                      task_type="demo.echo", from_node="ghost",
@@ -391,9 +391,9 @@ class TestAuthenticator:
         auth = Authenticator(config.secrets, nonce_cache_size=10)
         from nxs.control import make_task
         for i in range(50):
-            env = envelope_for(config.secrets["hub"], "hub",
+            env = envelope_for(config.secrets["coordinator"], "coordinator",
                                make_task(task_id=f"t{i}", idempotency_key=f"i{i}",
-                                         task_type="demo.echo", from_node="hub",
+                                         task_type="demo.echo", from_node="coordinator",
                                          to_node="node-a", params={}))
             auth.verify(env)
         assert auth.nonce_cache_size() <= 10
@@ -407,7 +407,7 @@ class TestResponseBoundary:
     def _task(self, artifacts):
         from nxs.control import make_task
         return make_task(task_id="t", idempotency_key="i", task_type="demo.search",
-                         from_node="hub", to_node="node-b",
+                         from_node="coordinator", to_node="node-b",
                          params={"query": "x"}, artifacts=artifacts)
 
     @covers("M10.F2", "M10.R2")

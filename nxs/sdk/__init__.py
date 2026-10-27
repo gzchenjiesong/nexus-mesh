@@ -209,7 +209,7 @@ class NodeClient:
         """
         if self.config.card is None:
             return {"outcome": "skipped", "approved": True,
-                    "hint": "no card configured (registered by hub config)"}
+                    "hint": "no card configured (registered by coordinator config)"}
         try:
             result = self._transport.register(self.config.card)
         except Exception as exc:  # noqa: BLE001 - 注册失败不该拖垮节点
@@ -279,7 +279,7 @@ class NodeClient:
 
         ⭐ **节点侧边界在回传之前执行**，这是本系统安全模型的关键位置：
         数据在离开节点之前就已经被裁剪到"自己声明的范围"。
-        协调节点侧还有一道权威校验，但那一道在 hub 被攻破时不可信——
+        协调节点侧还有一道权威校验，但那一道在 coordinator 被攻破时不可信——
         真正保护原始数据的是这一道。
         """
         handler = self.config.handlers.get(task.type)

@@ -64,7 +64,7 @@ def make_app():
 def make_task(task_id: str = "t-renew", to_node: str = "node-a") -> Task:
     return Task(
         id=task_id, idempotency_key=f"idem-{task_id}", type="demo.echo",
-        session_id="ses-renew", from_node="hub", to_node=to_node,
+        session_id="ses-renew", from_node="coordinator", to_node=to_node,
         status=TaskStatus.WORKING,
     )
 
@@ -86,7 +86,7 @@ class TestLifecycleRenew:
 
         app = make_app(lease_seconds=3)
         published = app.transport.publish(
-            from_node="hub", to_node="node-a", task_type="demo.echo",
+            from_node="coordinator", to_node="node-a", task_type="demo.echo",
             params={"text": "x"}, idempotency_key="idem-r1",
         ).task
 
@@ -118,7 +118,7 @@ class TestLifecycleRenew:
         """不能替别人续租。任务不存在 → 同一个错误码（避免枚举）。"""
         app = make_app(lease_seconds=1)
         app.transport.publish(
-            from_node="hub", to_node="node-a", task_type="demo.echo",
+            from_node="coordinator", to_node="node-a", task_type="demo.echo",
             params={"text": "x"}, idempotency_key="idem-r2",
         )
         claimed = app.mailbox.poll("node-a")
@@ -137,7 +137,7 @@ class TestLifecycleRenew:
         """任务已落终态后续租 → 拒（LF-STATE-03）。"""
         app = make_app(lease_seconds=1)
         app.transport.publish(
-            from_node="hub", to_node="node-a", task_type="demo.echo",
+            from_node="coordinator", to_node="node-a", task_type="demo.echo",
             params={"text": "x"}, idempotency_key="idem-r3",
         )
         claimed = app.mailbox.poll("node-a")
@@ -158,7 +158,7 @@ class TestLifecycleRenew:
 
         app = make_app(lease_seconds=1)
         app.transport.publish(
-            from_node="hub", to_node="node-a", task_type="demo.echo",
+            from_node="coordinator", to_node="node-a", task_type="demo.echo",
             params={"text": "x"}, idempotency_key="idem-r4",
         )
         claimed = app.mailbox.poll("node-a")
@@ -195,9 +195,9 @@ class TestAckEndpoint:
             gw.authenticator.set_secret("node-a", secret)
             tr = HttpTransport(gw.base_url, node_id="node-a", secret=secret)
 
-            hub = HttpTransport(gw.base_url, node_id="hub",
-                                secret=app.config.secrets["hub"])
-            hub.publish(from_node="hub", to_node="node-a",
+            coordinator = HttpTransport(gw.base_url, node_id="coordinator",
+                                secret=app.config.secrets["coordinator"])
+            coordinator.publish(from_node="coordinator", to_node="node-a",
                         task_type="demo.echo", params={"text": "x"},
                         idempotency_key="idem-ack")
             claimed = tr.poll("node-a")
@@ -344,9 +344,9 @@ class TestSdkAutoRenew:
                 renew_interval=0.3,
             ), tr)
 
-            hub = HttpTransport(gw.base_url, node_id="hub",
-                                secret=app.config.secrets["hub"])
-            hub.publish(from_node="hub", to_node="node-b",
+            coordinator = HttpTransport(gw.base_url, node_id="coordinator",
+                                secret=app.config.secrets["coordinator"])
+            coordinator.publish(from_node="coordinator", to_node="node-b",
                         task_type="demo.slow", params={"seconds": 2.5},
                         idempotency_key="idem-slow")
             claimed = tr.poll("node-b")

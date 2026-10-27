@@ -67,12 +67,12 @@
 | **B2 矩阵层** | 有发布权，但跨域仍被拒 | `MX-DOMAIN-02` | 往矩阵里**没有**的域投递 |
 | **B3 字段边界** | 产出多一个字段就被拒 | `WL-FIELD-001` | 返回 `response_fields` 之外的键 |
 | **B4 等级边界** | 产出超等级被拒 | `WL-LEVEL-002` | 声明 `summary` 却返回 `fragment` |
-| **B5 节点侧边界** | 越界产出**根本没发出** | 节点自己拦，见节点日志 | 绕过 SDK 直接 `complete` 应被 hub 侧再拦一次 |
+| **B5 节点侧边界** | 越界产出**根本没发出** | 节点自己拦，见节点日志 | 绕过 SDK 直接 `complete` 应被 coordinator 侧再拦一次 |
 | **B6 拒绝不泄露** | 响应体只有 `rule_id` + 固定消息 | — | 检查响应里**不含字段名、不含内容** |
 | **B7 提示注入防护** | 回传内容强制标注 `semantics=data` | — | 返回带"忽略以上指令"的文本，看是否被清洗 |
 
-**B5 是双层防御的关键**：节点侧拦下时，hub 侧**连拒绝记录都不该有**（因为请求没到）。
-验收方式：查 hub 审计里有没有对应的 `WL-FIELD-001`——没有才对。
+**B5 是双层防御的关键**：节点侧拦下时，coordinator 侧**连拒绝记录都不该有**（因为请求没到）。
+验收方式：查 coordinator 审计里有没有对应的 `WL-FIELD-001`——没有才对。
 
 ---
 
@@ -100,7 +100,7 @@
 | D1 自注册 | 新节点调 `register` 提交角色卡 | `outcome=created`，**必然 `approved=false`** |
 | D2 凭据只放 env | 服务端 `nxs.env` 加 `NXS_SECRET_<ID>`，**不改 yaml** | 注册成功 |
 | D3 改卡片掉批准 | 已批准节点改角色卡再注册 | `outcome=card_changed`，`approved` 变 `false` |
-| D4 域由配置裁定 | 节点自报 `domain=hub`（高权限域） | 注册返回的 `domain` 是配置里的值，不是自报的 |
+| D4 域由配置裁定 | 节点自报 `domain=coordinator`（高权限域） | 注册返回的 `domain` 是配置里的值，不是自报的 |
 | D5 身份一致 | 用 A 的密钥提交 B 的角色卡 | 403 `FM-CARD-03` |
 | D6 吊销即时生效 | `nxs ops revoke` 后立刻调 API | 401 `AU-CRED-03`，不用等凭据过期 |
 
@@ -119,7 +119,7 @@
 | E5 候选不外泄 | 请求 `/nxs/candidates` | 返回 501（无此端点） |
 
 > E4 是安全设计：若能区分"没人能干"和"有人但不给你"，就泄漏了权限布局。
-> 真实原因要看 hub 的审计日志。
+> 真实原因要看 coordinator 的审计日志。
 
 ---
 
@@ -163,7 +163,7 @@
 | **清空队列** | M14 未实现 | 只能用 `release` 释放租约 |
 | **熔断某条链路** | M14 未实现 | 只能 `revoke` 整个节点 |
 | **暂停某类型任务** | M14 未实现 | 只能改矩阵 + 重启 |
-| **多 hub 联邦 / 中继（relay）** | `roles.relay` 只是字段 | 不要设计"多节点级联"场景 |
+| **多 coordinator 联邦 / 中继（relay）** | `roles.relay` 只是字段 | 不要设计"多节点级联"场景 |
 | **Prometheus 导出** | 只有 `--json` | 指标要自己转发 |
 | **参数 schema 校验** | 只声明、不校验 | 参数写错不会在投递时被拦，会由执行节点失败 |
 | **Postgres / Redis / Kafka** | 只有 memory 与 sqlite | 不要设计"接外部队列"场景 |
@@ -207,7 +207,7 @@ ssh -N -L 8080:127.0.0.1:8080 user@服务器
 | token 不落盘 | 重启 `nxs ui` | token 变了；旧链接失效 |
 | 只听本机 | `nxs ui --host 0.0.0.0` | 拒绝启动，并提示用 SSH 隧道 |
 | 写方法 | `curl -X POST .../api/state` | 405 + `Allow: GET` |
-| hub 挂了 | 停掉 hub 再刷页面 | 显示"hub 不可达：…"，**不是白屏** |
+| coordinator 挂了 | 停掉 coordinator 再刷页面 | 显示"coordinator 不可达：…"，**不是白屏** |
 | 名称/简介 | 看节点行 | 显示 `display_name` 与 `description` |
 
 > ⚠ **验收时注意**：`display_name` / `description` 是节点自报的。
@@ -261,7 +261,7 @@ ssh -N -L 8080:127.0.0.1:8080 user@服务器
 | **信封上限 ~186 KB 文件** | base64 膨胀 33%。更大的产物必须走 `kind=reference` 传坐标 |
 | **租约默认 15 秒** | 长任务靠 `renew_interval`（默认 5s）自动续租，不靠调大租约 |
 | **`can_receive_from` 只有精确匹配** | 域名字习惯带连字符，通配格式 `前缀.*` 实际用不上。`"*"` 不表示任意域 |
-| **hub 自己也要批准** | `auto_approve_domains: []` 对所有人一视同仁，含 hub |
+| **coordinator 自己也要批准** | `auto_approve_domains: []` 对所有人一视同仁，含 coordinator |
 | **`to_node=""` 才是自动匹配** | 漏写 `to_node` 报 `FM-SCHEMA-01`，不是自动 |
 | **`kind="freetext"` 必须声明** | 能力没声明 `freetext_fields` 却回 `kind=freetext` → 被拒 `WL-FREETEXT-003` |
 | **指标重启归零** | 是内存态。跨重启趋势看审计日志 |
@@ -305,7 +305,7 @@ ssh -N -L 8080:127.0.0.1:8080 user@服务器
   ├─ B2 矩阵层：跨域被拒
   ├─ B3 字段越界被拒 + 响应体不含字段名
   ├─ B4 等级越界被拒
-  ├─ B5 节点侧边界：越界产出没发出（hub 审计无记录）
+  ├─ B5 节点侧边界：越界产出没发出（coordinator 审计无记录）
   └─ B7 提示注入文本被清洗
 
 第三轮 · 节点接入（必过）

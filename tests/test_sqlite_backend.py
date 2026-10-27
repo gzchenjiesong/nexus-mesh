@@ -209,7 +209,7 @@ class TestContractParity:
         lifecycle = TaskLifecycle(queue, lease_seconds=1)
         mailbox = Mailbox(PolicyEngine(config), registry, lifecycle)
 
-        d = mailbox.deliver(from_node="hub", to_node="node-a",
+        d = mailbox.deliver(from_node="coordinator", to_node="node-a",
                             task_type="demo.echo", params={"text": "hi"},
                             session_id="ses-1")
         assert d.created and d.effective_max_level == "metadata"
@@ -229,7 +229,7 @@ class TestContractParity:
 def _task(task_id: str, idem: str, to_node: str):
     from nxs.core import Task
     return Task(id=task_id, idempotency_key=idem, type="demo.echo",
-                session_id="", from_node="hub", to_node=to_node,
+                session_id="", from_node="coordinator", to_node=to_node,
                 params={"text": "x"})
 
 

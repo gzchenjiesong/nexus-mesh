@@ -3,7 +3,7 @@
 用法：
 
     # 1. 配置（三选一：环境变量 / .env / 命令行）
-    export NXS_HUB_URL=https://nxs.example.com/nxs
+    export NXS_COORDINATOR_URL=https://nxs.example.com/nxs
     export NXS_SECRET_WORK_LAPTOP=<与服务端一致的密钥>
     export NXS_NODE_ID=work-laptop          # 可选，默认 work-laptop
 
@@ -84,7 +84,7 @@ def build_card(node_id: str, domain: str) -> RoleCard:
         "constraints": {
             # ★ 硬上限。超过它的产出在**节点侧**就会被拦下，根本不会发出去。
             "max_response_level": "summary",
-            "can_receive_from": ["hub"],    # 只有协调域能给我派活
+            "can_receive_from": ["coordinator"],    # 只有协调域能给我派活
             "can_issue_types": [],          # 空 = 我不发任何任务
             "can_delegate_to": [],          # 不做二次委托
             "quota": {
@@ -160,7 +160,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Nexus Mesh 节点端示例")
     parser.add_argument("--node-id", default=os.environ.get("NXS_NODE_ID", "work-laptop"))
     parser.add_argument("--domain", default=os.environ.get("NXS_DOMAIN", "zone-work"))
-    parser.add_argument("--url", default=os.environ.get("NXS_HUB_URL", ""))
+    parser.add_argument("--url", default=os.environ.get("NXS_COORDINATOR_URL", ""))
     parser.add_argument("--dry-run", action="store_true",
                         help="只注册并检查连通性，不进入领任务循环")
     parser.add_argument("--verbose", "-v", action="store_true")
@@ -174,7 +174,7 @@ def main() -> int:
     log = logging.getLogger("node")
 
     if not args.url:
-        log.error("缺少 hub 地址：用 --url 或环境变量 NXS_HUB_URL 指定")
+        log.error("缺少 coordinator 地址：用 --url 或环境变量 NXS_COORDINATOR_URL 指定")
         log.error("例如：--url https://nxs.example.com/nxs")
         return 2
 
@@ -231,7 +231,7 @@ def main() -> int:
                     outcome, result.get("revision"))
         log.warning("这是正常的 —— 新节点不能自行加入。"
                     "请在有服务端密钥的机器上执行：")
-        log.warning("  nxs ops approve %s --url <hub-url>", args.node_id)
+        log.warning("  nxs ops approve %s --url <coordinator-url>", args.node_id)
         log.warning("批准后本节点会在下一次心跳（≤60 秒）自动变为已批准。")
 
     if args.dry_run:

@@ -10,7 +10,7 @@
 #
 #  ⚠ 凭据（secret）请不要写在这个文件里。优先用环境变量：
 #
-#      export NXS_SECRET_HUB=$(openssl rand -hex 32)
+#      export NXS_SECRET_COORDINATOR=$(openssl rand -hex 32)
 #      export NXS_SECRET_NODE_A=$(openssl rand -hex 32)
 #      export NXS_SECRET_NODE_B=$(openssl rand -hex 32)
 #
@@ -69,20 +69,20 @@ policy:
   #   默认空是刻意的（默认拒绝）：新节点必须被显式批准才能接入，
   #   这落实了"已知的少数节点 + 预配置信任"这个前提。
   #
-  #   示例里批准 hub 域只是为了让 demo 开箱可跑——
+  #   示例里批准 cloud 域只是为了让 demo 开箱可跑——
   #   生产环境请按实际信任关系填写，或干脆留空、用运维命令逐个批准。
-  auto_approve_domains: [hub]
+  auto_approve_domains: [cloud]
 
   matrix:
     # 协调域可以把任务派给 zone-a，但只限这两个类型，且应答上限为摘要级（summary）
-    - from_domain: hub
+    - from_domain: cloud
       to_domain: zone-a
       allow_types: [demo.echo, demo.count]
       max_level: summary
 
     # 派给 zone-b 的类型用前缀通配，演示"新增同前缀类型不必改矩阵"
     # ⚠ 不接受裸通配 '*'——那等于取消默认拒绝
-    - from_domain: hub
+    - from_domain: cloud
       to_domain: zone-b
       allow_types: ["demo.*"]
       max_level: fragment
@@ -98,7 +98,7 @@ policy:
     #     （Issuer 开放会让"任务参数"成为数据外流通道）。
     #     示例里开放它，仅为展示矩阵层仍然有效。
     - from_domain: zone-b
-      to_domain: hub
+      to_domain: cloud
       allow_types: ["demo.*"]
       max_level: summary
 
@@ -126,8 +126,8 @@ nodes:
   # ============================================================================
   # 协调节点：人机入口 + 唯一的跨域聚合点
   # ============================================================================
-  - node_id: hub
-    domain: hub
+  - node_id: coordinator
+    domain: cloud
     display_name: "Coordinator"
     roles:
       issuer: true                # 能发布任务
@@ -155,7 +155,7 @@ nodes:
 
   # ============================================================================
   # 节点 A：模拟"最严约束"的一侧
-  #   应答上限为摘要级，只能接收来自 hub 的委托，且不可作为 Issuer 发布任何任务。
+  #   应答上限为摘要级，只能接收来自 cloud 域的委托，且不可作为 Issuer 发布任何任务。
   # ============================================================================
   - node_id: node-a
     domain: zone-a
@@ -186,7 +186,7 @@ nodes:
       # ★ 硬上限。片段级 / 原文级 对这个节点而言**在实现层不存在代码路径**，
       #   而不是"产出了再拦截"。这是本系统区别于普通消息队列的关键。
       max_response_level: summary
-      can_receive_from: [hub]     # 只有 hub 能给它派任务
+      can_receive_from: [cloud]     # 只有 cloud 能给它派任务
       can_issue_types: []         # 空列表 = 不可发布任何任务
       can_delegate_to: []         # 不做二次委托
       quota:
@@ -244,9 +244,9 @@ nodes:
 
     constraints:
       max_response_level: fragment
-      can_receive_from: [hub]
+      can_receive_from: [cloud]
       # ★ 开了 Issuer 以便演示"角色层与矩阵层是两个独立层次"：
-      #   它有发布权，但矩阵里只允许发给 hub 域，发给 zone-a 仍会被拒。
+      #   它有发布权，但矩阵里只允许发给 cloud 域，发给 zone-a 仍会被拒。
       #   ⚠ 生产环境是否开放 Issuer 需要你决策（见文档 Q9）。
       can_issue_types: ["demo.*"]
       can_delegate_to: []

@@ -22,7 +22,7 @@ from conftest import REPO_ROOT, covers
 DEPLOY = REPO_ROOT / "deploy"
 
 #: 模板里协调节点的凭据（模板不含真实值，测试用假值）
-TEMPLATE_ENV = {"NXS_SECRET_HUB": "template-test-secret-0123456789"}
+TEMPLATE_ENV = {"NXS_SECRET_COORDINATOR": "template-test-secret-0123456789"}
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ class TestProductionTemplate:
 
         这是"生产配置根本写不出来"的阻塞：工作节点是自注册的，
         协调节点启动时它还不存在。若域只能从节点卡片推导，
-        矩阵里写 ``hub → zone-work`` 会被判为"引用了不存在的域"。
+        矩阵里写 ``coordinator → zone-work`` 会被判为"引用了不存在的域"。
         """
         from nxs.mgmt.config import load_config
 
@@ -83,11 +83,11 @@ class TestProductionTemplate:
         """
         from nxs.mgmt.config import load_config
 
-        # 模板里 allow_types 含 work.calendar，而配置里只有 hub 节点、
-        # hub 并不提供 work.calendar —— 严格核对会失败，自注册模式应放行
+        # 模板里 allow_types 含 work.calendar，而配置里只有 coordinator 节点、
+        # coordinator 并不提供 work.calendar —— 严格核对会失败，自注册模式应放行
         cfg = load_config(DEPLOY / "local.yaml.example", env=TEMPLATE_ENV)
-        hub_types = {c.type for c in cfg.nodes["hub"].capabilities}
-        assert "work.calendar" not in hub_types, "测试前提：hub 不提供 work.calendar"
+        coordinator_types = {c.type for c in cfg.nodes["coordinator"].capabilities}
+        assert "work.calendar" not in coordinator_types, "测试前提：coordinator 不提供 work.calendar"
         assert any("work.calendar" in r.allow_types for r in cfg.policy.rules)
 
     @covers("M11.F1")
@@ -129,13 +129,14 @@ class TestProductionTemplate:
         """★ 模板必须声明 ``domains``。
 
         没声明时域只能从节点卡片推导，而工作节点是自注册的、启动时不存在——
-        矩阵里就写不出 ``hub → zone-work``。这是"生产配置根本写不出来"的阻塞。
+        矩阵里就写不出 ``coordinator → zone-work``。这是"生产配置根本写不出来"的阻塞。
         """
         from nxs.mgmt.config import load_config
 
         cfg = load_config(DEPLOY / "local.yaml.example", env=TEMPLATE_ENV)
         assert cfg.domains, "生产模板没有声明 domains，矩阵无法引用自注册节点的域"
-        assert {"hub", "zone-work"} <= cfg.known_domains()
+        # known_domains() 返回的是**域**，不是节点 ID —— 这里要 cloud
+        assert {"cloud", "zone-work"} <= cfg.known_domains()
 
     @covers("M11.F1")
     def test_template_has_no_credentials(self):
@@ -281,7 +282,7 @@ class TestDeployCheck:
             encoding="utf-8",
         )
         full_env = {**os.environ,
-                    "NXS_SECRET_HUB": "doctor-test-secret-0123456789",
+                    "NXS_SECRET_COORDINATOR": "doctor-test-secret-0123456789",
                     "NXS_OPS_SECRET": "doctor-ops-secret-0123456789"}
         result = subprocess.run(
             [sys.executable, "-m", "nxs", "doctor", "--config", str(cfg),
@@ -345,10 +346,10 @@ class TestPublishedTemplatesPassVerify:
     2026-10-27 在云服务器上按文档部署，第一步 ``nxs verify`` 就 FAIL 三项：
 
     * 矩阵域检查失败 —— ``verify`` 从**节点卡片**推导域，忽略了 ``domains:``
-      声明段。而生产配置里 ``nodes`` 只有 hub 自己（工作节点靠自注册接入），
+      声明段。而生产配置里 ``nodes`` 只有 coordinator 自己（工作节点靠自注册接入），
       矩阵却引用了 ``zone-work``。**``domains:`` 段的存在意义正是解决这个**，
       verify 却没用它。
-    * hub 能力等级矛盾 —— 模板声明能力 ``level: summary``，
+    * coordinator 能力等级矛盾 —— 模板声明能力 ``level: summary``，
       应答上限却写 ``max_response_level: metadata``，自相矛盾。
 
     为什么 480 个测试没抓到？因为 ``TestProductionTemplate`` 测的是

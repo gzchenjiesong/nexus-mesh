@@ -39,7 +39,7 @@ class TestConcurrencyQuota:
     @covers("M5.F7")
     def test_concurrent_limit_blocks_second_task(self, app):
         """node-a 的 concurrent_tasks=1：领走一个后不能再投第二个。"""
-        app.transport.publish(from_node="hub", to_node="node-a",
+        app.transport.publish(from_node="coordinator", to_node="node-a",
                               task_type="demo.echo", params={"text": "1"},
                               idempotency_key="c1")
         assert app.usage_of("node-a").concurrent_now == 0
@@ -49,7 +49,7 @@ class TestConcurrencyQuota:
         assert app.usage_of("node-a").concurrent_now == 1
 
         with pytest.raises(PolicyDenied) as ei:
-            app.transport.publish(from_node="hub", to_node="node-a",
+            app.transport.publish(from_node="coordinator", to_node="node-a",
                                   task_type="demo.echo", params={"text": "2"},
                                   idempotency_key="c2")
         assert ei.value.rule_id == RuleId.QT_CONCURRENCY
@@ -58,7 +58,7 @@ class TestConcurrencyQuota:
     def test_concurrency_frees_after_completion(self, app):
         """任务完成后并发额度立即释放。"""
         from nxs.core.models import Artifact, Level
-        app.transport.publish(from_node="hub", to_node="node-a",
+        app.transport.publish(from_node="coordinator", to_node="node-a",
                               task_type="demo.echo", params={"text": "1"},
                               idempotency_key="c1")
         task = app.mailbox.poll("node-a")
@@ -67,7 +67,7 @@ class TestConcurrencyQuota:
                      data={"echo": "1", "level": "metadata"})])
 
         assert app.usage_of("node-a").concurrent_now == 0
-        app.transport.publish(from_node="hub", to_node="node-a",
+        app.transport.publish(from_node="coordinator", to_node="node-a",
                               task_type="demo.echo", params={"text": "2"},
                               idempotency_key="c2")   # 不应抛异常
 
@@ -76,7 +76,7 @@ class TestConcurrencyQuota:
         """用量不是估算值——直接反映后端队列的真实状态。"""
         assert app.usage_of("node-a").concurrent_now == 0
         for i in range(1):
-            app.transport.publish(from_node="hub", to_node="node-a",
+            app.transport.publish(from_node="coordinator", to_node="node-a",
                                   task_type="demo.echo", params={"text": str(i)},
                                   idempotency_key=f"k{i}")
         app.mailbox.poll("node-a")
@@ -91,7 +91,7 @@ class TestDailyQuota:
     def test_daily_count_is_real(self, app):
         """tasks_today 取自后端统计，不是常数 0 或 1。"""
         for i in range(3):
-            app.transport.publish(from_node="hub", to_node="node-b",
+            app.transport.publish(from_node="coordinator", to_node="node-b",
                                   task_type="demo.echo", params={"text": str(i)},
                                   idempotency_key=f"d{i}")
         assert app.usage_of("node-b").tasks_today == 3
@@ -116,12 +116,12 @@ class TestDailyQuota:
         a.approve("node-b")
 
         for i in range(2):
-            a.transport.publish(from_node="hub", to_node="node-b",
+            a.transport.publish(from_node="coordinator", to_node="node-b",
                                 task_type="demo.echo", params={"text": str(i)},
                                 idempotency_key=f"q{i}")
 
         with pytest.raises(PolicyDenied) as ei:
-            a.transport.publish(from_node="hub", to_node="node-b",
+            a.transport.publish(from_node="coordinator", to_node="node-b",
                                 task_type="demo.echo", params={"text": "over"},
                                 idempotency_key="q-over")
         assert ei.value.rule_id == RuleId.QT_TASKS_PER_DAY
@@ -133,7 +133,7 @@ class TestNoFakeStats:
     @covers("M5.F7")
     def test_usage_changes_with_activity(self, app):
         before = app.usage_of("node-b").tasks_today
-        app.transport.publish(from_node="hub", to_node="node-b",
+        app.transport.publish(from_node="coordinator", to_node="node-b",
                               task_type="demo.echo", params={"text": "x"},
                               idempotency_key="stat-1")
         after = app.usage_of("node-b").tasks_today
@@ -144,6 +144,6 @@ class TestNoFakeStats:
         """被拒的投递不应消耗配额——否则可以用拒绝把额度刷满。"""
         before = app.usage_of("node-a").tasks_today
         with pytest.raises(PolicyDenied):
-            app.transport.publish(from_node="hub", to_node="node-a",
+            app.transport.publish(from_node="coordinator", to_node="node-a",
                                   task_type="demo.unknown", params={})
         assert app.usage_of("node-a").tasks_today == before

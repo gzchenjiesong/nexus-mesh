@@ -76,7 +76,7 @@ def drill_cli() -> None:
 # ---------------------------------------------------------------------------
 
 def _build_live():
-    """装配一个真实 HTTP 的 hub + 两个节点。"""
+    """装配一个真实 HTTP 的 coordinator + 两个节点。"""
     from nxs.app import NexusApp
     from nxs.edge.client import HttpTransport
     from nxs.edge.gateway import Gateway
@@ -96,7 +96,7 @@ def _build_live():
     transports = {
         name: HttpTransport(gateway.base_url, node_id=name,
                             secret=app.config.secrets[name])
-        for name in ("hub", "node-a", "node-b")
+        for name in ("coordinator", "node-a", "node-b")
     }
     transports["_ops_secret"] = ops_secret
     return app, gateway, transports
@@ -109,7 +109,7 @@ def drill_core_loop(transports: dict) -> None:
 
     title("A · 核心闭环（真实 HTTP）")
     node = transports["node-a"]
-    hub = transports["hub"]
+    coordinator = transports["coordinator"]
 
     # A1 注册 —— outcome 有三分支，判据是 alive + 未批准
     registered = node.register(_card_of(transports))
@@ -125,7 +125,7 @@ def drill_core_loop(transports: dict) -> None:
     check("A2 批准后心跳变已批准", again.get("approved") is True)
 
     # A3 投递
-    delivery = hub.publish(from_node="hub", to_node="node-a",
+    delivery = coordinator.publish(from_node="coordinator", to_node="node-a",
                            task_type="demo.echo", params={"text": "hi"},
                            idempotency_key="drill-core-1")
     check("A3 投递 created=True", delivery.created is True)
@@ -165,20 +165,20 @@ def drill_boundaries(transports: dict) -> None:
     from nxs.core.models import Artifact, Level
 
     title("B · 安全断言（三层拦截）")
-    hub = transports["hub"]
+    coordinator = transports["coordinator"]
     node = transports["node-a"]
 
     # B2 矩阵层：往矩阵里没有的域投递
     try:
-        hub.publish(from_node="hub", to_node="node-b", task_type="demo.echo",
+        coordinator.publish(from_node="coordinator", to_node="node-b", task_type="demo.echo",
                     params={"text": "x"}, idempotency_key="drill-b2-x")
-        # hub→zone-b 在示例配置里是允许的，所以这条不必然报错
-        check("B2 矩阵层（示例配置 hub→zone-b 允许，跳过）", True)
+        # coordinator→zone-b 在示例配置里是允许的，所以这条不必然报错
+        check("B2 矩阵层（示例配置 coordinator→zone-b 允许，跳过）", True)
     except PolicyDenied:
         check("B2 矩阵层拒绝", True)
 
     # B3 字段边界：多一个字段
-    delivery = hub.publish(from_node="hub", to_node="node-a",
+    delivery = coordinator.publish(from_node="coordinator", to_node="node-a",
                            task_type="demo.echo", params={"text": "x"},
                            idempotency_key="drill-b3")
     task = node.poll("node-a")
@@ -236,7 +236,7 @@ def drill_ui(transports: dict) -> None:
     from nxs.ui import UiServer
 
     title("M15 · 观察窗（只读 · token · 只听本机）")
-    gateway_url = transports["hub"].base_url
+    gateway_url = transports["coordinator"].base_url
     secret = transports["_ops_secret"]
     server = UiServer(gateway_url, secret, port=0).start()
 
@@ -333,9 +333,9 @@ def drill_dead_config(transports: dict) -> None:
     check("bytes_per_response 已登记为未实现",
           "bytes_per_response" in registered)
 
-    hub = transports["hub"]
+    coordinator = transports["coordinator"]
     node = transports["node-a"]
-    hub.publish(from_node="hub", to_node="node-a", task_type="demo.echo",
+    coordinator.publish(from_node="coordinator", to_node="node-a", task_type="demo.echo",
                 params={"text": "big"}, idempotency_key="drill-dead-config")
     task = node.poll("node-a")
     if task is None:

@@ -35,12 +35,12 @@ SECRET = b"ui-test-secret-0123456789abcdef"
 
 
 # ---------------------------------------------------------------------------
-# fixture：一个真实跑起来的 hub + 观察窗
+# fixture：一个真实跑起来的 coordinator + 观察窗
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def live_hub():
-    """真实 HTTP 的 hub，含一个有中文名称/简介的节点。"""
+def live_coordinator():
+    """真实 HTTP 的 coordinator，含一个有中文名称/简介的节点。"""
     from nxs.app import NexusApp
     from nxs.core.models import RoleCard
     from nxs.edge.client import HttpTransport
@@ -71,9 +71,9 @@ def live_hub():
 
 
 @pytest.fixture
-def live_ui(live_hub):
+def live_ui(live_coordinator):
     """跑起来的观察窗（端口由系统分配）。"""
-    server = UiServer(live_hub, SECRET, port=0).start()
+    server = UiServer(live_coordinator, SECRET, port=0).start()
     yield server
     server.stop()
 
@@ -128,17 +128,17 @@ class TestBindAddress:
     """
 
     @covers("M15.F1")
-    def test_refuses_wildcard_bind(self, live_hub):
+    def test_refuses_wildcard_bind(self, live_coordinator):
         with pytest.raises(ConfigError) as ei:
-            UiServer(live_hub, SECRET, host="0.0.0.0", port=0)
+            UiServer(live_coordinator, SECRET, host="0.0.0.0", port=0)
         assert "拒绝绑定" in str(ei.value)
         # 错误信息必须给出替代方案，否则用户只会去找开关
         assert "SSH 隧道" in str(ei.value)
 
     @covers("M15.F1")
-    def test_refuses_lan_ip(self, live_hub):
+    def test_refuses_lan_ip(self, live_coordinator):
         with pytest.raises(ConfigError):
-            UiServer(live_hub, SECRET, host="192.168.1.10", port=0)
+            UiServer(live_coordinator, SECRET, host="192.168.1.10", port=0)
 
     @covers("M15.F1")
     def test_localhost_aliases_allowed(self):
@@ -214,13 +214,13 @@ class TestTokenAuth:
         assert b"Nexus Mesh" in body
 
     @covers("M15.F2")
-    def test_token_is_fresh_per_server(self, live_hub):
+    def test_token_is_fresh_per_server(self, live_coordinator):
         """★ 每次启动换新 token，绝不跨重启复用。
 
         如果复用，一个昨天泄漏的链接今天还能用。
         """
-        first = UiServer(live_hub, SECRET, port=0).start()
-        second = UiServer(live_hub, SECRET, port=0).start()
+        first = UiServer(live_coordinator, SECRET, port=0).start()
+        second = UiServer(live_coordinator, SECRET, port=0).start()
         try:
             assert first.token != second.token
             # 且两者都不短（256 位熵）
@@ -397,7 +397,7 @@ class TestDataPath:
         assert status == 200
         assert headers.get("Content-Type", "").startswith("application/json")
         data = json.loads(body)
-        assert set(data) >= {"at", "hub_url", "nodes", "metrics", "error"}
+        assert set(data) >= {"at", "coordinator_url", "nodes", "metrics", "error"}
         assert data["error"] is None
 
         # 手册里承诺的三个字段必须真的在
@@ -446,17 +446,17 @@ class TestDataPath:
 
     @covers("M15.F3")
     def test_unreachable_hub_reports_error_not_crash(self):
-        """★ hub 挂了，观察窗要**显示原因**而不是白屏。
+        """★ coordinator 挂了，观察窗要**显示原因**而不是白屏。
 
         观察窗最需要工作的时候恰恰是核心出问题的时候。
-        如果这里抛 500，浏览器只有一个空白页，看不出是 hub 停了
+        如果这里抛 500，浏览器只有一个空白页，看不出是 coordinator 停了
         还是 UI 自己坏了。
         """
         server = UiServer("http://127.0.0.1:1/nxs", SECRET, port=0).start()
         try:
             status, _, body = _get(f"{server.base_url}/api/state",
                                    cookie=f"nxs_ui={server.token}")
-            assert status == 200, "hub 挂了不该让 UI 也 500"
+            assert status == 200, "coordinator 挂了不该让 UI 也 500"
             data = json.loads(body)
             assert data["error"], "必须把错误原因带出来"
             assert data["nodes"] == []
@@ -528,7 +528,7 @@ class TestRenderSafety:
         assert "${" not in SHELL, "出现了模板字符串插值（会绕过 textContent 的保证）"
 
     @covers("M15.F6")
-    def test_self_reported_text_is_not_escaped_server_side(self, live_hub):
+    def test_self_reported_text_is_not_escaped_server_side(self, live_coordinator):
         """★ 服务端**不做** HTML 转义 —— 这是有意的分工。
 
         若服务端把 ``<`` 变成 ``&lt;``，会破坏合法名字（``A <-> B``），
@@ -576,13 +576,13 @@ class TestRenderSafety:
 # ---------------------------------------------------------------------------
 
 class TestSelfSignedCaSupport:
-    """hub 用自签证书时，客户端要能**显式**信任那张 CA。
+    """coordinator 用自签证书时，客户端要能**显式**信任那张 CA。
 
     ⚠ 这条来自真机部署：服务器没有域名，申不了 Let's Encrypt，
     只能用自签 CA。而 ``HttpTransport`` 原先**没有任何 SSL 参数** ——
     节点侧只能靠 ``SSL_CERT_FILE`` 环境变量，那是进程全局的：
     一旦设置就影响该进程所有 HTTPS 请求，而且同一进程连两个用不同 CA
-    的 hub 时根本表达不了。
+    的 coordinator 时根本表达不了。
 
     "信任哪个 CA" 应该是**每个连接**的决定，不是进程的决定。
     """
@@ -639,7 +639,7 @@ class TestSelfSignedCaSupport:
 
     @covers("M14.F2")
     def test_ops_client_accepts_ca_file(self):
-        """运维通道也要能走自签 —— 它在同一台机器上连 hub。"""
+        """运维通道也要能走自签 —— 它在同一台机器上连 coordinator。"""
         from nxs.edge.client import OpsClient
 
         ops = OpsClient("https://example.com/nxs", secret=b"x" * 32,

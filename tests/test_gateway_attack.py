@@ -48,7 +48,7 @@ from nxs.edge.gateway import PREFIX, Gateway
 from nxs.mgmt.config import ServerConfig
 
 SECRETS = {
-    "hub": b"hub-demo-secret-0123456789abcdef",
+    "coordinator": b"coordinator-demo-secret-0123456789abcdef",
     "node-a": b"node-a-demo-secret-0123456789abcdef",
     "node-b": b"node-b-demo-secret-0123456789abcdef",
 }
@@ -240,9 +240,9 @@ class TestIntegrityAttacks:
     @covers("M1.F9", "M1.F10")
     def test_signature_cannot_be_reused_with_another_method(self, gateway):
         """签名绑定了方法：GET 的签名不能当 POST 用。"""
-        body = _envelope_body(SECRETS["hub"], "hub")
-        headers = _signed_headers(SECRETS["hub"], method="GET",
-                                  path=f"{PREFIX}/publish", node_id="hub",
+        body = _envelope_body(SECRETS["coordinator"], "coordinator")
+        headers = _signed_headers(SECRETS["coordinator"], method="GET",
+                                  path=f"{PREFIX}/publish", node_id="coordinator",
                                   body=body)
         raw = _http(gateway.port, "POST", f"{PREFIX}/publish", headers, body)
         assert _status(raw) == 401
@@ -253,9 +253,9 @@ class TestIntegrityAttacks:
 
         这条挡住的是"截获请求、改任务参数、原样转发"这类攻击。
         """
-        body = _envelope_body(SECRETS["hub"], "hub", params={"text": "original"})
-        headers = _signed_headers(SECRETS["hub"], method="POST",
-                                  path=f"{PREFIX}/publish", node_id="hub",
+        body = _envelope_body(SECRETS["coordinator"], "coordinator", params={"text": "original"})
+        headers = _signed_headers(SECRETS["coordinator"], method="POST",
+                                  path=f"{PREFIX}/publish", node_id="coordinator",
                                   body=body)
         tampered = body.replace(b"original", b"tampered")
         raw = _http(gateway.port, "POST", f"{PREFIX}/publish", headers, tampered)
@@ -301,15 +301,15 @@ class TestReplayAttacks:
         挡它的是**信封自身的 nonce**——两套 nonce 共用同一个缓存，
         所以第一次之后这个信封就作废了。
         """
-        body = _envelope_body(SECRETS["hub"], "hub")
-        first_headers = _signed_headers(SECRETS["hub"], method="POST",
-                                       path=f"{PREFIX}/publish", node_id="hub",
+        body = _envelope_body(SECRETS["coordinator"], "coordinator")
+        first_headers = _signed_headers(SECRETS["coordinator"], method="POST",
+                                       path=f"{PREFIX}/publish", node_id="coordinator",
                                        body=body)
         assert _status(_http(gateway.port, "POST", f"{PREFIX}/publish",
                              first_headers, body)) == 200
 
-        fresh_headers = _signed_headers(SECRETS["hub"], method="POST",
-                                        path=f"{PREFIX}/publish", node_id="hub",
+        fresh_headers = _signed_headers(SECRETS["coordinator"], method="POST",
+                                        path=f"{PREFIX}/publish", node_id="coordinator",
                                         body=body)   # 新 nonce，新签名
         second = _http(gateway.port, "POST", f"{PREFIX}/publish",
                        fresh_headers, body)
@@ -331,16 +331,16 @@ class TestAuthorizationAttacks:
         若采信客户端自报的任务归属，任何已认证节点都能把产物写进
         别人的任务里，从而绕过权限矩阵。所以服务端按 id 回查并核对收件人。
         """
-        hub = HttpTransport(gateway.base_url, node_id="hub",
-                            secret=SECRETS["hub"])
-        published = hub.publish(from_node="hub", to_node="node-a",
+        coordinator = HttpTransport(gateway.base_url, node_id="coordinator",
+                            secret=SECRETS["coordinator"])
+        published = coordinator.publish(from_node="coordinator", to_node="node-a",
                                 task_type="demo.echo", params={"text": "mine"},
                                 idempotency_key="idem-steal")
 
         # node-b 拿到这个任务的 id（假设它通过某种方式知道了），试图冒领
         stolen = Task(
             id=published.task.id, idempotency_key="idem-steal",
-            type="demo.echo", session_id="", from_node="hub", to_node="node-b",
+            type="demo.echo", session_id="", from_node="coordinator", to_node="node-b",
             params={"text": "mine"},
         )
         node_b = HttpTransport(gateway.base_url, node_id="node-b",
@@ -351,9 +351,9 @@ class TestAuthorizationAttacks:
 
     @covers("M1.F11", "M1.F16")
     def test_fabricated_from_node_is_ignored(self, gateway):
-        """body 里声称 ``from_node=hub`` 无效——发送方取自验签结果。
+        """body 里声称 ``from_node=coordinator`` 无效——发送方取自验签结果。
 
-        实测：node-b 发布时谎称自己是 hub，最终仍以 node-b 的身份进入策略判定，
+        实测：node-b 发布时谎称自己是 coordinator，最终仍以 node-b 的身份进入策略判定，
         于是被矩阵拒绝（zone-b → zone-a 无规则）。
         """
         node_b_secret = SECRETS["node-b"]
@@ -381,7 +381,7 @@ class TestAuthorizationAttacks:
 
     @covers("M1.F11")
     def test_unauthenticated_publish_gets_nothing(self, gateway):
-        body = _envelope_body(SECRETS["hub"], "hub")
+        body = _envelope_body(SECRETS["coordinator"], "coordinator")
         raw = _http(gateway.port, "POST", f"{PREFIX}/publish", {}, body)
         assert _status(raw) == 401
 
@@ -541,10 +541,10 @@ class TestInformationLeakage:
 
         用一段特征明显的字符串做任务类型，验证响应里不含它。
         """
-        body = _envelope_body(SECRETS["hub"], "hub",
+        body = _envelope_body(SECRETS["coordinator"], "coordinator",
                               task_type="secret.marker.LEAKME")
-        headers = _signed_headers(SECRETS["hub"], method="POST",
-                                  path=f"{PREFIX}/publish", node_id="hub",
+        headers = _signed_headers(SECRETS["coordinator"], method="POST",
+                                  path=f"{PREFIX}/publish", node_id="coordinator",
                                   body=body)
         raw = _http(gateway.port, "POST", f"{PREFIX}/publish", headers, body)
         assert b"LEAKME" not in raw, "拒绝响应回显了输入内容"

@@ -131,7 +131,7 @@ make demo-net      # 同一套九步断言，走真实 HTTP
 协调端（有独立 IP 的那台）：
 
 ```bash
-export NXS_SECRET_HUB=$(openssl rand -hex 32)
+export NXS_SECRET_COORDINATOR=$(openssl rand -hex 32)
 export NXS_SECRET_NODE_A=$(openssl rand -hex 32)
 export NXS_OPS_SECRET=$(openssl rand -hex 32)   # ⚠ 不设 = 运维接口关闭
 nxs doctor --config config/local.yaml --production   # 先自检
@@ -145,7 +145,7 @@ from nxs.core.models import Level, RoleCard
 from nxs.edge.client import HttpTransport
 from nxs.sdk import NodeClient, NodeConfig
 
-transport = HttpTransport("https://hub.example.com:8443/nxs",
+transport = HttpTransport("https://coordinator.example.com:8443/nxs",
                           node_id="node-a", secret=secret)
 client = NodeClient(
     NodeConfig("node-a",
@@ -162,7 +162,7 @@ client.run_forever()        # 没装 SSE 也能跑：纯短轮询
 首次启动会打印"已注册但**尚未批准**"——这是正常的。去服务器上批准：
 
 ```bash
-nxs ops approve node-a --url https://hub.example.com/nxs
+nxs ops approve node-a --url https://coordinator.example.com/nxs
 ```
 
 > ⚠ **角色卡必须确定性生成**（不要放时间戳/随机串）。
@@ -180,7 +180,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.11.4）
+### 已实现（v0.12.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -384,11 +384,11 @@ goes through `kind=reference`, where a 10 MB file costs 96 bytes of coordinates.
 bypass found along the way: `kind="freetext"` was decorative — a node could
 claim it, skip sanitisation, and look safe (364 tests).
 
-**v0.6.0** — it can dispatch on its own. Omit `to_node` and the hub picks a
+**v0.6.0** — it can dispatch on its own. Omit `to_node` and the coordinator picks a
 provider by capability, in a **deterministic** order (same-domain →
 least-sufficient level → lowest load ratio → node id), then walks the
 candidates through the policy matrix until one is allowed (353 tests).
-The candidate list and the reason a match failed never leave the hub —
+The candidate list and the reason a match failed never leave the coordinator —
 "who can do X" is topology (`nxs candidates` is operator-only).
 
 * **Transport**: `POST /nxs/register` · `POST /nxs/ack` · `POST /nxs/publish`
@@ -399,7 +399,7 @@ The candidate list and the reason a match failed never leave the hub —
 * **Egress-only**: nodes only dial out and never listen; the gateway never
   initiates a connection — push rides the connection the node opened
 * **Two response boundaries**: the node trims its own output *before* sending
-  (so a compromised hub gets nothing extra), the hub re-checks authoritatively
+  (so a compromised coordinator gets nothing extra), the coordinator re-checks authoritatively
 * **Auto-matching (M4)**: four-level deterministic ordering, no randomness
   anywhere — "why did it go to A and not B" is a reproducible query, not a
   mystery. Candidates are never exposed over HTTP; failed matches report the

@@ -84,16 +84,18 @@ def build(force_memory: bool = True, config_path: str | None = None) -> NexusApp
     且不需要清理临时文件。真实部署用 ``stores: sqlite``。
 
     :param config_path: 省略时用仓库自带的示例配置。
-        demo 断言的笑是**示例拓扑**（hub / node-a / node-b），
+        demo 断言的笑是**示例拓扑**（coordinator / node-a / node-b），
         换配置只在拓扑一致时有意义。
     """
     cfg_path = Path(config_path) if config_path else (
         Path(__file__).resolve().parent.parent / "config" / "nxs.example.yaml"
     )
+    # 协调节点的 ID 是 coordinator（术语表规定的叫法）；
+    # 它的**域**叫 cloud —— 域是位置，节点是角色，两者刻意不同名。
     env = {
         f"NXS_SECRET_{m.upper().replace('-', '_')}":
             f"{m}-demo-secret-0123456789abcdef"
-        for m in ("hub", "node-a", "node-b")
+        for m in ("coordinator", "node-a", "node-b")
     }
     app = NexusApp.from_config_path(str(cfg_path), env=env, force_memory=force_memory)
     app.start()
@@ -127,7 +129,7 @@ def make_transports(app: NexusApp, *, net: bool) -> tuple[dict[str, Any], Any]:
     """
     if not net:
         t = app.transport
-        return {"hub": t, "node-a": t, "node-b": t}, None
+        return {"coordinator": t, "node-a": t, "node-b": t}, None
 
     from nxs.edge.client import HttpTransport
     from nxs.edge.gateway import Gateway
@@ -156,11 +158,11 @@ def main(net: bool = False, config_path: str | None = None) -> int:
 
     app = build(config_path=config_path)
     transports, gateway = make_transports(app, net=net)
-    hub = transports["hub"]
+    coordinator = transports["coordinator"]
     cl = clients(app, transports)
     failures: list[str] = []
     try:
-        failures = _run_steps(app, hub, transports, cl, net=net)
+        failures = _run_steps(app, coordinator, transports, cl, net=net)
     finally:
         if gateway is not None:
             gateway.stop()
@@ -177,7 +179,7 @@ def main(net: bool = False, config_path: str | None = None) -> int:
     return 0
 
 
-def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
+def _run_steps(app: NexusApp, coordinator: Any, transports: dict[str, Any],
                cl: dict[str, NodeClient], *, net: bool) -> list[str]:
     """九步流程本体。**两种传输共用这一段**，不复制两份。"""
     total = 9
@@ -191,7 +193,7 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
     detail(f"节点 {len(app.config.nodes)} 个 · 矩阵规则 "
            f"{len(app.config.policy.rules)} 条 · 后端 {backend}")
     if net:
-        detail(f"网关监听 {hub.base_url}（节点出站连入，网关不主动连节点）")
+        detail(f"网关监听 {coordinator.base_url}（节点出站连入，网关不主动连节点）")
 
     # ---- 2 ----
     step(2, total, "节点注册与批准")
@@ -206,7 +208,7 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
 
     # ---- 3 ----
     step(3, total, "正常任务：投递 → 领取 → 执行 → 回传")
-    d = hub.publish(from_node="hub", to_node="node-a",
+    d = coordinator.publish(from_node="coordinator", to_node="node-a",
                     task_type="demo.echo", params={"text": "hello"},
                     session_id=sess, idempotency_key="idem-1")
     ok(f"投递成功  task={d.task.id}  实际上限={d.effective_max_level}")
@@ -220,7 +222,7 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
     # ---- 4 ----
     step(4, total, "★ 安全断言①  未注册的任务类型")
     try:
-        hub.publish(from_node="hub", to_node="node-a",
+        coordinator.publish(from_node="coordinator", to_node="node-a",
                     task_type="demo.unknown", params={}, session_id=sess)
         failures.append("第 4 步：未注册类型竟被接受")
         print(c("       ✗ 未注册类型竟被接受", "bad"))
@@ -231,13 +233,13 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
     # ---- 5 ----
     step(5, total, "★ 安全断言②  越界字段（核心收不到内容）")
     # 构造一个"诚实但越界"的节点：它产出了白名单之外的字段
-    t5 = hub.publish(from_node="hub", to_node="node-a",
+    t5 = coordinator.publish(from_node="coordinator", to_node="node-a",
                      task_type="demo.echo", params={"text": "x"},
                      session_id=sess, idempotency_key="idem-5",
                      ).task
     leaked_payload = {"echo": "x", "level": "metadata", "internal_note": "不该外传的内容"}
     try:
-        # ★ 由 node-a 自己的传输回传。**不能让 hub 代它回传**——
+        # ★ 由 node-a 自己的传输回传。**不能让 coordinator 代它回传**——
         #   服务端只接受"任务收件人本人"的回传（S11）。
         #   同进程模式下三个节点共用一个传输对象，但传的 node_id 仍是 node-a，
         #   所以两种模式走的是同一条逻辑。
@@ -257,7 +259,7 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
 
     # 6a 角色层：最严节点连发布权都没有
     try:
-        transports["node-a"].publish(from_node="node-a", to_node="hub",
+        transports["node-a"].publish(from_node="node-a", to_node="coordinator",
                                      task_type="demo.synthesize", params={},
                                      session_id=sess)
         failures.append("第 6a 步：无发布权的节点竟能发布")
@@ -287,7 +289,7 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
 
     # ---- 7 ----
     step(7, total, "★ 断电恢复：节点被 kill 后任务自动回到队列")
-    t7 = hub.publish(from_node="hub", to_node="node-a",
+    t7 = coordinator.publish(from_node="coordinator", to_node="node-a",
                      task_type="demo.echo", params={"text": "recover"},
                      session_id=sess, idempotency_key="idem-7").task
     claimed = transports["node-a"].poll("node-a")
@@ -314,12 +316,12 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
     # 前七步都是 Direct 投递（写死 to_node）。这一步验证 M4：
     # 不指定目标时，系统按能力筛候选、确定性排序、逐个过策略。
     detail("候选名单（运维视角，不经 HTTP 暴露）：")
-    rows = app.transport.candidates(task_type="demo.echo", from_node="hub")
+    rows = app.transport.candidates(task_type="demo.echo", from_node="coordinator")
     for r in rows:
         print(f"         {r['node_id']:<10} load={r['load']}/{r['capacity']} "
               f"level={r['level']} same_domain={r['same_domain']}")
 
-    auto = hub.publish(from_node="hub", task_type="demo.echo",
+    auto = coordinator.publish(from_node="coordinator", task_type="demo.echo",
                        params={"text": "auto"}, session_id=sess,
                        idempotency_key="idem-8")
     ok(f"自动选中 {auto.task.to_node}（未指定 to_node）")
@@ -328,7 +330,7 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
     #   随机挑选会让"昨天能跑今天不能"变成不可复现的问题。
     runs = [
         [r["node_id"] for r in
-         app.transport.candidates(task_type="demo.echo", from_node="hub")]
+         app.transport.candidates(task_type="demo.echo", from_node="coordinator")]
         for _ in range(10)
     ]
     if len({tuple(r) for r in runs}) == 1:
@@ -366,22 +368,22 @@ def _run_steps(app: NexusApp, hub: Any, transports: dict[str, Any],
     # ★ 演示：制造一次"权限试探"，看它是否被识别
     #   单撞一条规则是配错（良性），撞多种互不相关的规则才像在摸边界。
     #
-    #   三笔**全部由 hub 发出**——这是刻意的：规则按节点归集，
+    #   三笔**全部由 coordinator 发出**——这是刻意的：规则按节点归集，
     #   分散到不同节点上就凑不出"同一个节点撞多种规则"这个形态，
     #   而那正是要被识别的信号。
-    detail("现在制造一次试探：让 hub 依次撞 3 种不同的规则")
+    detail("现在制造一次试探：让 coordinator 依次撞 3 种不同的规则")
     probes = [
-        ("未知类型", lambda: hub.publish(
-            from_node="hub", to_node="node-a", task_type="demo.ghost",
+        ("未知类型", lambda: coordinator.publish(
+            from_node="coordinator", to_node="node-a", task_type="demo.ghost",
             params={}, session_id=sess)),
-        ("未知节点", lambda: hub.publish(
-            from_node="hub", to_node="ghost-node", task_type="demo.echo",
+        ("未知节点", lambda: coordinator.publish(
+            from_node="coordinator", to_node="ghost-node", task_type="demo.echo",
             params={}, session_id=sess)),
-        ("矩阵不允许", lambda: hub.publish(
-            # 矩阵里**没有** hub → hub 这条规则（示例配置只配了
-            # hub→zone-a、hub→zone-b、zone-b→hub）。协调节点把活派给自己
+        ("矩阵不允许", lambda: coordinator.publish(
+            # 矩阵里**没有** coordinator → coordinator 这条规则（示例配置只配了
+            # coordinator→zone-a、coordinator→zone-b、zone-b→coordinator）。协调节点把活派给自己
             # 这件事本身没有意义，所以没有规则——正是"默认拒绝"的体现。
-            from_node="hub", to_node="hub", task_type="demo.synthesize",
+            from_node="coordinator", to_node="coordinator", task_type="demo.synthesize",
             params={}, session_id=sess)),
     ]
     hit: list[str] = []

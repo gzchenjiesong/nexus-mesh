@@ -104,7 +104,7 @@ def envelope_overhead(file_bytes: int) -> dict:
     art = Artifact(level=Level.METADATA, kind="structured",
                    data={"echo": b64, "level": "metadata"})
     task = Task(id="t-probe", idempotency_key="k", type="demo.echo",
-                session_id="probe", from_node="node-a", to_node="hub",
+                session_id="probe", from_node="node-a", to_node="coordinator",
                 mode=TaskMode.SYNC, artifacts=[art])
     wire = json.dumps(
         envelope_mod.envelope_for(b"x" * 32, "node-a", task, session_id="probe").to_dict(),
@@ -120,13 +120,13 @@ def envelope_overhead(file_bytes: int) -> dict:
 
 def probe_network(gateway, transports, sizes: list[int], *, verbose: bool) -> list[dict]:
     """真的走 HTTP，逐级试探在哪被拒。"""
-    hub = transports["hub"]
+    coordinator = transports["coordinator"]
     node = transports["node-a"]
     results: list[dict] = []
 
     for n in sizes:
         key = f"probe-{n}"
-        hub.publish(from_node="hub", to_node="node-a", task_type="demo.echo",
+        coordinator.publish(from_node="coordinator", to_node="node-a", task_type="demo.echo",
                     params={"text": "p"}, idempotency_key=key)
         task = node.poll("node-a")
         payload = base64.b64encode(b"x" * n).decode()
@@ -161,8 +161,8 @@ def main() -> int:
     transports = {
         "node-a": HttpTransport(gateway.base_url, node_id="node-a",
                                 secret=app.config.secrets["node-a"]),
-        "hub": HttpTransport(gateway.base_url, node_id="hub",
-                             secret=app.config.secrets["hub"]),
+        "coordinator": HttpTransport(gateway.base_url, node_id="coordinator",
+                             secret=app.config.secrets["coordinator"]),
     }
     limit = gateway.server_config.max_body_bytes
     print(f"\n  Nexus Mesh · 产物大小探测")

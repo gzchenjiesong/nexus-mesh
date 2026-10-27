@@ -223,7 +223,7 @@ class InProcessTransport:
     def register(self, card: RoleCard) -> dict:
         """同进程注册：走**可信**入口。
 
-        这里没有"节点自己说了算"的问题——调用方与 hub 在同一个进程里，
+        这里没有"节点自己说了算"的问题——调用方与 coordinator 在同一个进程里，
         中间不存在信任边界。真实部署走 HTTP，那条路径由网关用
         ``registry.register_from_node``（不可信入口）处理。
         """

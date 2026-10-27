@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **451** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
+共 **457** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -261,7 +261,7 @@ _（未实现，暂无功能点）_
 
 | 编号 | 准则 | 守护测试类 | 覆盖 |
 |---|---|---|---|
-| **C1** | 术语统一 | `TestTerminology` | 6 |
+| **C1** | 术语统一 | `TestTerminology` | 12 |
 | **C2** | 分层纪律（依赖单向、Core 不做 I/O） | `TestLayerDirection` | 3 |
 | **C3** | 不得出现任何节点的名字 | `TestNoNodeHardcoding` | 4 |
 | **C4** | 拒绝时不得泄露内容 | `TestDenyNeverLeaks` | 6 |

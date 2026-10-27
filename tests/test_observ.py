@@ -455,7 +455,7 @@ class TestCollect:
         registry.register(card("node-a"), approved=True)
         queue = MemoryQueueStore()
         queue.enqueue(Task(id="t1", idempotency_key="k1", type="job.run",
-                           session_id="s", from_node="hub", to_node="node-a",
+                           session_id="s", from_node="coordinator", to_node="node-a",
                            status=TaskStatus.SUBMITTED))
 
         # 计数器里**没有**这个任务的任何记录
@@ -629,8 +629,8 @@ class TestMetricsEndpoint:
         from nxs.sdk import NodeClient, NodeConfig
 
         app = live["app"]
-        hub = HttpTransport(live["gateway"].base_url, node_id="hub",
-                            secret=app.config.secrets["hub"])
+        coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
+                            secret=app.config.secrets["coordinator"])
         node = HttpTransport(live["gateway"].base_url, node_id="node-a",
                              secret=app.config.secrets["node-a"])
         client = NodeClient(NodeConfig(
@@ -643,7 +643,7 @@ class TestMetricsEndpoint:
         ), node)
 
         for i in range(3):
-            hub.publish(from_node="hub", to_node="node-a", task_type="demo.echo",
+            coordinator.publish(from_node="coordinator", to_node="node-a", task_type="demo.echo",
                         params={"text": f"t{i}"}, idempotency_key=f"m{i}")
             task = node.poll("node-a")
             if task:

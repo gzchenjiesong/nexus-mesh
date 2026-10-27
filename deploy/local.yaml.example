@@ -60,19 +60,19 @@ policy:
   #   没有匹配规则的「域 × 域」一律拒绝（默认拒绝）。
   matrix:
     # 协调域 → 工作域：只允许这两类任务，应答上限摘要级
-    - from_domain: hub
+    - from_domain: cloud
       to_domain: zone-work
       allow_types: ["work.calendar", "work.summary"]
       max_level: summary
 
     # 工作域 → 协调域：允许上报，但不允许它给别人派活
     - from_domain: zone-work
-      to_domain: hub
+      to_domain: cloud
       allow_types: ["work.*"]
       max_level: summary
 
     # 家里那台（低优先级，暂不开放）
-    # - from_domain: hub
+    # - from_domain: cloud
     #   to_domain: zone-home
     #   allow_types: ["home.*"]
     #   max_level: fragment
@@ -84,7 +84,7 @@ policy:
 #
 #   矩阵的维度是「域 × 类型」，而工作电脑上的节点**在协调节点启动时还不存在**
 #   （它靠自注册接入）。所以域必须在这里显式声明，否则矩阵里写
-#   `hub → zone-work` 会被判为"引用了不存在的域"。
+#   `cloud → zone-work` 会被判为"引用了不存在的域"。
 #
 #   ⚠ 声明了这一段，就等于告诉系统"这个部署会接纳自注册节点"——
 #     因此矩阵里的**具体类型名不再做启动时静态核对**（那些节点的能力
@@ -96,8 +96,8 @@ policy:
 #   另外：节点自报的域必须属于这里声明的域之一，否则运维批准时会看到
 #   一个陌生的域名而无法判断。**信任域是运维划的边界，不是节点自选的房间。**
 domains:
-  - name: hub
-    description: 协调域（云端，人机入口）
+  - name: cloud
+    description: 协调域（云端，人机入口）。域名取 cloud 而不是 coordinator——域是**位置**，节点是**角色**
   - name: zone-work
     description: 办公内网（工作电脑上的执行节点）
   - name: zone-home
@@ -113,8 +113,8 @@ domains:
 #   就在这里登记它的 node_id 与 domain（哪怕其余字段简写）。
 #   配置里有的节点，domain 一律以配置为准。
 nodes:
-  - node_id: hub
-    domain: hub
+  - node_id: coordinator
+    domain: cloud
     display_name: "Coordinator"
     roles:
       issuer: true
