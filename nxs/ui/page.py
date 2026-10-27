@@ -266,11 +266,39 @@ function showError(msg) {
   host.appendChild(el("div", "err", msg));
 }
 
+function showUnauthorized() {
+  // ★ 401 不等于"坏了"。它最常见的原因是**服务重启过**：
+  //   token 每次启动重新生成（不落盘、不跨重启），旧链接随之失效。
+  //   只写"未授权"会让人以为系统出故障，所以这里说清三件事：
+  //   为什么、不是故障、怎么办。
+  const host = document.getElementById("error");
+  host.replaceChildren();
+  const box = el("div", "err");
+  box.appendChild(el("div", null, "登录凭据已失效 —— 这不代表系统出了问题"));
+  // 统一用 el() 建节点（页面里只有这一个 DOM 构造入口，
+  // 便于一眼审查"有没有哪里用了会解析标记的 API"）
+  const ul = el("ul");
+  ul.style.cssText = "margin:10px 0 0; padding-left:20px; line-height:1.9";
+  for (const line of [
+    "观察窗的 token 每次启动重新生成（不落盘、不跨重启），所以服务一重启，旧链接就失效。",
+    "重新打开时用访问服务器的那个脚本重新取链接（例如 nxs-view.sh），它会自动带上当前 token。",
+    "如果你只是刷新了这个标签页，那个 token 已经过期了 —— 换新链接即可。",
+  ]) {
+    ul.appendChild(el("li", null, line));
+  }
+  box.appendChild(ul);
+  host.appendChild(box);
+
+  document.getElementById("stamp").textContent = "凭据已失效";
+  // 别继续轮询：每 5 秒再撞一次 401 只会刷日志，也不会自己变好
+  if (window.__nxsTimer) clearInterval(window.__nxsTimer);
+}
+
 async function refresh() {
   try {
     const res = await fetch("api/state", { headers: { "Accept": "application/json" } });
     if (res.status === 401) {
-      document.getElementById("stamp").textContent = "未授权 —— 请用带 token 的链接打开";
+      showUnauthorized();
       return;
     }
     if (!res.ok) throw new Error("HTTP " + res.status);
@@ -287,7 +315,7 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 5000);
+window.__nxsTimer = setInterval(refresh, 5000);
 </script>
 </body>
 </html>

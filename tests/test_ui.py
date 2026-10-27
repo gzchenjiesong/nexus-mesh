@@ -706,3 +706,64 @@ class TestSelfSignedCaSupport:
         finally:
             if old is not None:
                 os.environ["NXS_CA_FILE"] = old
+
+
+class TestUnauthorizedUx:
+    """★ 401 的提示必须说清「为什么」与「怎么办」。
+
+    ⚠ **这条来自用户的真实困惑。** 他刷新页面看到「未授权」，
+    第一反应是「是不是坏了、要不要你重新打开一下」。
+
+    而实际上这只是**服务重启过**——token 每次启动重新生成
+    （不落盘、不跨重启是刻意的安全设计），旧链接随之失效。
+
+    原来的提示只有一行小字「未授权 —— 请用带 token 的链接打开」：
+    * 位置不显眼（右上角 stamp）
+    * 没说原因，用户会以为是故障
+    * 没说怎么办（"带 token 的链接"从哪来？）
+
+    一次因为**正常安全行为**而产生的困惑，是这个提示的失败，
+    不是用户的误解。
+    """
+
+    @covers("M15.F2")
+    def test_401_explains_it_is_not_a_failure(self):
+        text = SHELL
+        assert "不代表系统出了问题" in text, (
+            "401 提示必须明确说「这不是故障」—— 否则用户会以为系统挂了"
+        )
+
+    @covers("M15.F2")
+    def test_401_explains_why_token_expired(self):
+        text = SHELL
+        assert "每次启动重新生成" in text, (
+            "要说清 token 为什么失效：每次启动重新生成"
+        )
+
+    @covers("M15.F2")
+    def test_401_tells_what_to_do(self):
+        text = SHELL
+        assert "nxs-view.sh" in text or "脚本重新取" in text, (
+            "要给出可执行的做法，不能只说「请用带 token 的链接」（从哪来？）"
+        )
+
+    @covers("M15.F2")
+    def test_401_stops_polling(self):
+        """★ 401 之后必须停掉轮询。
+
+        不停的话每 5 秒再撞一次 401：既不会自己变好，又把日志刷满。
+        """
+        text = SHELL
+        assert "clearInterval" in text, (
+            "401 后没有停止轮询 —— 会每 5 秒撞一次，白刷日志"
+        )
+
+    @covers("M15.F2")
+    def test_401_shown_in_main_area_not_only_corner(self):
+        """提示要出现在主区域，不能只在右上角那行小字里。"""
+        text = SHELL
+        # showUnauthorized 里应该往 error 容器里塞内容
+        assert 'getElementById("error")' in text
+        assert "showUnauthorized" in text, (
+            "应有专门的 401 渲染函数，而不是只改一行 stamp 文字"
+        )
