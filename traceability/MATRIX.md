@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **529** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
+共 **557** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -31,7 +31,7 @@
 | **M1.F6** | 凭据管理（轮换／吊销即时生效） | `nxs/edge/auth.py:Authenticator.set_secret/revoke` | G2 | P0 | S10 | 1 |
 | **M1.F7** | 成员认证编排（四步校验顺序） | `nxs/edge/auth.py:Authenticator.verify` | G2 | P0 | S4 | 4 |
 | **M1.F8** | 信封格式校验（版本与结构） | `nxs/core/envelope.py:Envelope.from_dict` | G1,G2 | P0 | — | 1 |
-| **M1.F9** | 请求签名生成（方法+路径+节点+时间+nonce+体摘要） | `nxs/edge/httpsig.py:sign_request/compute_signature` | G2 | P0 | — | 10 |
+| **M1.F9** | 请求签名生成（方法+路径+节点+时间+nonce+体摘要） | `nxs/edge/httpsig.py:sign_request/compute_signature` | G2 | P0 | — | 14 |
 | **M1.F10** | 请求签名校验（与信封共用 nonce 缓存与吊销表） | `nxs/edge/auth.py:Authenticator.verify_request` | G2 | P0 | S4 | 8 |
 | **M1.F11** | HTTP 端点分发与规则→状态码映射 | `nxs/edge/gateway.py:_Handler._dispatch/status_for` | G1,G2 | P0 | S11 | 18 |
 | **M1.F12** | 请求体上限（读入前按 Content-Length 判定） | `nxs/edge/gateway.py:_Handler._read_body` | G2 | P1 | — | 3 |
@@ -233,7 +233,7 @@ _（未实现，暂无功能点）_
 |---|---|---|---|---|---|---|
 | **M14.F1** | 运维身份与端点开关（未配密钥则整体不存在） | `nxs/edge/gateway.py:Gateway.ops_enabled/_ops_secret_from_env` | G3,G2 | P0 | — | 10 |
 | **M14.F2** | 远程批准节点（绑定当前那张角色卡） | `nxs/edge/gateway.py:_Handler._handle_ops（approve）` | G3 | P0 | — | 6 |
-| **M14.F3** | 远程吊销（注册表与认证层同时生效） | `nxs/edge/gateway.py:_Handler._handle_ops（revoke）` | G3 | P0 | S10 | 2 |
+| **M14.F3** | 远程吊销（注册表与认证层同时生效） | `nxs/edge/gateway.py:_Handler._handle_ops（revoke）` | G3 | P0 | S10 | 26 |
 | **M14.F4** | 远程释放过期租约 | `nxs/edge/gateway.py:_Handler._handle_ops（release）` | G3 | P1 | — | 2 |
 | **M14.F5** | 节点状态查询（含未批准节点） | `nxs/edge/gateway.py:_Handler._handle_ops（nodes）` | G3 | P1 | — | 3 |
 | **M14.F6** | 运维动作审计（谁在何时给谁放了行） | `nxs/edge/gateway.py:Gateway.record_ops` | G3 | P0 | — | 1 |

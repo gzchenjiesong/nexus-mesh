@@ -1,0 +1,335 @@
+"""`nxs-cli` 的凭据解析与命令测试。
+
+核心关注点：**Agent 的上下文里不该出现密钥**。
+所以凭据按身份存在文件里，Agent 只报自己的名字。
+"""
+
+from __future__ import annotations
+
+import sys
+
+import pytest
+
+from conftest import REPO_ROOT, covers
+
+sys.path.insert(0, str(REPO_ROOT))
+
+from nxs.cli.actor import (  # noqa: E402
+    MIN_SECRET_LENGTH,
+    load_actor,
+    resolve_actor,
+    write_actor_file,
+)
+from nxs.core.errors import ConfigError  # noqa: E402
+
+SECRET = "a" * 64
+
+
+def _write(workdir, name: str, *, node_id: str | None = None,
+           secret: str = SECRET, url: str = "https://x/nxs",
+           ca: str | None = None):
+    """在 workdir 下造一份凭据文件。"""
+    d = workdir / "agents"
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"NXS_NODE_ID={node_id if node_id is not None else name}",
+        f"NXS_COORDINATOR_URL={url}",
+        f"NXS_SECRET={secret}",
+    ]
+    if ca:
+        lines.append(f"NXS_CA_FILE={ca}")
+    (d / f"{name}.env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return d
+
+
+class TestLoadActor:
+    """按名字加载身份。"""
+
+    @covers("M14.F3")
+    def test_loads_all_fields(self, workdir):
+        d = _write(workdir, "taskflow", ca="/etc/nexus-mesh/tls/ca.pem")
+        a = load_actor("taskflow", actor_dir=d, env={})
+        assert a.node_id == "taskflow"
+        assert a.url == "https://x/nxs"
+        assert a.secret == SECRET.encode()
+        assert a.ca_file == "/etc/nexus-mesh/tls/ca.pem"
+        assert a.source.endswith("taskflow.env")
+
+    @covers("M14.F3")
+    def test_url_trailing_slash_stripped(self, workdir):
+        """URL 末尾的斜杠要去掉 —— 签名覆盖路径，多一个斜杠就验不过。"""
+        d = _write(workdir, "a1", url="https://x/nxs/")
+        assert load_actor("a1", actor_dir=d, env={}).url == "https://x/nxs"
+
+    @covers("M14.F3")
+    def test_ca_is_optional(self, workdir):
+        """公网证书场景不需要 CA。"""
+        d = _write(workdir, "a1")
+        assert load_actor("a1", actor_dir=d, env={}).ca_file is None
+
+    @covers("M14.F3")
+    def test_masked_never_leaks_secret(self, workdir):
+        """★ 可打印形式里**绝不能有密钥**。
+
+        这个方法会被用来打日志、显示错误上下文。
+        密钥一旦进了日志或 LLM 上下文，就没法再当秘密了。
+        """
+        d = _write(workdir, "a1")
+        a = load_actor("a1", actor_dir=d, env={})
+        text = a.masked()
+        assert SECRET not in text
+        assert "a1" in text  # 身份要在
+        assert "https://x/nxs" in text
+
+    @covers("M14.F3")
+    def test_comments_and_blank_lines_tolerated(self, workdir):
+        d = workdir / "agents"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "a1.env").write_text(
+            "# 这是注释\n\nNXS_NODE_ID=a1\n\nNXS_COORDINATOR_URL=https://x/nxs\n"
+            f"NXS_SECRET={SECRET}\n",
+            encoding="utf-8",
+        )
+        assert load_actor("a1", actor_dir=d, env={}).node_id == "a1"
+
+
+class TestActorNameHardening:
+    """★ 身份名的形状必须收紧 —— 它同时是文件名。"""
+
+    @covers("M14.F3")
+    @pytest.mark.parametrize("bad", [
+        "../etc/passwd",      # 路径穿越
+        "/abs/path",          # 绝对路径
+        "a/b",                # 带斜杠
+        "..",                 # 上级目录
+        "Taskflow",           # 大写（会与环境变量命名规则不一致）
+        "",                   # 空
+        "a b",                # 空格
+        "-lead",              # 以连字符开头
+        "x" * 100,            # 过长
+    ])
+    def test_rejects_bad_names(self, workdir, bad):
+        d = _write(workdir, "ok")
+        with pytest.raises(ConfigError):
+            load_actor(bad, actor_dir=d, env={})
+
+    @covers("M14.F3")
+    def test_accepts_normal_names(self, workdir):
+        d = _write(workdir, "hermes-working")
+        assert load_actor("hermes-working", actor_dir=d, env={}).node_id == \
+            "hermes-working"
+
+
+class TestSelfConsistency:
+    """★ 文件里的 NXS_NODE_ID 必须等于文件名。
+
+    ⚠ 这是最重要的一条。没有它，一个 Agent 可以把 ``--as coordinator``
+    指向自己的文件 —— 若文件里的 NXS_NODE_ID 不被校验，
+    它就会以 coordinator 的身份签名。
+
+    那不只是越权：审计日志会指向**错误的节点**，
+    事后追查时会认为是 coordinator 干的。
+    """
+
+    @covers("M14.F3")
+    def test_mismatch_is_rejected(self, workdir):
+        d = _write(workdir, "taskflow", node_id="coordinator")
+        with pytest.raises(ConfigError) as ei:
+            load_actor("taskflow", actor_dir=d, env={})
+        msg = str(ei.value)
+        assert "NXS_NODE_ID" in msg
+        assert "coordinator" in msg
+
+    @covers("M14.F3")
+    def test_missing_node_id_key_is_tolerated(self, workdir):
+        """没写 NXS_NODE_ID 时用文件名 —— 不算矛盾。
+
+        刻意宽松：文件名本身就是身份，多写一遍是冗余。
+        但**写了就必须一致**（见上一条）。
+        """
+        d = workdir / "agents"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "a1.env").write_text(
+            f"NXS_COORDINATOR_URL=https://x/nxs\nNXS_SECRET={SECRET}\n",
+            encoding="utf-8",
+        )
+        assert load_actor("a1", actor_dir=d, env={}).node_id == "a1"
+
+
+class TestMissingAndBroken:
+    """缺文件、缺键、密钥过短 —— 都要给出可执行的提示。"""
+
+    @covers("M14.F3")
+    def test_missing_file_lists_available(self, workdir):
+        """★ 找不到时要列出**现有身份**。
+
+        运维最常见的困惑是"我明明建了文件"，而实际名字对不上
+        （建了 ``a_b.env`` 但身份叫 ``a-b``）。列出可选项能省掉这一轮。
+        """
+        d = _write(workdir, "taskflow")
+        _write(workdir, "hermes-working")
+        with pytest.raises(ConfigError) as ei:
+            load_actor("typo", actor_dir=d, env={})
+        msg = str(ei.value)
+        assert "taskflow" in msg and "hermes-working" in msg
+
+    @covers("M14.F3")
+    def test_missing_file_with_empty_dir(self, workdir):
+        d = workdir / "agents"
+        d.mkdir(parents=True, exist_ok=True)
+        with pytest.raises(ConfigError) as ei:
+            load_actor("a1", actor_dir=d, env={})
+        assert "还没有任何身份文件" in str(ei.value)
+
+    @covers("M14.F3")
+    def test_missing_required_keys(self, workdir):
+        d = workdir / "agents"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "a1.env").write_text("NXS_NODE_ID=a1\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as ei:
+            load_actor("a1", actor_dir=d, env={})
+        assert "NXS_SECRET" in str(ei.value)
+
+    @covers("M14.F3")
+    def test_short_secret_rejected(self, workdir):
+        """★ 过短的密钥比没有更危险 —— 会让人以为配好了。
+
+        与网关对运维密钥的处理一致。
+        """
+        d = _write(workdir, "a1", secret="short")
+        with pytest.raises(ConfigError) as ei:
+            load_actor("a1", actor_dir=d, env={})
+        assert "过短" in str(ei.value)
+        assert str(MIN_SECRET_LENGTH) in str(ei.value)
+
+    @covers("M14.F3")
+    def test_malformed_line_reports_line_number(self, workdir):
+        d = workdir / "agents"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "a1.env").write_text("NXS_NODE_ID=a1\n这不是键值对\n",
+                                  encoding="utf-8")
+        with pytest.raises(ConfigError) as ei:
+            load_actor("a1", actor_dir=d, env={})
+        assert ":2:" in str(ei.value), "要报行号，否则长文件里找不到"
+
+
+class TestResolveActor:
+    """"这次调用用哪个身份"的解析优先级。"""
+
+    @covers("M14.F3")
+    def test_explicit_wins(self, workdir):
+        d = _write(workdir, "taskflow")
+        a = resolve_actor("taskflow", actor_dir=d,
+                          env={"NXS_ACTOR": "other"})
+        assert a.node_id == "taskflow"
+
+    @covers("M14.F3")
+    def test_nxs_actor_env(self, workdir):
+        """★ 桥接进程注入的就是这个 —— Agent 只需知道自己的名字。"""
+        d = _write(workdir, "taskflow")
+        a = resolve_actor(None, actor_dir=d, env={"NXS_ACTOR": "taskflow"})
+        assert a.node_id == "taskflow"
+
+    @covers("M14.F3")
+    def test_nxs_node_id_env_fallback(self, workdir):
+        d = _write(workdir, "taskflow")
+        a = resolve_actor(None, actor_dir=d, env={"NXS_NODE_ID": "taskflow"})
+        assert a.node_id == "taskflow"
+
+    @covers("M14.F3")
+    def test_no_identity_is_an_error_not_a_default(self, workdir):
+        """★ 什么都不给时报错，**不猜默认值**。
+
+        猜错身份会让任务以错误的名义发出，而那种错误在审计里
+        看起来完全正常 —— 比直接失败难查得多。
+        """
+        d = _write(workdir, "taskflow")
+        with pytest.raises(ConfigError) as ei:
+            resolve_actor(None, actor_dir=d, env={})
+        msg = str(ei.value)
+        assert "--as" in msg
+        assert "NXS_ACTOR" in msg
+
+
+class TestWriteActorFile:
+    """写凭据文件时的权限。"""
+
+    @covers("M14.F3")
+    def test_writes_with_0600(self, workdir):
+        """★ 凭据文件等同密钥，必须只有属主可读。"""
+        d = workdir / "agents"
+        path = write_actor_file("taskflow", url="https://x/nxs",
+                                secret=SECRET, actor_dir=d)
+        assert path.exists()
+        mode = path.stat().st_mode & 0o777
+        assert mode == 0o600, f"权限应为 0600，实际 {oct(mode)}"
+
+    @covers("M14.F3")
+    def test_roundtrip(self, workdir):
+        d = workdir / "agents"
+        write_actor_file("taskflow", url="https://x/nxs", secret=SECRET,
+                         ca_file="/ca.pem", actor_dir=d)
+        a = load_actor("taskflow", actor_dir=d, env={})
+        assert a.secret == SECRET.encode()
+        assert a.ca_file == "/ca.pem"
+
+    @covers("M14.F3")
+    def test_rejects_bad_name(self, workdir):
+        d = workdir / "agents"
+        with pytest.raises(ConfigError):
+            write_actor_file("../evil", url="https://x/nxs",
+                             secret=SECRET, actor_dir=d)
+
+
+class TestCliEntry:
+    """入口本身。"""
+
+    @covers("M14.F3")
+    def test_help_mentions_as_and_ask(self):
+        import subprocess
+
+        r = subprocess.run(
+            [sys.executable, "-m", "nxs.cli.main", "--help"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+        )
+        assert r.returncode == 0
+        out = r.stdout
+        assert "--as" in out
+        assert "ask" in out
+        # 示例要能照抄
+        assert "nxs-cli" in out
+
+    @covers("M14.F3")
+    def test_no_identity_exits_2_with_hint(self):
+        """没有身份时退出码 2，并在 stderr 说明怎么给。"""
+        import os
+        import subprocess
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("NXS_ACTOR", "NXS_NODE_ID")}
+        env["NXS_ACTOR_DIR"] = str(REPO_ROOT / ".nxs" / "no-such-dir")
+        r = subprocess.run(
+            [sys.executable, "-m", "nxs.cli.main", "whoami"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert r.returncode == 2
+        assert "NXS_ACTOR" in (r.stderr or "")
+
+    @covers("M14.F3")
+    def test_does_not_expose_ops_command(self):
+        """★ `nxs-cli` 不得有 ops 子命令。
+
+        运维面（批准/吊销节点）不该和 Agent 的日常工具在同一个入口 ——
+        那样 `--as <节点>` 的调用就能摸到 ops，需要额外检查，
+        而那种检查忘了加就是提权。
+        """
+        import subprocess
+
+        r = subprocess.run(
+            [sys.executable, "-m", "nxs.cli.main", "--help"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+        )
+        for forbidden in ("ops", "serve", "demo", "doctor"):
+            assert forbidden not in r.stdout, (
+                f"nxs-cli 暴露了 {forbidden} —— 运维面不该在这里"
+            )

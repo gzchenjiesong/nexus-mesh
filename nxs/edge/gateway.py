@@ -757,6 +757,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._handle_register(full_path)
                 elif path == f"{PREFIX}/ack" and method == "POST":
                     self._handle_ack(full_path)
+                elif path == f"{PREFIX}/whoami" and method == "GET":
+                    self._handle_whoami(full_path)
                 elif path.startswith(f"{PREFIX}/task/") and method == "GET":
                     self._handle_task(full_path, path[len(f"{PREFIX}/task/"):])
                 elif path in _KNOWN_PATHS or path.startswith(_PATH_PREFIXES):
@@ -856,6 +858,52 @@ class _Handler(BaseHTTPRequestHandler):
         reason = str(dict(envelope.task.params).get("reason", ""))[:200]
         failed = self.gw.transport.fail(sender, task, reason)
         self._send_json(200, {"task": task_to_wire(failed)})
+
+    def _handle_whoami(self, full_path: str) -> None:
+        """我是谁 —— 返回调用方自己的角色卡与当前状态。
+
+        ⭐ 为什么需要这个端点
+        --------------------
+        Agent 需要一种**零成本、不需要猜**的方式确认自己的身份：
+        我叫什么、有什么能力、能被谁委托、配额还剩多少、批准了没有。
+
+        没有它的话，Agent 只能靠读文档推断 —— 而文档会过时，
+        且推断错了不会有任何报错（它会以错误的假设去发任务）。
+
+        为什么不复用 ``/nxs/ops/nodes``：那需要**运维密钥**。
+        Agent 不该有运维密钥 —— 那等于把"批准/吊销节点"的钥匙
+        交给被管理者。这里的语义是"看我自己"，只需要自己的凭据。
+
+        ## 只回自己的
+        刻意**不**支持查别人 —— ``?node=x`` 这种参数一旦存在，
+        就会变成一个轻量的节点发现接口，而节点发现该有它自己的
+        权衡（哪些节点可见、能力是否暴露）。要列全网成员，
+        应该新增专用的 ``/nxs/peers``，而不是把这个口子放开。
+        """
+        node_id = self._authenticate(full_path, body=None)
+
+        card = self.gw.app.registry.card(node_id)
+        if card is None:
+            # 未注册就调 whoami：不是错误，只是告诉它"你还没注册"
+            self._send_json(404, {
+                "denied": "true",
+                "rule_id": RuleId.AU_NODE_UNKNOWN.value,
+                "hint": "该身份尚未注册。首次接入请运行桥接进程注册一次。",
+            })
+            return
+
+        record = self.gw.app.registry.record(node_id)
+        usage = self.gw.app.usage_of(node_id)
+        self._send_json(200, {
+            "node_id": node_id,
+            "approved": bool(record.approved) if record else False,
+            "state": str(record.state) if record else "unknown",
+            "card": card.to_dict(),
+            "usage": {
+                "tasks_today": usage.tasks_today,
+                "concurrent_now": usage.concurrent_now,
+            },
+        })
 
     def _handle_task(self, full_path: str, task_id: str) -> None:
         """查询单个任务的状态与产出。
@@ -1261,7 +1309,7 @@ class _Handler(BaseHTTPRequestHandler):
 _KNOWN_PATHS = frozenset({
     f"{PREFIX}/poll", f"{PREFIX}/events", f"{PREFIX}/publish",
     f"{PREFIX}/result", f"{PREFIX}/fail", f"{PREFIX}/health",
-    f"{PREFIX}/register", f"{PREFIX}/ack",
+    f"{PREFIX}/register", f"{PREFIX}/ack", f"{PREFIX}/whoami",
 })
 #: 带路径参数的端点前缀。这些不放进 _KNOWN_PATHS（路径不固定），
 #: 所以要单独在分发里处理「方法不对」的情况。

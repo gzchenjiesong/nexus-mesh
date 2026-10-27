@@ -325,6 +325,19 @@ class HttpTransport:
     # 便捷
     # ------------------------------------------------------------------
 
+    def whoami(self) -> dict[str, Any]:
+        """取自己的角色卡与当前状态。
+
+        语义是"看我自己"，只需要自己的凭据 —— **不需要运维密钥**。
+        返回 ``{node_id, approved, state, card, usage}``。
+
+        :raises PolicyDenied: 该身份尚未在服务端注册（``AU-NODE-04``）
+        """
+        _, payload = self._request("GET", "/whoami")
+        if payload is None:  # pragma: no cover - 服务端契约保证有体
+            raise ConfigError("/whoami: 响应为空")
+        return dict(payload)
+
     def get_task(self, task_id: str) -> dict[str, Any]:
         """查一个任务的状态与产出。
 

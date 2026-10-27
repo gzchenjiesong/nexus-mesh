@@ -673,3 +673,63 @@ class TestTaskQueryEndpoint:
             pytest.fail("POST 到查询端点竟然成功了")
         except urllib.error.HTTPError as err:
             assert err.code == 405, f"期望 405，实际 {err.code}"
+
+
+class TestWhoamiEndpoint:
+    """★ Agent 要能零成本确认"我是谁"。
+
+    ⚠ 在此之前它只能靠**读文档推断** —— 而文档会过时，
+    推断错了也不会报错，它会以错误的假设去发任务。
+
+    为什么不复用 ``/nxs/ops/nodes``：那需要**运维密钥**。
+    交给 Agent 等于把批准/吊销的钥匙交给被管理者。
+    """
+
+    @covers("M1.F9")
+    def test_returns_own_card(self, clients):
+        info = clients["node-a"].whoami()
+        assert info["node_id"] == "node-a"
+        assert info["card"]["node_id"] == "node-a"
+        assert info["card"]["capabilities"], "能力清单不该空"
+
+    @covers("M1.F9")
+    def test_includes_approval_and_usage(self, clients):
+        """批准状态与今日用量都要给 —— 那正是 Agent 决策所需的。"""
+        info = clients["node-a"].whoami()
+        assert "approved" in info
+        assert info["approved"] is True
+        assert "usage" in info
+        assert "tasks_today" in info["usage"]
+
+    @covers("M1.F9")
+    def test_only_returns_self_never_others(self, clients):
+        """★ 只回自己的卡 —— 不提供 ``?node=x`` 这类参数。
+
+        那种参数一旦存在就变成轻量的节点发现接口，而节点发现
+        该有它自己的权衡（哪些节点可见、能力是否暴露）。
+        要列全网成员应该新增专用的 ``/nxs/peers``。
+        """
+        a = clients["node-a"].whoami()
+        b = clients["node-b"].whoami()
+        assert a["node_id"] == "node-a"
+        assert b["node_id"] == "node-b"
+        # 两份回答里都不该出现对方的节点 ID
+        import json
+        assert "node-b" not in json.dumps(a, ensure_ascii=False)
+        assert "node-a" not in json.dumps(b, ensure_ascii=False)
+
+    @covers("M1.F9")
+    def test_unregistered_node_gets_clear_hint(self, gateway, app):
+        """未注册的节点调 whoami：要明确说"你还没注册"，别只给个码。"""
+        from nxs.edge.client import HttpTransport
+        from nxs.core.errors import PolicyDenied, RuleId
+
+        # 一个服务端没有密钥的节点 ID —— 认证就会先失败
+        stranger = HttpTransport(gateway.base_url, node_id="nobody",
+                                 secret=b"z" * 32)
+        with pytest.raises(PolicyDenied) as ei:
+            stranger.whoami()
+        # 密钥不对时是签名失败，而不是"未注册" —— 两者都该拒绝，
+        # 但原因不同，不能混
+        assert ei.value.rule_id in (RuleId.AU_SIGNATURE_INVALID,
+                                    RuleId.AU_NODE_UNKNOWN)

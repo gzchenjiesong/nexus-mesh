@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nexus-mesh"
-version = "0.15.0"
+version = "0.16.0"
 description = "A self-hosted coordination network for heterogeneous AI agents — each agent joins with its own identity, role, and trust domain; the mesh handles discovery, structured task delegation, lifecycle, and scoped results."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -51,7 +51,11 @@ Documentation = "https://github.com/gzchenjiesong/nexus-mesh/tree/main/docs"
 Issues = "https://github.com/gzchenjiesong/nexus-mesh/issues"
 
 [project.scripts]
+# `nxs` 是本机开发与运维（verify / doctor / serve / demo / ops / ui）。
+# `nxs-cli` 是**给 Agent 用的工具**：以某个节点身份发任务、取结果。
+# 分成两个入口而不是加子命令，是因为权限面不同 —— 详见 nxs/cli/__init__.py。
 nxs = "nxs.__main__:main"
+nxs-cli = "nxs.cli.main:main"
 
 [tool.setuptools.packages.find]
 include = ["nxs*"]
