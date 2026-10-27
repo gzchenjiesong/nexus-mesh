@@ -179,7 +179,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.9.0）
+### 已实现（v0.9.1）
 
 | 模块 | 状态 |
 |---|---|
@@ -291,6 +291,14 @@ make demo
 See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
+
+**v0.9.1** — `roles.executor` is a label, not a gate. A probe confirmed a
+node with `executor: false` but declared capabilities still completes the full
+loop; the real gate is `capabilities` (no declaration → `WL-TYPE-404`).
+Registered alongside `roles.relay` / `roles.observer` / `roles.human_interface`
+as parse-but-inert, and locked the behaviour with tests. There is also **no web
+UI at all** — zero frontend files, every endpoint returns JSON — now guarded by
+a test so that claim can't quietly go stale.
 
 **v0.9.0** — an acceptance guide, and a script that checks it.
 `docs/acceptance-guide.md` lists what can be verified (six groups, per-item

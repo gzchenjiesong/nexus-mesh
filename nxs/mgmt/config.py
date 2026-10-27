@@ -277,6 +277,13 @@ UNIMPLEMENTED: tuple[tuple[str, str], ...] = (
     ("roles.relay",
      "中继角色只声明、无实现逻辑。配置 roles.relay=true 不会让该节点转发任务"),
     ("roles.observer", "观察者角色只声明、无实现逻辑（无只读订阅通道）"),
+    ("roles.executor",
+     "执行角色**不构成准入闸门**：设 executor=false 不会阻止该节点领活与执行。"
+     "真正的闸门是 capabilities 声明（无声明则投递被 WL-TYPE-404 拒绝）。"
+     "实测确认：executor=false 但声明了能力的节点仍可完成完整闭环"),
+    ("roles.human_interface",
+     "人机入口只是分类标签，无实现逻辑。没有 Web UI、没有面向人的会话通道；"
+     "人机交互通过 CLI 与 SDK 进行"),
 )
 
 

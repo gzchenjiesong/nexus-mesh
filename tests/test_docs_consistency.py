@@ -751,3 +751,65 @@ class TestAcceptanceDrill:
         assert "必须手工验" in text or "必须手工" in text, (
             "手册没有说清哪些必须手工验"
         )
+
+
+# ---------------------------------------------------------------------------
+# 10. 「没有 Web UI」这一声称必须一直是真的
+# ---------------------------------------------------------------------------
+
+class TestNoWebUi:
+    """验收手册说「零前端代码」。这个声称必须可验证，否则就是空话。
+
+    为什么值得一条测试：一旦有人加了 HTML（哪怕是个临时调试页），
+    手册那句话就变成假的了；而读者会按"没有界面"去设计验收场景。
+    """
+
+    #: 前端文件扩展名。加进来即意味着手册的声称失效。
+    FRONTEND_SUFFIXES = (".html", ".htm", ".css", ".scss", ".sass",
+                         ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte")
+
+    #: 允许的例外：(相对路径, 理由)
+    ALLOWED = ()
+
+    @covers("M11.F1")
+    def test_no_frontend_files_in_repo(self):
+        offenders: list[str] = []
+        for path in REPO_ROOT.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(REPO_ROOT)
+            parts = set(rel.parts)
+            # 跳过依赖、虚拟环境、git 与构建产物
+            if parts & {".venv", ".git", "node_modules", "__pycache__", "build"}:
+                continue
+            if path.suffix.lower() not in self.FRONTEND_SUFFIXES:
+                continue
+            if any(str(rel) == allowed for allowed, _ in self.ALLOWED):
+                continue
+            offenders.append(str(rel))
+        assert not offenders, (
+            "仓库里出现了前端文件，但验收手册声称「零前端代码」：\n  "
+            + "\n  ".join(sorted(offenders))
+            + "\n要么删掉它们，要么更新 acceptance-guide.md 的说法。"
+        )
+
+    @covers("M11.F1")
+    def test_gateway_never_returns_html(self):
+        """网关不得返回 HTML —— 有 HTML 就说明"没有 Web UI"不成立。"""
+        gateway = (REPO_ROOT / "nxs" / "edge" / "gateway.py").read_text(encoding="utf-8")
+        forbidden = ["text/html", "<!DOCTYPE", "<html", "<div", "<body"]
+        hits = [token for token in forbidden if token in gateway]
+        assert not hits, (
+            f"网关里出现了 HTML 相关内容 {hits} —— "
+            f"验收手册说的「没有 Web UI」需要更新"
+        )
+
+    @covers("M11.F1")
+    def test_guide_states_the_human_interfaces(self):
+        """手册必须说清「人机交互面有哪些」，而不只是「没有 UI」。"""
+        text = _read(DOCS / "acceptance-guide.md")
+        for surface in ("nxs` CLI", "SDK", "/nxs/events"):
+            assert surface in text, (
+                f"验收手册没说明人机交互面包含 {surface} —— "
+                f"读者会不知道「那我怎么看状态」"
+            )
