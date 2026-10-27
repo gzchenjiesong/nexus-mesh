@@ -540,3 +540,136 @@ class TestDegradationAndShutdown:
         time.sleep(0.2)
         gateway.stop()
         assert finished.wait(timeout=5), "关闭后事件流没有退出"
+
+
+class TestTaskQueryEndpoint:
+    """★ 发起方必须能取回自己发布任务的产出。
+
+    ⚠ **这条补的是一个真实缺口。** 在此之前网关只有
+    ``/publish``（发）、``/poll``（领）、``/result``（交），
+    **没有"查"**。于是 A2A 协作缺了最后一环：问出去的问题，
+    答案存在服务端，但问的人取不回来。
+
+    ``session_view()`` 不算 —— 它只汇报状态（id/type/status/...），
+    **不含产出内容**。我最初就是直接读 sqlite 才看到回答的，
+    那是绕过 API 的做法，不能算有了能力。
+    """
+
+    @covers("M1.F9")
+    def test_publisher_can_read_own_task(self, clients):
+        """发布者能查到自己的任务，且能看到产出。"""
+        from nxs.edge.client import HttpTransport
+
+        publisher = clients["coordinator"]
+        worker = clients["node-a"]
+
+        delivery = publisher.publish(
+            from_node="coordinator", to_node="node-a",
+            task_type="demo.echo", params={"text": "查询测试"},
+            idempotency_key="query-own-1",
+        )
+        claimed = worker.poll("node-a")
+        from nxs.core.models import Artifact
+        # demo.echo 声明为 metadata 级，且 response_fields=('echo','level')
+        # —— 产出必须严格匹配这两点，否则被边界拒（WL-LEVEL-002）
+        worker.complete("node-a", claimed, [
+            Artifact(level="metadata", kind="structured",
+                     data={"echo": "查询测试", "level": "metadata"})])
+
+        got = publisher.get_task(delivery.task.id)
+        assert got["status"] == "completed"
+        assert got["artifacts"], "产出不见了 —— 那等于没取回结果"
+        assert got["artifacts"][0]["data"]["echo"] == "查询测试"
+
+    @covers("M1.F9")
+    def test_receiver_can_read_task_sent_to_it(self, clients):
+        """接收者也能查发给自己的任务（用来看自己交了什么）。"""
+        from nxs.edge.client import HttpTransport
+
+        publisher = clients["coordinator"]
+        worker = clients["node-a"]
+
+        delivery = publisher.publish(
+            from_node="coordinator", to_node="node-a",
+            task_type="demo.echo", params={"text": "接收方查询"},
+            idempotency_key="query-recv-1",
+        )
+        assert worker.get_task(delivery.task.id)["id"] == delivery.task.id
+
+    @covers("M1.F9")
+    def test_third_party_gets_404_not_403(self, clients):
+        """★ 无关节点查别人的任务要 404，**不是 403**。
+
+        403 会告诉调用方"这个任务确实存在，只是不给你看" ——
+        那是一个枚举接口，能据此试探出任务 ID 空间里哪些是真实的。
+        404 把"不存在"与"无权"合并，信息量为零。
+
+        与网关在策略拒绝时只回 rule_id 是同一条思路：
+        **拒绝的形状本身会泄露信息。**
+        """
+        from nxs.core.errors import PolicyDenied, RuleId
+
+        publisher = clients["coordinator"]
+        outsider = clients["node-b"]
+
+        delivery = publisher.publish(
+            from_node="coordinator", to_node="node-a",
+            task_type="demo.echo", params={"text": "不该被看到"},
+            idempotency_key="query-third-1",
+        )
+        with pytest.raises(PolicyDenied) as ei:
+            outsider.get_task(delivery.task.id)
+        assert ei.value.rule_id == RuleId.LF_TASK_NOT_FOUND
+
+    @covers("M1.F9")
+    def test_nonexistent_task_gives_same_answer(self, clients):
+        """★ 不存在的任务必须与"无权查看"给出**完全相同**的错误。
+
+        两者形状不同的话，403 就等于确认了任务存在。
+        """
+        from nxs.core.errors import PolicyDenied, RuleId
+
+        outsider = clients["node-b"]
+        with pytest.raises(PolicyDenied) as ei:
+            outsider.get_task("t-does-not-exist-at-all")
+        assert ei.value.rule_id == RuleId.LF_TASK_NOT_FOUND
+
+    @covers("M1.F9")
+    def test_malformed_id_does_not_hit_storage(self, clients):
+        """超长或带斜杠的 ID 直接按不存在处理，不去查存储。
+
+        带斜杠的 ID 如果不拦住，会变成路径穿越的入口
+        （``/task/../../ops/nodes``）。
+        """
+        from nxs.core.errors import PolicyDenied
+
+        client = clients["coordinator"]
+        for bad in ("", "x" * 200, "../../ops/nodes", "a/b"):
+            with pytest.raises(PolicyDenied):
+                client.get_task(bad)
+
+    @covers("M1.F9")
+    def test_wrong_method_is_405_not_501(self, gateway):
+        """路径对但方法不对 → 405，不是 501。
+
+        501 表示"这个端点还没实现"，会让客户端以为整条路走不通；
+        实际只是方法用错了。
+        """
+        import urllib.request
+        import urllib.error
+        from nxs.edge import httpsig
+
+        gw = gateway
+        url = f"{gw.base_url}/task/some-id"
+        headers = httpsig.sign_request(
+            b"x" * 32, method="POST", path="/nxs/task/some-id",
+            node_id="coordinator", body=b"{}",
+        )
+        headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=b"{}", method="POST",
+                                     headers=headers)
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            pytest.fail("POST 到查询端点竟然成功了")
+        except urllib.error.HTTPError as err:
+            assert err.code == 405, f"期望 405，实际 {err.code}"

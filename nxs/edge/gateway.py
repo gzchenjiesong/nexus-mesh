@@ -243,6 +243,7 @@ _STATUS_BY_RULE: dict[RuleId, int] = {
     RuleId.QT_BYTES_PER_DAY: 429,
     RuleId.QT_RATE_LIMITED: 429,
     RuleId.QT_CONCURRENCY: 429,
+    RuleId.LF_TASK_NOT_FOUND: 404,
     RuleId.QT_CONNECTION_LIMIT: 503,
     RuleId.LF_LEASE_HELD: 409,
     RuleId.LF_TASK_EXPIRED: 410,
@@ -756,7 +757,9 @@ class _Handler(BaseHTTPRequestHandler):
                     self._handle_register(full_path)
                 elif path == f"{PREFIX}/ack" and method == "POST":
                     self._handle_ack(full_path)
-                elif path in _KNOWN_PATHS:
+                elif path.startswith(f"{PREFIX}/task/") and method == "GET":
+                    self._handle_task(full_path, path[len(f"{PREFIX}/task/"):])
+                elif path in _KNOWN_PATHS or path.startswith(_PATH_PREFIXES):
                     self._reject_status(405, "method not allowed")
                 else:
                     # 未实现的端点：诚实返回 501，而不是 404
@@ -853,6 +856,48 @@ class _Handler(BaseHTTPRequestHandler):
         reason = str(dict(envelope.task.params).get("reason", ""))[:200]
         failed = self.gw.transport.fail(sender, task, reason)
         self._send_json(200, {"task": task_to_wire(failed)})
+
+    def _handle_task(self, full_path: str, task_id: str) -> None:
+        """查询单个任务的状态与产出。
+
+        ⭐ 为什么需要这个端点
+        --------------------
+        在此之前**发起方拿不回自己发布任务的结果**：网关只有
+        ``/publish``（发）、``/poll``（领）、``/result``（交），
+        没有"查"。于是 A2A 协作缺了最后一环 —— 问出去的问题，
+        答案存在服务端，但问的人取不回来。
+
+        :meth:`TaskLifecycle.session_view` 也不算：它只汇报状态
+        （id/type/status/from/to/attempt/level），**不含产出内容**。
+
+        ## 授权：谁能查哪个任务
+
+        规则只有两条 —— **发布者**与**接收者**：
+
+        * ``task.from_node == caller`` → 可以（我问出去的）
+        * ``task.to_node == caller``   → 可以（发给我的）
+
+        其余一律 **404**，而不是 403。理由：403 会告诉调用方
+        "这个任务确实存在，只是不给你看" —— 那是一个枚举接口，
+        可以据此试探出任务 ID 空间里有哪些是真实的。
+        404 把"不存在"与"无权"合并成同一种回答，信息量为零。
+
+        这与网关在策略拒绝时只回 ``rule_id`` 是同一条思路：
+        **拒绝的形状本身会泄露信息。**
+        """
+        node_id = self._authenticate(full_path, body=None)
+
+        # 空 ID 或超长 ID 直接按不存在处理，不去查存储
+        if not task_id or len(task_id) > 128 or "/" in task_id:
+            raise _Reject(404, RuleId.LF_TASK_NOT_FOUND, "task not found")
+
+        task = self.gw.app.lifecycle.get(task_id)
+
+        # "不存在"与"无权"回同一个拒绝 —— 见方法文档
+        if task is None or node_id not in (task.from_node, task.to_node):
+            raise _Reject(404, RuleId.LF_TASK_NOT_FOUND, "task not found")
+
+        self._send_json(200, {"task": task_to_wire(task)})
 
     # ------------------------------------------------------------------
     # 端点：SSE 事件流
@@ -1218,6 +1263,9 @@ _KNOWN_PATHS = frozenset({
     f"{PREFIX}/result", f"{PREFIX}/fail", f"{PREFIX}/health",
     f"{PREFIX}/register", f"{PREFIX}/ack",
 })
+#: 带路径参数的端点前缀。这些不放进 _KNOWN_PATHS（路径不固定），
+#: 所以要单独在分发里处理「方法不对」的情况。
+_PATH_PREFIXES = (f"{PREFIX}/task/",)
 
 
 __all__ = [

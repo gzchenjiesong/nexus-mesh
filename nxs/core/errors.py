@@ -81,6 +81,13 @@ class RuleId(str, Enum):
     LF_TASK_EXPIRED = "LF-EXPIRE-02"
     LF_INVALID_TRANSITION = "LF-STATE-03"
     LF_DUPLICATE_IDEMPOTENCY = "LF-IDEM-04"
+    #: v0.15 新增（查询）：该任务不存在，**或者调用方看不到它**。
+    #:
+    #: 两种情况刻意共用一个取值。区分它们就等于提供一个枚举接口：
+    #: 攻击者可以据此判断某个 task_id 是否真实存在。
+    #: 与"策略拒绝时只回 rule_id、不回内容"是同一条思路 ——
+    #: **拒绝的形状本身会泄露信息。**
+    LF_TASK_NOT_FOUND = "LF-TASK-404"
 
 
 #: 拒绝时回给调用方的**固定消息**。

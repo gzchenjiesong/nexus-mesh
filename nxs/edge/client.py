@@ -325,6 +325,27 @@ class HttpTransport:
     # 便捷
     # ------------------------------------------------------------------
 
+    def get_task(self, task_id: str) -> dict[str, Any]:
+        """查一个任务的状态与产出。
+
+        只能查**自己发布的**或**发给自己的**任务；其余一律 404
+        （"不存在"与"无权"不区分，避免成为枚举接口）。
+
+        返回线格式的任务字典（含 ``artifacts``），
+        形状与信封里、``/result`` 响应里的一致 —— 刻意复用同一实现，
+        否则客户端要写两套解析，迟早不一致。
+
+        :raises PolicyDenied: 任务不存在、或调用方看不到它（``LF-TASK-404``）
+        """
+        # 非 2xx 由 _request 统一抛 PolicyDenied（它把服务端的 rule_id
+        # 还原成异常类型）。所以这里**不需要**再判状态码 ——
+        # 写了也只是死代码，而"看起来在处理其实处理不到"的分支
+        # 比没有更糟：它会让读代码的人以为这里有额外逻辑。
+        _, payload = self._request("GET", f"/task/{task_id}")
+        if payload is None:  # pragma: no cover - 服务端契约保证有体
+            raise ConfigError(f"/task/{task_id}: 响应为空")
+        return dict(payload.get("task") or {})
+
     def health(self) -> bool:
         """探活。**不需要认证，也不返回任何业务信息。**"""
         try:
