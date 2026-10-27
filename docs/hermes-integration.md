@@ -1,3 +1,7 @@
+> 📖 **总览在 [`docs/agent-bridges.md`](agent-bridges.md)** ——
+> 那一份讲桥接的共同原理、两个 Agent 的安全对比、以及三跳协作实测。
+> 本文件是 Hermes 这一侧的细节。
+
 # 把 Hermes Agent 接入 Nexus Mesh
 
 > 实现：`examples/hermes_node.py` · 测试：`tests/test_hermes_node.py`

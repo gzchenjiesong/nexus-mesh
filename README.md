@@ -65,7 +65,8 @@ Nexus Mesh 把这两件事作为核心，而不是附属功能。
 | [`docs/observability.md`](docs/observability.md) | 为什么这里没有阈值告警 |
 | [`docs/acceptance-guide.md`](docs/acceptance-guide.md) | **验收场景设计手册**：能验收什么 / 不能验收什么 / 配了不生效什么 |
 | [`docs/design/05-webui-design.md`](docs/design/05-webui-design.md) | WebUI（M15）设计：只读观察窗 + SSH 隧道 |
-| [`docs/hermes-integration.md`](docs/hermes-integration.md) | **把 Hermes Agent 接入 mesh**：桥接、工具集收窄、踩坑记录 |
+| [`docs/agent-bridges.md`](docs/agent-bridges.md) | **把 LLM Agent 接入 mesh**：桥接原理、共同安全原则、两个 Agent 的风险对比、三跳协作实测 |
+| [`docs/hermes-integration.md`](docs/hermes-integration.md) | Hermes 接入细节：工具集收窄、四个踩过的坑 |
 | [`docs/docs-audit.md`](docs/docs-audit.md) | 文档腐化审计：方法与历史发现 |
 | [`traceability/MATRIX.md`](traceability/MATRIX.md) | 追溯矩阵（由测试自动生成） |
 
@@ -181,7 +182,7 @@ nxs ops approve node-a --url https://coordinator.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.14.0）
+### 已实现（v0.14.1）
 
 | 模块 | 状态 |
 |---|---|
