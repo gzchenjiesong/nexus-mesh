@@ -412,10 +412,44 @@ def main() -> int:
             log.error("  若是自签证书，加 --ca-file 或设 NXS_CA_FILE")
         return 1
 
-    log.info("注册结果：outcome=%s approved=%s",
-             registered.get("outcome"), registered.get("approved"))
+    outcome = registered.get("outcome")
+    approved = registered.get("approved")
+    log.info("注册结果：outcome=%s approved=%s", outcome, approved)
 
-    if not registered.get("approved"):
+    # ⚠ **必须把"注册失败"和"还没批准"分开。**
+    #
+    # SDK 把注册异常吞成了 ``{"outcome": "error", "approved": False}``
+    # （它不该让注册失败拖垮节点，这个设计是对的）。
+    # 但如果这里只看 ``approved``，签名错误、密钥不匹配、证书问题
+    # 全都会被报成"尚未批准 —— 这是正常的，去批准一下就好"。
+    # 那会让人对着一个鉴权失败去点批准，白折腾。
+    #
+    # 实测踩过：``AU-SIG-01``（服务端不认识这个节点的密钥）
+    # 被误报成"待批准"。
+    if outcome == "error":
+        log.error("")
+        log.error("注册**失败** —— 这不是「待批准」，是连不上或鉴权不过。")
+        hint = registered.get("hint") or ""
+        if hint:
+            log.error("  原因：%s", hint)
+        if "AU-SIG-01" in hint:
+            log.error("")
+            log.error("  AU-SIG-01 = 签名校验失败，通常是服务端不认识本文节点的密钥。")
+            log.error("  修法：把 NXS_SECRET_%s 写进服务端的环境变量文件，"
+                      "**然后重启协调节点**（环境变量在进程启动时固定）：",
+                      args.node_id.upper().replace("-", "_"))
+            log.error("    echo 'NXS_SECRET_%s=<同一个值>' >> /etc/nexus-mesh/nxs.env",
+                      args.node_id.upper().replace("-", "_"))
+            log.error("    systemctl restart nexus-mesh")
+        elif "AU-NODE-04" in hint:
+            log.error("  该节点尚未在服务端登记，且服务端没有它的密钥。")
+        elif "CERTIFICATE" in hint.upper() or "SSL" in hint.upper():
+            log.error("  证书校验失败 —— 确认 --ca-file 指向与服务端同一张 CA。")
+        log.error("")
+        return 1
+
+    if not approved:
+        # 走到这里才是真的"待批准"
         log.warning("")
         log.warning("尚未批准 —— 这是**正常**的，新节点不能自行加入。")
         log.warning("去协调节点上批准：")
@@ -426,7 +460,10 @@ def main() -> int:
                     "不用重启。")
 
     if args.dry_run:
-        log.info("--dry-run：探活与注册都正常，不进入领任务循环。")
+        if approved:
+            log.info("--dry-run：探活、注册、批准全部就绪，不进入领任务循环。")
+        else:
+            log.info("--dry-run：探活与注册正常，等批准后可接任务。")
         return 0
 
     log.info("开始常驻。工具集=%s 超时=%ss", args.toolsets, args.timeout)

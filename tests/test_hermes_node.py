@@ -321,3 +321,49 @@ class TestHandlerValidation:
         )
         out = handler({"question": "问题"})
         assert out["answer"] == "OK"
+
+
+class TestRegistrationOutcomeHandling:
+    """★ 「注册失败」与「待批准」必须分开报。
+
+    ⚠ 这条来自实测：``AU-SIG-01``（服务端不认识节点密钥）被桥接报成了
+    「尚未批准 —— 这是**正常**的，去批准一下就好」。
+
+    为什么会这样：SDK 的 ``register()`` 把异常吞成
+    ``{"outcome": "error", "approved": False}``（它不该让注册失败拖垮
+    节点，这个设计本身是对的）。而桥接只看 ``approved``，
+    于是**鉴权失败**和**等待批准**长得一模一样。
+
+    后果很实际：人会对着一个签名错误去点批准，然后发现批准了还是不行。
+    """
+
+    @covers("M1.F7")
+    def test_outcome_error_is_distinguished_from_pending(self):
+        """桥接源码必须显式判断 ``outcome == "error"``。"""
+        source = (REPO_ROOT / "examples" / "hermes_node.py").read_text(
+            encoding="utf-8")
+        assert 'outcome == "error"' in source, (
+            "桥接没有区分 outcome=error —— 鉴权失败会被误报成待批准"
+        )
+        # 且要给出针对 AU-SIG-01 的修法提示
+        assert "AU-SIG-01" in source, (
+            "没给出签名失败的具体修法，用户只能猜"
+        )
+        assert "systemctl restart nexus-mesh" in source, (
+            "AU-SIG-01 的根因之一是「服务端进程环境里没有这个密钥」，"
+            "必须提示重启，否则改完 env 文件也不生效"
+        )
+
+    @covers("M1.F7")
+    def test_dry_run_fails_on_registration_error(self):
+        """``--dry-run`` 在注册失败时必须返回非零。
+
+        返回 0 会让「探活成功但注册失败」看起来像一切正常。
+        """
+        source = (REPO_ROOT / "examples" / "hermes_node.py").read_text(
+            encoding="utf-8")
+        # 在 outcome == "error" 分支里必须有 return 1
+        branch = source.split('outcome == "error"')[1][:1200]
+        assert "return 1" in branch, (
+            "注册失败分支没有返回非零 —— dry-run 会说「一切正常」"
+        )
