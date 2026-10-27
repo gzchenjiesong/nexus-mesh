@@ -237,6 +237,133 @@ export NXS_CA_FILE=/etc/nexus-mesh/tls/ca.pem
 
 ---
 
+
+---
+
+## 九、A2A 协作：Agent 之间怎么互相派任务
+
+### 完整的接入形态
+
+一个 Agent 要能**主动**参与 mesh，需要四样东西：
+
+| # | 要素 | 谁提供 |
+|---|---|---|
+| 1 | 身份接入（角色卡、心跳） | 桥接进程 |
+| 2 | 收任务、执行、交付 | 桥接进程 |
+| 3 | **发布权**（`issuer: true` + `can_issue_types`） | 角色卡 |
+| 4 | **可调用的工具**（`nxs-cli` + 凭据 + 上下文） | `nxs-cli` + AGENTS.md |
+
+第 3、4 项是 v0.17 补的 —— 在此之前 Agent 只能被动应答，
+Agent 之间没有边，所有协作都得由 coordinator 中转。
+**那不是 mesh，是消息队列。**
+
+### 关键：`nxs-cli` 与凭据
+
+```bash
+nxs-cli --as taskflow ask --to hermes-working "问题"
+```
+
+- `--as` 指定身份 → 从 `/etc/nexus-mesh/agents/taskflow.env` 读凭据
+- **密钥不进 Agent 的上下文** —— 它只知道自己的名字
+- `ask` = `publish` + 轮询 `get_task` + 取产出（不是新协议动作）
+
+### ⚠ 一个真实的架构不对称
+
+| Agent | exec 在哪个进程 | `NXS_ACTOR` 能注入吗 |
+|---|---|---|
+| Hermes | 桥接的子进程（`hermes -z`） | ✅ 能 |
+| OpenClaw | **常驻 gateway 进程** | ❌ 不能 |
+
+OpenClaw 的 `exec` 工具跑在 gateway 里（PID 3446），不在桥接的子进程里。
+所以给桥接的子进程设 `NXS_ACTOR` 对 OpenClaw 无效 —— 实测 `ACTOR=` 为空。
+
+**解法**：在 agent 的 `AGENTS.md` 里写明"命令要带 `--as <你的ID>`"。
+那个文件每轮会被注入，是 OpenClaw 侧的上下文入口。
+
+### ⚠⚠ 安全收窄 与 A2A 主动性是冲突的
+
+要给 Agent 主动发任务的能力，它就必须能执行 `nxs-cli` —— **那需要 terminal**。
+
+而 v0.12 我给 Hermes 设的是 `-t safe`（无 terminal），理由是
+"通过 mesh 派任务等于让远端触发 LLM 执行"。两件事不能同时成立：
+
+| 选择 | 后果 |
+|---|---|
+| `-t safe`（无 terminal） | 安全，但 Hermes **只能被动应答**，无法主动 A2A |
+| `-t safe,terminal` | 能主动 A2A，但它能执行任意命令（以 root） |
+
+当前选择：**`safe,terminal`**（2026-10-27，用户判断：本机调试、
+指令来自运维本人，风险由对话控制）。
+
+改回去只需删掉 `terminal`，但那时它会退化成"只能被问、不能问别人"。
+
+### 实测：双向链路
+
+```
+正向  coordinator → taskflow       → hermes-working    ✓
+反向  coordinator → hermes-working → taskflow          ✓
+```
+
+任务表里能看到 `from_node=taskflow` / `from_node=hermes-working` 的记录 ——
+那是 **Agent 自己发起的任务**，不是 coordinator 代发的。
+
+反向那次，taskflow 在回答里还主动做了额外的自检：
+
+> 好用——反向调用同样通：我通过 nxs-cli 向 hermes-working 提问并成功收到
+> 其答复，说明链路在双向都能正常工作。
+
+---
+
+## 十、部署顺序（踩过的坑）
+
+**必须先让桥接稳定提交最终卡片，再批准。**
+
+我踩过一次：批准时桥接还在崩溃循环（提交的是旧卡片），
+桥接修好起来后提交了新卡片 → 卡片变了 → **批准自动撤销** →
+报 `MX-RECEIVE-03`，而那看起来像"域不匹配"，实际是"没批准"。
+
+正确顺序：
+
+```bash
+# ① 部署代码 → 重启桥接 → 确认它成功注册且日志稳定
+systemctl restart nexus-mesh-hermes
+journalctl -u nexus-mesh-hermes -n 5 --no-pager     # 看到"开始常驻"才算好
+
+# ② 然后批准（批准绑定的是此刻服务端持有的那张卡）
+nxs ops approve hermes-working --url ... --ca-file ...
+
+# ③ 验证
+nxs-cli --as hermes-working whoami    # 批准：是
+```
+
+> 桥接在未批准时会持续轮询被拒。实测一次部署里累积了 **309 次**
+> `MX-RECEIVE-03` —— 数字很大但无害，只是说明客户端重试较密。
+> 看监控时别被这个数字吓到。
+
+---
+
+## 十一、密钥不该出现在 Agent 身上（实测漏洞）
+
+**曾经的错误做法**（v0.16–v0.17 早期）：桥接的 systemd unit 用
+`EnvironmentFile=/etc/nexus-mesh/nxs.env` —— 那会把**整个文件**加载进
+进程环境，包括 `NXS_OPS_SECRET` 和所有其他节点的密钥。
+而 `_hermes_env` 用 `dict(os.environ)` 继承 → 全部传给 Agent。
+
+用 `tr '\0' '\n' < /proc/<pid>/environ` 一看就知道：
+运维密钥和别人的节点密钥赫然在列。Agent 能 exec，所以它读得到。
+
+**现在的做法**：
+
+1. `agent_bridge_common.scrub_secrets()` 按前缀剔除 `NXS_SECRET*` / `NXS_OPS*`
+2. 桥接从 `/etc/nexus-mesh/agents/<id>.env` 读**自己那一把**
+3. unit 里**不用** `EnvironmentFile`
+4. 验证方式：`tr '\0' '\n' < /proc/<pid>/environ | grep -c '^NXS_SECRET'`
+   应为 **0**
+
+> ⚠ 而当时的测试 `test_hermes_env_does_not_carry_secret` 是**假阳性**：
+> 它跑在测试进程里，那个环境本来就没有这些变量，断言永远成立。
+> **测试绿着，漏洞开着。** 现在改成先真的注入再断言。
+
 ## 八、同机调试能验什么、不能验什么
 
 **能验**：协议正确性、策略矩阵、边界过滤、失败语义、配额、观察窗数据。
