@@ -139,9 +139,13 @@ class TestModuleStatusConsistency:
     def test_every_module_listed(self):
         """14 个模块一个都不能漏。"""
         documented = _modules_from_architecture()
-        assert len(documented) == 14, (
-            f"architecture.md 只列了 {len(documented)} 个模块，应为 14："
-            f"{sorted(documented)}"
+        # ⚠ 不硬编码模块数：加模块是正常的演进，硬编码会让这条测试
+        #   每次加模块都红——那是"维护动作"而非"腐化信号"。
+        #   真正要守的是"文档与 registry 一致"，数量由上面那条固定。
+        expected = len(_modules_from_registry())
+        assert len(documented) == expected, (
+            f"architecture.md 列了 {len(documented)} 个模块，"
+            f"registry 有 {expected} 个：{sorted(documented)}"
         )
 
     @covers("M11.F1")
@@ -241,7 +245,7 @@ class TestNumberClaims:
             f"README 说 {claimed_total} 项（{claimed_feat}F + {claimed_req}R），"
             f"实际 {total} 项（{n_feat}F + {n_req}R）"
         )
-        assert len(MODULES) == 14
+        # 模块数量不硬编码（见 TestModuleStatusConsistency 的说明）
 
     @covers("M11.F1")
     def test_readme_demo_steps_is_current(self):
@@ -812,4 +816,87 @@ class TestNoWebUi:
             assert surface in text, (
                 f"验收手册没说明人机交互面包含 {surface} —— "
                 f"读者会不知道「那我怎么看状态」"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 11. 设计文档里的「当前缺口」会随实现过期
+# ---------------------------------------------------------------------------
+
+class TestDesignDocGaps:
+    """``docs/design/05-webui-design.md`` 描述的是「现在缺什么」。
+
+    ⚠ **这类描述天生会过期，而且过期方式很坏**：
+    缺口一旦被补上，文档却还写着"没有这个字段"，
+    后来的人会**重复实现一个已经存在的东西**——
+    或者反过来，因为"文档说没有"而去绕过一条其实已经通了的路。
+
+    所以本类做一件事：**缺口一旦被补上，就提醒去更新设计文档**。
+    这不是阻止实现，而是保证"文档与实现同步"这个动作一定会发生。
+    """
+
+    DESIGN = DOCS / "design" / "05-webui-design.md"
+
+    @covers("M11.F1")
+    def test_design_doc_exists_and_is_marked_unimplemented(self):
+        assert self.DESIGN.exists(), "WebUI 设计文档不见了"
+        text = _read(self.DESIGN)
+        assert "设计稿，未实现" in text or "未实现" in text, (
+            "设计文档必须标明它还没实现 —— 否则读者会以为可以用了"
+        )
+
+    @covers("M11.F1")
+    def test_gap_claims_still_true(self):
+        """★ 文档声称的两个缺口，若已被补上，就必须更新文档。
+
+        当前缺口（2026-10-27 实测）：
+        * ``ops nodes`` 不返回 ``display_name``
+        * ``RoleCard`` 没有 ``description``
+
+        一旦补上，这条测试会红，提示去改设计文档。
+        """
+        sys.path.insert(0, str(REPO_ROOT))
+        from nxs.core.models import RoleCard
+
+        gateway = (REPO_ROOT / "nxs" / "edge" / "gateway.py").read_text(encoding="utf-8")
+
+        # 缺口一：ops nodes 的返回块里有没有 display_name
+        nodes_block = gateway.split('elif action == "nodes":')[1].split("elif action")[0]
+        has_display_name = "display_name" in nodes_block
+        text = _read(self.DESIGN)
+
+        if has_display_name:
+            assert "没返回" not in text and "没有这个字段" not in text, (
+                "「ops nodes 不返回 display_name」这个缺口已经补上了，"
+                "但设计文档还写着缺 —— 请更新 docs/design/05-webui-design.md 第一节"
+            )
+
+        # 缺口二：RoleCard 有没有 description
+        fields = str(RoleCard._FIELDS)  # noqa: SLF001
+        has_description = "description" in fields
+        if has_description:
+            assert "根本没有这个字段" not in text, (
+                "「RoleCard 没有 description」这个缺口已经补上了，"
+                "但设计文档还写着缺 —— 请更新设计文档第一节"
+            )
+
+    @covers("M11.F1")
+    def test_declared_facts_in_design_doc_still_hold(self):
+        """设计文档引用的既有事实不能过期。
+
+        抽查两条最关键的：网关返回 JSON（不返回 HTML）、
+        读动作不留审计（否则 UI 轮询会刷爆日志）。
+        """
+        text = _read(self.DESIGN)
+        gateway = (REPO_ROOT / "nxs" / "edge" / "gateway.py").read_text(encoding="utf-8")
+
+        if "读动作不留痕" in text or "不会刷爆审计" in text:
+            nodes_block = gateway.split('elif action == "nodes":')[1].split("elif action")[0]
+            metrics_block = gateway.split('elif action == "metrics":')[1].split("elif action")[0]
+            assert "record_ops" not in nodes_block, (
+                "`nodes` 开始留痕了 —— 设计文档里「UI 轮询不会刷爆审计」"
+                "这个前提失效了（每 3 秒写一条审计）"
+            )
+            assert "record_ops" not in metrics_block, (
+                "`metrics` 开始留痕了 —— 设计文档里「轮询不刷审计」的前提失效"
             )

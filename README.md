@@ -179,7 +179,7 @@ nxs ops approve node-a --url https://hub.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.9.1）
+### 已实现（v0.9.2）
 
 | 模块 | 状态 |
 |---|---|
@@ -291,6 +291,15 @@ make demo
 See [`docs/architecture.md`](docs/architecture.md).
 
 ### Status
+
+**v0.9.2** — a design (not code) for the WebUI watch window.
+`docs/design/05-webui-design.md`. Checking facts first changed the plan:
+`/nxs/ops/nodes` does **not** return `display_name`, `RoleCard` has no
+`description` at all, and `display_name` is unvalidated self-reported input
+(the node fills it in). So this is not a frontend task — it moves the card
+contract. Proposed: a separate read-only UI process on `127.0.0.1`,
+data fetched **through the ops endpoints** (never the storage layer), auth by
+SSH tunnel + a per-start token. Three decisions are left open.
 
 **v0.9.1** — `roles.executor` is a label, not a gate. A probe confirmed a
 node with `executor: false` but declared capabilities still completes the full

@@ -186,6 +186,9 @@ MODULES: tuple[Module, ...] = (
     Module("M14", "运维接口", "管理面",
            "nxs/edge/gateway.py（ops 端点）· nxs/edge/client.py:OpsClient",
            "已实现", ("G3",)),
+    Module("M15", "观察窗 WebUI", "管理面",
+           "nxs/ui（未建）· 设计见 docs/design/05-webui-design.md",
+           "未实现", ("G3",)),
 )
 
 
