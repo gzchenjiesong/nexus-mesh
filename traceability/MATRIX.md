@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **501** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
+共 **523** 个测试方法（已声明覆盖）· **136** 个纵向编号项（113 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -38,7 +38,7 @@
 | **M1.F13** | 并发与流配额（短请求与 SSE 分别计） | `nxs/edge/gateway.py:Gateway.acquire_request_slot/acquire_sse_slot` | G2 | P1 | — | 3 |
 | **M1.F14** | SSE 通知流（仅通知不含数据 · 心跳 · 重连换流） | `nxs/edge/gateway.py:_Handler._handle_events` | G1 | P1 | — | 4 |
 | **M1.F15** | 网关优雅关闭（先关中枢再停 accept） | `nxs/edge/gateway.py:Gateway.stop` | G1 | P2 | — | 2 |
-| **M1.F16** | 节点侧 HTTP 传输（实现 Transport 协议） | `nxs/edge/client.py:HttpTransport` | G1,G4 | P0 | — | 18 |
+| **M1.F16** | 节点侧 HTTP 传输（实现 Transport 协议） | `nxs/edge/client.py:HttpTransport` | G1,G4 | P0 | — | 21 |
 | **M1.F17** | 推送不可用时降级为短轮询 | `nxs/edge/client.py:HttpTransport.subscribe` | G1 | P1 | — | 2 |
 | **M1.F18** | 凭据可只放在环境变量（自注册节点无需写进配置节点列表） | `nxs/edge/auth.py:Authenticator._secret_for` | G4,G1 | P0 | — | 3 |
 | **M1.R1** | 认证失败不得区分具体原因（防成员枚举） | （由 M1.F7 实现） | G2 | P0 | S4 | 1 |
@@ -96,13 +96,13 @@ _（未实现，暂无功能点）_
 
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
-| **M5.F1** | 任务类型白名单 | `nxs/control/policy.py:PolicyEngine.check_delivery（类型判定）` | G2 | P0 | S1 | 9 |
+| **M5.F1** | 任务类型白名单 | `nxs/control/policy.py:PolicyEngine.check_delivery（类型判定）` | G2 | P0 | S1 | 14 |
 | **M5.F2** | 域间矩阵校验（默认拒绝） | `nxs/control/policy.py:PolicyEngine.check_delivery（rule 查找）` | G2 | P0 | S3 | 3 |
 | **M5.F3** | 接收方约束校验 | `nxs/control/policy.py:PolicyEngine.check_delivery（can_receive_from）` | G2 | P0 | S3 | 1 |
 | **M5.F4** | 应答字段白名单（含列表递归） | `nxs/control/policy.py:PolicyEngine.check_response` | G2 | P0 | S2 | 5 |
 | **M5.F5** | 等级上限计算（三重取最小） | `nxs/control/policy.py:PolicyEngine.check_delivery（min 计算）` | G2 | P0 | S5 | 8 |
 | **M5.F6** | 发布权限校验 | `nxs/control/policy.py:PolicyEngine.check_publish` | G2 | P0 | S3 | 5 |
-| **M5.F7** | 配额校验（并发／按日／字节） | `nxs/control/policy.py:PolicyEngine.check_quota` | G2 | P1 | — | 11 |
+| **M5.F7** | 配额校验（并发／按日／字节） | `nxs/control/policy.py:PolicyEngine.check_quota` | G2 | P1 | — | 12 |
 | **M5.F8** | 委托链校验 | `nxs/control/policy.py:PolicyEngine.check_delegation` | G2 | P1 | — | 1 |
 | **M5.F9** | 能力发现查询 | `nxs/control/policy.py:PolicyEngine.providers_of` | G1 | P1 | — | 2 |
 | **M5.F10** | 角色卡来源可注入（策略层以注册表为准，而非只看配置） | `nxs/control/policy.py:PolicyEngine.__init__（card_resolver/cards_source）` | G1,G5 | P0 | — | 2 |
@@ -167,9 +167,9 @@ _（未实现，暂无功能点）_
 
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
-| **M10.F1** | 字段白名单强制执行 | `nxs/data/boundary.py:ResponseBoundary.enforce` | G2 | P0 | S2 | 10 |
+| **M10.F1** | 字段白名单强制执行 | `nxs/data/boundary.py:ResponseBoundary.enforce` | G2 | P0 | S2 | 19 |
 | **M10.F2** | semantics 强制改写为 data | `nxs/data/boundary.py:ResponseBoundary.enforce_on_task` | G2 | P0 | S7 | 2 |
-| **M10.F3** | 自由文本清洗（控制字符／指令前缀／UTF-8 安全截断） | `nxs/data/boundary.py:ResponseBoundary.sanitize_freetext` | G2 | P0 | S8 | 8 |
+| **M10.F3** | 自由文本清洗（控制字符／指令前缀／UTF-8 安全截断） | `nxs/data/boundary.py:ResponseBoundary.sanitize_freetext` | G2 | P0 | S8 | 10 |
 | **M10.F4** | 来源标注（trust_hint ＋ provenance） | `nxs/data/boundary.py:ResponseBoundary.trust_hint` | G2,G3 | P1 | — | 2 |
 | **M10.F5** | 节点侧应答边界（数据离节点前裁剪到自身声明范围） | `nxs/data/boundary.py:LocalBoundary.check` | G2 | P0 | S2,S14 | 14 |
 | **M10.F6** | 自由文本规范化两层共用同一实现（防逻辑分叉） | `nxs/data/boundary.py:sanitize_artifact` | G2 | P1 | S8 | 4 |
@@ -238,7 +238,7 @@ _（未实现，暂无功能点）_
 | **M14.F5** | 节点状态查询（含未批准节点） | `nxs/edge/gateway.py:_Handler._handle_ops（nodes）` | G3 | P1 | — | 3 |
 | **M14.F6** | 运维动作审计（谁在何时给谁放了行） | `nxs/edge/gateway.py:Gateway.record_ops` | G3 | P0 | — | 1 |
 | **M14.F7** | 运维 CLI（nxs ops） | `nxs/__main__.py:cmd_ops` | G3 | P1 | — | 7 |
-| **M14.F8** | 部署自检（nxs doctor：持久化／权限／TLS／运维通道） | `nxs/__main__.py:cmd_doctor` | G3 | P1 | — | 7 |
+| **M14.F8** | 部署自检（nxs doctor：持久化／权限／TLS／运维通道） | `nxs/__main__.py:cmd_doctor` | G3 | P1 | — | 9 |
 | **M14.R1** | 运维通道不与节点共享配额——故障时运维必须进得来 | （由 M14.F1, M14.F2, M14.F3 实现） | G3 | P0 | — | 2 |
 | **M14.R2** | 被管理者不能给自己批条子：节点密钥无法调用运维接口 | （由 M14.F2 实现） | G2,G3 | P0 | — | 2 |
 

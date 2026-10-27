@@ -77,25 +77,20 @@ from nxs.core.models import Level, RoleCard
 from nxs.edge.client import HttpTransport
 from nxs.sdk import NodeClient, NodeConfig
 
-#: 自由文本上限，与 ``nxs/control/policy.MAX_FREETEXT_BYTES`` 保持一致。
-#: 在节点侧先截到同样的长度，好处是**截断发生在自己这里**——
-#: 自己截可以加省略号、可以在日志里记一笔；被边界截是静默的。
-MAX_ANSWER_BYTES = 4096
-
-#: 截断时加的标记。**它的字节数必须从预算里扣掉** ——
-#: 初版硬编码了 12 字节，而这个标记实际是 18 字节
-#: （… 3 + （已截断）15），于是截断后仍超限 5 字节。
-#: 这种 off-by-N 在多字节文本里特别容易算错：看着是 6 个字符，
-#: 实际是 18 字节。所以让代码自己算，别手写数字。
-TRUNCATION_MARK = "…（已截断）"
-
-#: 单次调用的默认超时（秒）。10 秒能答完简单问题，给到 180 秒是为了
-#: 容纳"检索 + 归纳"这类活。超时就判失败，**不要无限等**——
-#: 任务的租约在这种情况下会被调用方视为"卡住"。
-DEFAULT_TIMEOUT = 180
-
-#: 问题文本的输入上限（字符）。防一个超长 prompt 白烧 token。
-MAX_QUESTION_CHARS = 4000
+# 校验 / 截断 / prompt / 失败语义 与 openclaw 桥接共用一份实现。
+# 安全相关的逻辑不能有两份 —— 迟早会不一致。
+from examples.agent_bridge_common import (  # noqa: F401 - 部分符号供外部导入
+    DEFAULT_TIMEOUT,
+    MAX_ANSWER_BYTES,
+    MAX_QUESTION_CHARS,
+    TRUNCATION_MARK,
+    build_prompt as _build_prompt_common,
+    finalize_answer,
+    make_ask_handler,
+    run_subprocess,
+    truncate_utf8 as _truncate_utf8,
+    validate_question,
+)
 
 #: 默认工具集。见模块文档第 ① 条。
 DEFAULT_TOOLSETS = "safe"
@@ -184,15 +179,7 @@ def build_prompt(question: str) -> str:
     前言只做三件事：说明这是任务总线转达、要求直答、要求只给结论。
     **不注入任何业务判断** —— 判断留给 Agent 自己。
     """
-    return (
-        "下面这个问题来自另一个 Agent（通过任务总线转达）。"
-        "请直接给出答案：不要反问、不要等待确认、不要描述你打算怎么做。\n"
-        "你的回答会作为**数据**返回给发起方，因此只给结论与必要依据，"
-        "不要输出工具调用细节或执行步骤。\n"
-        "\n"
-        "问题：\n"
-        f"{question}"
-    )
+    return _build_prompt_common(question, via="任务总线")
 
 
 def make_handler(hermes_cmd: list[str], *, timeout: int, logger: logging.Logger,
@@ -204,65 +191,24 @@ def make_handler(hermes_cmd: list[str], *, timeout: int, logger: logging.Logger,
         它不是命令行参数。传错的话 hermes 会用默认 profile 而不是
         ``working``，症状是"回答风格不对"而不是报错，很难查。
 
-    ``-z`` 模式不读 stdin，所以显式给 ``DEVNULL``：万一它想交互，
-    直接拿到 EOF 而不是挂在那里等一个永远不会来的输入。
+    校验、截断、失败语义都在 :mod:`examples.agent_bridge_common` 里，
+    与 openclaw 桥接共用一份实现。这里只负责"怎么调 hermes"。
     """
 
-    def handle(params: dict) -> dict:
-        question = params.get("question")
-        if not isinstance(question, str) or not question.strip():
-            # 参数不合法 → 让任务失败。不要"猜一个默认问题"——
-            # 那会用一个错的输入换来一个看起来成功的产出。
-            raise ValueError("params.question 缺失或为空")
+    def runner(prompt: str) -> str:
+        result = run_subprocess(
+            [*hermes_cmd, prompt],
+            timeout=timeout,
+            logger=logger,
+            # HERMES_HOME 必须显式传：它决定用哪个 profile。
+            # 不传会退回默认 profile，而症状是"回答不对"不是报错。
+            env=_hermes_env(hermes_home),
+            cwd=hermes_home if Path(hermes_home).is_dir() else None,
+            what="Hermes",
+        )
+        return result.stdout or ""
 
-        if len(question) > MAX_QUESTION_CHARS:
-            raise ValueError(
-                f"params.question 超长（{len(question)} > {MAX_QUESTION_CHARS} 字符）"
-            )
-
-        prompt = build_prompt(question)
-        logger.info("→ 转给 Hermes（问题 %d 字符）", len(question))
-
-        try:
-            result = subprocess.run(
-                [*hermes_cmd, prompt],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                # 不给 stdin：-z 是单次模式，读不到输入正好，
-                # 免得它意外进入交互等待
-                stdin=subprocess.DEVNULL,
-                # HERMES_HOME 必须显式传：它决定用哪个 profile。
-                # 不传会退回默认 profile，而症状是"回答不对"不是报错。
-                env={**_hermes_env(hermes_home)},
-                cwd=hermes_home if Path(hermes_home).is_dir() else None,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"Hermes 超时（>{timeout}s）") from exc
-
-        if result.returncode != 0:
-            # ★ 只把退出码与**截断后的 stderr** 记进日志，不进产出。
-            #   stderr 可能含环境信息（路径、token 前缀），不该外发。
-            tail = (result.stderr or "").strip()[-400:]
-            logger.error("Hermes 退出码 %s：%s", result.returncode, tail)
-            raise RuntimeError(f"Hermes 执行失败（退出码 {result.returncode}）")
-
-        answer = (result.stdout or "").strip()
-        if not answer:
-            # 空产出比失败更危险：调用方会以为"它答了但没内容"
-            raise RuntimeError("Hermes 返回空内容")
-
-        # 自己先按字节截断（多字节安全），并说明截断了
-        raw = answer.encode("utf-8")
-        if len(raw) > MAX_ANSWER_BYTES:
-            logger.warning("回答 %d 字节，超出上限，截断", len(raw))
-            budget = MAX_ANSWER_BYTES - len(TRUNCATION_MARK.encode("utf-8"))
-            answer = _truncate_utf8(answer, budget) + TRUNCATION_MARK
-
-        logger.info("← 收到回答（%d 字符）", len(answer))
-        return {"answer": answer, "level": "summary"}
-
-    return handle
+    return make_ask_handler(runner, logger=logger, via="任务总线")
 
 
 def _truncate_utf8(text: str, limit: int) -> str:
