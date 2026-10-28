@@ -87,7 +87,9 @@ class TestBashScript:
         中文为主的脚本里这个问题很普遍。修法：`${code}`。
         """
         text = self.path.read_text(encoding="utf-8")
-        bad = re.findall(r"\$([A-Za-z_]\w*)(?=[^\x00-\x7F])", text)
+        # 只检查代码与字符串，跳过注释（注释里的 $null， 是无害的）
+        bad = re.findall(r"\$([A-Za-z_]\w*)(?=[^\x00-\x7F])",
+                         _ps_strip_comments(text))
         assert not bad, (
             f"这些变量后面紧跟非 ASCII 字符，会被当成变量名的一部分：{sorted(set(bad))}\n"
             f"  修法：改成 ${{var}} 形式"
@@ -174,7 +176,8 @@ class TestPowerShellScript:
         那比 bash 的报错更糟：**它静默给出空值**，脚本继续往下跑。
         """
         text = self.path.read_text(encoding="utf-8")
-        bad = re.findall(r"\$([A-Za-z_]\w*)(?=[^\x00-\x7F])", text)
+        bad = re.findall(r"\$([A-Za-z_]\w*)(?=[^\x00-\x7F])",
+                         _ps_strip_comments(text))
         assert not bad, (
             f"这些变量后面紧跟非 ASCII，会被吞进变量名：{sorted(set(bad))}"
         )
@@ -497,7 +500,9 @@ class TestPowerShellQuoting:
             if not p.exists():
                 continue
             text = p.read_bytes().decode("utf-8-sig")
-            bad = re.findall(r"\$([A-Za-z_]\w*)(?=[^\x00-\x7F])", text)
+            # 跳过注释：说明文字里出现 $null， 是无害的，不该误报
+            bad = re.findall(r"\$([A-Za-z_]\w*)(?=[^\x00-\x7F])",
+                             _ps_strip_comments(text))
             assert not bad, (
                 f"{p.name}: 这些变量后面紧跟非 ASCII，会被吞进变量名："
                 f"{sorted(set(bad))}"
@@ -1159,3 +1164,379 @@ class TestTlsFilePermissions:
         text = (DEPLOY / "gen-tls.sh").read_text(encoding="utf-8")
         assert "SERVICE_GROUP" in text
         assert "chown" in text
+
+
+def _ps_code_only(text: str) -> str:
+    """剥掉 PowerShell 的字符串与注释，只留代码。
+
+    必要性：注释里会举例说明 `$code` 怎么错，字符串里也可能出现 $。
+    不剥掉就会把说明文字当成代码来检查。
+    """
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "#":
+            while i < n and text[i] != "\n":
+                i += 1
+        elif text[i:i + 2] == "<#":
+            j = text.find("#>", i)
+            i = (j + 2) if j >= 0 else n
+        elif c in "\"'":
+            q, i = c, i + 1
+            while i < n:
+                if text[i] == "`":
+                    i += 2
+                    continue
+                if q == '"' and text[i] == '"' and i + 1 < n and text[i + 1] == '"':
+                    i += 2
+                    continue
+                if text[i] == q:
+                    i += 1
+                    break
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+#: PowerShell 自动提供、不需要赋值的变量
+_PS_AUTOMATIC = {
+    "_", "args", "input", "this", "true", "false", "null", "psitem",
+    "lastExitCode", "LASTEXITCODE", "Error", "Matches", "PSScriptRoot",
+    "PSCommandPath", "HOME", "PWD", "ShellId", "StackTrace", "MyInvocation",
+}
+
+
+class TestPowerShellVariablesDefined:
+    """★★ 用到的变量必须都有赋值。
+
+    ⚠ **这是我自己犯的、最难发现的错误。**
+
+    我给 `setup-work-node.ps1` 写过一个变量 `$hasCa` 用来判断 CA 是否存在，
+    但**从来没给它赋过值**。PowerShell 在非 StrictMode 下对未定义变量
+    返回 `$null`，于是：
+
+        if ($hasCa) { $CaFile } else { "" }   →  永远是 ""
+
+    结果是：**CA 存在也不会被用上，而脚本一声不响地继续跑**。
+    检查用的还是系统 CA 库，自签证书必然验不过 —— 而报出来的是
+    "证书校验失败"，跟"变量没赋值"看起来毫无关系。
+
+    这种错连语法检查都过（`bash -n` 同理），只能靠静态扫描。
+    """
+
+    scripts = [
+        DEPLOY / "setup-work-node.ps1",
+        DEPLOY / "diag-net.ps1",
+        DEPLOY / "diag-python.ps1",
+    ]
+
+    @covers("M14.F8")
+    def test_no_undefined_variables(self):
+        import re
+
+        problems = []
+        for p in self.scripts:
+            if not p.exists():
+                continue
+            code = _ps_code_only(p.read_bytes().decode("utf-8-sig"))
+
+            # 变量使用（排除 $env:TEMP 这类作用域前缀）
+            # (?!\w) 防止回溯：$env:TEMP 不能匹配成 $en
+            uses = set(re.findall(r"(?<![\w:$])\$([A-Za-z_]\w*)(?![\w:])", code))
+            # 赋值形式：$x =   $x +=   foreach ($x in   function f($x)   param(...)
+            assigned = set(re.findall(r"\$([A-Za-z_]\w*)\s*\+?=", code))
+            assigned |= set(re.findall(r"foreach\s*\(\s*\$([A-Za-z_]\w*)", code))
+            assigned |= set(re.findall(r"function\s+\w+\s*\(([^)]*)\)", code)
+                            and re.findall(
+                                r"\$([A-Za-z_]\w*)",
+                                "".join(re.findall(r"function\s+\w+\s*\(([^)]*)\)", code))))
+            m = re.search(r"param\s*\((.*?)\)", code, re.S)
+            if m:
+                assigned |= set(re.findall(r"\$([A-Za-z_]\w*)", m.group(1)))
+
+            missing = sorted(uses - assigned - _PS_AUTOMATIC)
+            if missing:
+                problems.append((p.name, missing))
+
+        assert not problems, (
+            "这些脚本用到了没赋值的变量：\n"
+            + "\n".join(f"  {name}: {miss}" for name, miss in problems)
+            + "\n  PowerShell 对未定义变量返回 $null（不报错），"
+              "于是 if ($x) 恒假 —— 而表现出的症状跟变量无关。"
+        )
+
+    @covers("M14.F8")
+    def test_ca_prepared_before_network_check(self):
+        """★★ CA 准备必须在网络检查**之前**。
+
+        ⚠ 顺序错了会造出一个"永远失败"的检查：
+
+        初版把 CA 复制放在后面的"准备本机文件"一节，而网络检查在前面。
+        检查跑的时候本地还没有 CA，于是用系统 CA 库 ——
+        自签证书必然验不过。**无论环境多正确，这项检查都过不了。**
+
+        而用户看到的是"证书校验失败"，会去查证书文件，
+        不知道真正的问题是脚本的顺序。
+        """
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        i_ca = text.find('Say "-> CA 证书"')
+        i_net = text.find('Say "-> 网络与证书"')
+        assert i_ca > 0, "找不到 CA 准备段"
+        assert i_net > 0, "找不到网络检查段"
+        assert i_ca < i_net, (
+            "CA 准备在网络检查之后 —— 检查时会没有 CA 可用，必然失败"
+        )
+
+    @covers("M14.F8")
+    def test_no_empty_argument_list(self):
+        """★ 用 `-ArgumentList` 时不能传入可能为空的数组元素。
+
+        ⚠ 实测报错：
+
+            无法对参数 "ArgumentList" 执行参数验证。参数为 Null 或空。
+            请提供一个不为 Null 或空的参数，然后重试该命令。
+
+        PowerShell 不说是哪个元素空的。而这里的元素是"CA 路径"——
+        CA 不存在时它就是空串。
+
+        现在的做法：参数全部走**环境变量**，`-ArgumentList` 只给文件路径
+        （单元素、不可能为空）。环境变量空值就是空串，不会被参数验证拦下。
+        """
+        import re
+
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        code = _ps_code_only(text)
+        for m in re.finditer(r"-ArgumentList\s+(@\([^)]*\)|\$\w+)", code):
+            arg = m.group(1)
+            assert arg.startswith("$") or arg.count(",") == 0, (
+                f"-ArgumentList 传了数组（可能含空元素）：{arg}"
+            )
+
+def _ps_strip_comments(text: str) -> str:
+    """剥掉 PowerShell 注释，**保留字符串**。
+
+    ⚠ 与 :func:`_ps_code_only` 的区别很关键：
+
+    ``$var`` 紧跟中文的问题恰恰**发生在字符串里** ——
+    ``Say "$verText（版本不够）"`` 里的全角括号会被吃进变量名。
+    所以检查这个问题时不能把字符串剥掉。
+
+    但注释里出现 ``$null，`` 这种是无害的（人读说明文字），
+    必须排除，否则误报。
+    """
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "#":
+            # 注释：跳到行尾（但保留换行）
+            while i < n and text[i] != "\n":
+                i += 1
+        elif text[i:i + 2] == "<#":
+            j = text.find("#>", i)
+            i = (j + 2) if j >= 0 else n
+        elif c in "\"'":
+            q = c
+            out.append(c)
+            i += 1
+            while i < n:
+                if text[i] == "`":
+                    out.append(text[i:i + 2])
+                    i += 2
+                    continue
+                if q == '"' and text[i] == '"' and i + 1 < n and text[i + 1] == '"':
+                    out.append(text[i:i + 2])
+                    i += 2
+                    continue
+                out.append(text[i])
+                if text[i] == q:
+                    i += 1
+                    break
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+class TestHealthCheckLogic:
+    """★ 部署脚本内嵌的 Python 健康检查逻辑要真的对。
+
+    ⚠ 这段逻辑是**从 .ps1 里嵌进去的**，所以不能靠"看着对"。
+    本机无法执行 PowerShell（沙箱限制），但可以把它**抽出来单独跑** ——
+    它就是一段普通 Python，用真实 HTTPS 服务器能验出全部行为。
+    """
+
+    @staticmethod
+    def _extract() -> str:
+        """从 .ps1 里抽出 here-string 里的检查脚本。"""
+        import re
+
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        m = re.search(r"\$chkCode = @'\n(.*?)\n'@", text, re.S)
+        assert m, "找不到内嵌的 Python 检查脚本"
+        return m.group(1)
+
+    @staticmethod
+    def _run(workdir, *, url: str, ca: str) -> dict:
+        """用指定环境变量跑一次检查脚本，返回解析后的 JSON。"""
+        import json
+        import os
+        import subprocess
+        import sys
+
+        script = workdir / "chk.py"
+        script.write_text(TestHealthCheckLogic._extract(), encoding="utf-8")
+        env = dict(os.environ)
+        env["NXS_CHK_URL"] = url
+        env["NXS_CHK_CA"] = ca
+        r = subprocess.run([sys.executable, str(script)],
+                           capture_output=True, text=True, timeout=40, env=env)
+        assert r.returncode == 0, f"脚本自身崩了：{r.stderr}"
+        return json.loads(r.stdout)
+
+    @staticmethod
+    def _make_tls(workdir, days: int = 1):
+        """生成一套临时 CA + 服务端证书，返回 (ca, cert, key)。"""
+        import subprocess
+
+        ca_key, ca_pem = workdir / "ca.key", workdir / "ca.pem"
+        srv_key, srv_csr, srv_pem = (workdir / "s.key", workdir / "s.csr",
+                                     workdir / "s.pem")
+        cfg = workdir / "req.cnf"
+        cfg.write_text(
+            "[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=test-ca\n"
+            "[v3_ca]\nsubjectKeyIdentifier=hash\n"
+            "basicConstraints=critical,CA:TRUE\n"
+            "keyUsage=critical,digitalSignature,cRLSign,keyCertSign\n"
+            "[v3_srv]\nsubjectKeyIdentifier=hash\n"
+            "basicConstraints=critical,CA:FALSE\n"
+            "keyUsage=critical,digitalSignature,keyEncipherment\n"
+            "extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost\n",
+            encoding="utf-8")
+        cmds = [
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", str(ca_key), "-out", str(ca_pem), "-days", "1",
+             "-config", str(cfg), "-extensions", "v3_ca"],
+            ["openssl", "req", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", str(srv_key), "-out", str(srv_csr),
+             "-subj", "/CN=127.0.0.1"],
+            ["openssl", "x509", "-req", "-in", str(srv_csr),
+             "-CA", str(ca_pem), "-CAkey", str(ca_key), "-CAcreateserial",
+             "-out", str(srv_pem), "-days", "1",
+             "-extfile", str(cfg), "-extensions", "v3_srv"],
+        ]
+        for c in cmds:
+            r = subprocess.run(c, capture_output=True, text=True, timeout=60)
+            assert r.returncode == 0, f"{c[0]} 失败：{r.stderr}"
+        return ca_pem, srv_pem, srv_key
+
+    @staticmethod
+    @pytest.fixture()
+    def workdir():
+        """自建临时目录。
+
+        ⚠ 不用 pytest 的 ``tmp_path`` —— 沙箱的 sitecustomize 拦截了
+        ``Path.mkdir``，那个夹具会报 FileExistsError。
+        """
+        import tempfile
+        d = tempfile.mkdtemp(prefix="nxs-chk-")
+        yield pathlib.Path(d)
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+    @covers("M14.F8")
+    def test_ok_when_ca_matches(self, workdir):
+        """CA 正确、服务正常 → ok=true，并报出是否严格模式。"""
+        import socket
+        import ssl
+        import threading
+        import http.server
+
+        ca, srv_pem, srv_key = self._make_tls(workdir)
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(srv_pem), str(srv_key))
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            res = self._run(workdir, url=f"https://127.0.0.1:{port}/", ca=str(ca))
+        finally:
+            srv.shutdown()
+
+        assert res["ok"] is True, f"应当通过：{res}"
+        assert res["status"] == 200
+        assert "strict" in res, "没报出是否处于严格模式"
+
+    @covers("M14.F8")
+    def test_cert_error_classified_as_cert_not_net(self, workdir):
+        """★★ 证书错误必须归为 `cert:`，不能归为 `net:`。
+
+        ⚠ 这是我写这段代码时的真 bug：
+
+            except ssl.SSLCertVerificationError: ...   # 永远不触发
+            except urllib.error.URLError as e: ...     # 实际走这里
+
+        ``urlopen`` 把 SSL 错误**包进 URLError**（放在 ``.reason`` 里），
+        所以前面那个分支写着也不生效，证书问题被标成 `net:`。
+
+        而"网络问题"和"证书问题"的修法完全不同 —— 这正是前面
+        反复踩的那类混淆。所以现在从 ``URLError.reason`` 里判断类型。
+        """
+        import http.server
+        import ssl
+        import threading
+
+        ca, srv_pem, srv_key = self._make_tls(workdir)
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(srv_pem), str(srv_key))
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        # 故意给一个别的 CA（用仓库那份，与这台临时服务器不匹配）
+        try:
+            res = self._run(workdir, url=f"https://127.0.0.1:{port}/",
+                            ca=str(DEPLOY / "ca.pem"))
+        finally:
+            srv.shutdown()
+
+        assert res["ok"] is False
+        err = res.get("err", "")
+        assert err.startswith("cert:"), (
+            f"证书错误被归成了非 cert（{err}）—— 会引导用户去查网络"
+        )
+        assert "verify_code" in res, "没带上 OpenSSL 的验证码"
+
+    @covers("M14.F8")
+    def test_network_error_classified_as_net(self, workdir):
+        """连不上要归为 `net:`。"""
+        res = self._run(workdir, url="https://127.0.0.1:1/",
+                        ca=str(DEPLOY / "ca.pem"))
+        assert res["ok"] is False
+        assert res.get("err", "").startswith("net:"), (
+            f"连接失败被归成了非 net：{res}"
+        )

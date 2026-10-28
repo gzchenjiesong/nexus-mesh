@@ -163,6 +163,56 @@ if (-not $Py) {
     Say "   （继续做其余检查，但节点无法启动）"
 }
 
+# ------------------------------------------------------------------ CA 准备
+# ⚠ **必须在网络检查之前。**
+#
+#   初版把 CA 复制放在后面的"准备本机文件"一节，于是网络检查跑的时候
+#   CA 还不存在 —— 检查用的是系统 CA 库，自签证书必然验不过。
+#   也就是说：**这项检查在修好之前永远会失败**，而失败原因是脚本自己的
+#   顺序问题，不是环境问题。
+Say ""
+Say "-> CA 证书"
+
+# CA —— **优先从仓库复制，不要求手工粘贴**
+#
+# ⚠ 手工粘贴 PEM 是个可靠的出错方式，实测过两种：
+#   · 记事本存成 UTF-8 BOM → curl 退出码 77（"CA 文件加载不了"）
+#   · 粘贴被截断          → 同样 77
+#   而 77 的提示语里看不出是编码问题，很容易被误判成网络故障。
+#
+# CA 是**公开证书**（不含私钥），本来就该随代码走 —— 放仓库里
+# deploy/ca.pem，脚本直接复制，一次都不用粘。
+$repoCa = Join-Path $PSScriptRoot "ca.pem"
+if (Test-Path $CaFile) {
+    Ok "CA 已存在: $CaFile"
+    $sz = (Get-Item $CaFile).Length
+    if ($sz -lt 800) {
+        Warn "但文件只有 $sz 字节（正常约 1200）—— 可能粘贴不完整"
+        if (Test-Path $repoCa) {
+            Copy-Item $repoCa $CaFile -Force
+            Ok "已用仓库里的版本覆盖（$((Get-Item $CaFile).Length) 字节）"
+        }
+    } else {
+        # 检查有没有 BOM —— 有的话 curl 会直接报 77
+        $bytes = [System.IO.File]::ReadAllBytes($CaFile)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            Warn "检测到 UTF-8 BOM —— curl 会因此加载失败（退出码 77）"
+            if (Test-Path $repoCa) {
+                Copy-Item $repoCa $CaFile -Force
+                Ok "已用仓库里的版本覆盖（去掉了 BOM）"
+            }
+        }
+    }
+} elseif (Test-Path $repoCa) {
+    Copy-Item $repoCa $CaFile -Force
+    Ok "CA 已从仓库复制: $CaFile"
+} else {
+    Bad "找不到 ca.pem"
+    Say "     应在仓库里：deploy\ca.pem"
+    Say "     也可从服务器取："
+    Say "       scp root@$($Server.Split(':')[0]):/etc/nexus-mesh/tls/ca.pem `"$CaFile`""
+}
+
 # ------------------------------------------------------------------ 网络
 Say ""
 Say "-> 网络与证书"
@@ -196,61 +246,104 @@ if (-not $pyForCheck) {
         if ($Check) { exit 1 }
     }
 } else {
-    # 把检查逻辑写成临时 .py —— 不用内联 -c，避免引号/括号转义问题
+    # 把检查逻辑写成临时 .py —— 不用内联 -c，避免引号/括号转义问题。
+    #
+    # ⚠ 参数通过**环境变量**传，不走 -ArgumentList。
+    #
+    #   实测踩过：`-ArgumentList @($file, $url, $chkCa)` 在 $chkCa 为空时
+    #   PowerShell 直接抛
+    #     「无法对参数 ArgumentList 执行参数验证。参数为 Null 或空」
+    #   而那句话完全没提是数组里哪个元素空的。
+    #
+    #   环境变量没有这个问题：空值就是空串，不会被参数验证拦下。
+    #   而且子进程默认继承父进程环境，不需要额外传参。
     $chkFile = Join-Path $env:TEMP "nxs_health_check.py"
     $chkOut  = Join-Path $env:TEMP "nxs_health_out.txt"
     $chkErr  = Join-Path $env:TEMP "nxs_health_err.txt"
 
     $chkCode = @'
-import json, ssl, sys, urllib.error, urllib.request
-url, ca = sys.argv[1], sys.argv[2]
-out = {"ok": False}
+import json, os, ssl, urllib.error, urllib.request
+
+url = os.environ.get("NXS_CHK_URL", "")
+ca  = os.environ.get("NXS_CHK_CA", "")
+out = {"ok": False, "url": url}
 try:
     ctx = None
     if ca:
         ctx = ssl.create_default_context(cafile=ca)
-    out["strict"] = bool(ctx.verify_flags & ssl.VERIFY_X509_STRICT) if ctx else None
+        out["strict"] = bool(ctx.verify_flags & ssl.VERIFY_X509_STRICT)
+    else:
+        out["note"] = "no-ca"
     with urllib.request.urlopen(url, context=ctx, timeout=10) as r:
         out["ok"] = (r.status == 200)
         out["status"] = r.status
+except urllib.error.URLError as e:
+    # ⚠ **证书错误会被 urllib 包进 URLError。**
+    #
+    #   所以不能写成 `except ssl.SSLCertVerificationError` 在前 ——
+    #   urlopen 抛出的是 URLError(reason=SSLCertVerificationError)，
+    #   那个分支永远不触发，证书问题会被误判成网络问题。
+    #   而这正是我一直在修的那类混淆，不能自己再犯一次。
+    reason = e.reason
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        out["err"] = "cert: " + str(reason)
+        out["verify_code"] = getattr(reason, "verify_code", None)
+    else:
+        out["err"] = "net: " + str(reason)
 except ssl.SSLCertVerificationError as e:
+    # 兜底：某些路径可能直接抛，不经 URLError 包装
     out["err"] = "cert: " + str(e)
     out["verify_code"] = getattr(e, "verify_code", None)
-except urllib.error.URLError as e:
-    out["err"] = "url: " + str(e.reason)
 except Exception as e:
     out["err"] = type(e).__name__ + ": " + str(e)
 print(json.dumps(out))
 '@
     Set-Content -Path $chkFile -Value $chkCode -Encoding UTF8
 
-    $chkCa = if ($hasCa) { $CaFile } else { "" }
+    # 传参走环境变量（见上），ArgumentList 只给文件路径 —— 单元素，不可能为空
+    # ⚠ 这里必须**现查**，不能依赖外部变量。
+    #   之前写了个 $hasCa 但从来没赋值 —— PowerShell 里未定义变量是 $null，
+    #   于是 if ($null) 恒假，CA 永远不被使用。而脚本不会报错。
+    $chkHasCa = Test-Path $CaFile
+    $env:NXS_CHK_URL = "$ServerUrl/health"
+    $env:NXS_CHK_CA  = if ($chkHasCa) { $CaFile } else { "" }
+
     $pyOut = $null
     $pyProc = $null
+    $runErr = $null
     try {
-        $pyProc = Start-Process -FilePath $pyForCheck `
-            -ArgumentList @($chkFile, "$ServerUrl/health", $chkCa) `
+        $pyProc = Start-Process -FilePath $pyForCheck -ArgumentList $chkFile `
             -NoNewWindow -PassThru `
             -RedirectStandardOutput $chkOut -RedirectStandardError $chkErr
         if (-not $pyProc.WaitForExit(25000)) {
             try { $pyProc.Kill() } catch { }
-            Bad "健康检查超时 25 秒"
-            if ($Check) { exit 1 }
-        } else {
-            if (Test-Path $chkOut) { $pyOut = (Get-Content $chkOut -Raw) }
+            $runErr = "health check timed out after 25s"
+        } elseif (Test-Path $chkOut) {
+            $pyOut = (Get-Content $chkOut -Raw)
         }
     } catch {
-        Bad "跑 Python 检查失败：$($_.Exception.Message)"
-        if ($Check) { exit 1 }
+        $runErr = $_.Exception.Message
     } finally {
-        foreach ($f in @($chkFile, $chkOut, $chkErr)) {
-            try { if (Test-Path $f) { Remove-Item $f -Force } } catch { }
-        }
+        Remove-Item Env:\NXS_CHK_URL -ErrorAction SilentlyContinue
+        Remove-Item Env:\NXS_CHK_CA  -ErrorAction SilentlyContinue
     }
 
     $res = $null
     if ($pyOut) {
-        try { $res = $pyOut | ConvertFrom-Json } catch { }
+        try { $res = $pyOut | ConvertFrom-Json } catch { $res = $null }
+    }
+    if ($runErr) {
+        # 检查本身跑不起来 —— 说清楚，别让人以为是网络问题
+        Warn "健康检查没跑成：$runErr"
+        if (Test-Path $chkErr) {
+            $e = (Get-Content $chkErr -Raw)
+            if ($e -and $e.Trim()) { Say ("       " + ($e.Trim() -split "`n")[0]) }
+        }
+    }
+
+    # 清理临时文件
+    foreach ($f in @($chkFile, $chkOut, $chkErr)) {
+        try { if (Test-Path $f) { Remove-Item $f -Force } } catch { }
     }
 
     if ($res -and $res.ok) {
@@ -400,46 +493,6 @@ try {
     Ok "已限制凭据目录访问（仅当前用户）"
 } catch {
     Warn "设置目录权限失败，请手工确认 $AgentDir 不是共享/同步目录"
-}
-
-# CA —— **优先从仓库复制，不要求手工粘贴**
-#
-# ⚠ 手工粘贴 PEM 是个可靠的出错方式，实测过两种：
-#   · 记事本存成 UTF-8 BOM → curl 退出码 77（"CA 文件加载不了"）
-#   · 粘贴被截断          → 同样 77
-#   而 77 的提示语里看不出是编码问题，很容易被误判成网络故障。
-#
-# CA 是**公开证书**（不含私钥），本来就该随代码走 —— 放仓库里
-# deploy/ca.pem，脚本直接复制，一次都不用粘。
-$repoCa = Join-Path $PSScriptRoot "ca.pem"
-if (Test-Path $CaFile) {
-    Ok "CA 已存在: $CaFile"
-    $sz = (Get-Item $CaFile).Length
-    if ($sz -lt 800) {
-        Warn "但文件只有 $sz 字节（正常约 1200）—— 可能粘贴不完整"
-        if (Test-Path $repoCa) {
-            Copy-Item $repoCa $CaFile -Force
-            Ok "已用仓库里的版本覆盖（$((Get-Item $CaFile).Length) 字节）"
-        }
-    } else {
-        # 检查有没有 BOM —— 有的话 curl 会直接报 77
-        $bytes = [System.IO.File]::ReadAllBytes($CaFile)
-        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-            Warn "检测到 UTF-8 BOM —— curl 会因此加载失败（退出码 77）"
-            if (Test-Path $repoCa) {
-                Copy-Item $repoCa $CaFile -Force
-                Ok "已用仓库里的版本覆盖（去掉了 BOM）"
-            }
-        }
-    }
-} elseif (Test-Path $repoCa) {
-    Copy-Item $repoCa $CaFile -Force
-    Ok "CA 已从仓库复制: $CaFile"
-} else {
-    Bad "找不到 ca.pem"
-    Say "     应在仓库里：deploy\ca.pem"
-    Say "     也可从服务器取："
-    Say "       scp root@$($Server.Split(':')[0]):/etc/nexus-mesh/tls/ca.pem `"$CaFile`""
 }
 
 # 凭据
