@@ -995,11 +995,33 @@ def _system_default_path() -> str | None:
                     continue
         except OSError:
             pass
+    # ⚠ **Linux 没有 ``/etc/paths``**（那是 macOS 的约定）。
+    #
+    #   初版取不到就 ``return None``，调用方于是"判断不了"→ 一律返回 True，
+    #   等于在 Linux 上这个检查完全失效。而 CI 跑在 Ubuntu 上，
+    #   对应的测试断言 ``is False`` 必然失败 —— 本地 macOS 测不出来。
+    #
+    #   Linux 的默认 PATH 用 FHS 约定的那几条；这不是从环境读的，
+    #   而是发行版默认值，足够用来判断"某个目录是不是用户自己加的"。
     if not entries:
-        return None
-    # 常见的用户级 bin 也加上（但**不含** .zshrc 才加的目录）——
-    # 这里刻意不加 ~/.local/bin：它就是我们要检测的嫌疑对象
-    for extra in ("/opt/homebrew/bin", "/usr/local/bin"):
+        import sys as _sys
+
+        if _sys.platform.startswith("linux"):
+            entries = [
+                "/usr/local/sbin", "/usr/local/bin",
+                "/usr/sbin", "/usr/bin", "/sbin", "/bin",
+            ]
+        else:
+            return None
+
+    # 按平台补上"确实是系统级、但可能没写进配置文件"的目录。
+    # 刻意**不含** ~/.local/bin：它就是我们要检测的嫌疑对象。
+    import sys as _sys
+
+    extras = ("/usr/local/bin",)
+    if _sys.platform == "darwin":
+        extras = ("/opt/homebrew/bin", "/usr/local/bin")
+    for extra in extras:
         if extra not in entries:
             entries.append(extra)
     return ":".join(entries)

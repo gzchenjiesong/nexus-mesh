@@ -274,6 +274,33 @@ class TestNumberClaims:
             f"README 没有提到「{expected}步」（demo 实际 {actual_steps} 步）"
         )
 
+        # ⚠ **Makefile 的同一条声称也要守。**
+        #
+        #   历史：README 和 Makefile 各写了一份步数，README 修到九步时
+        #   Makefile 的 `## 跑完整的 7 步验收 Demo` 留在七步，
+        #   而当时的测试只检查 README —— 漏了。
+        #
+        #   这是"同一个事实写在两处"的典型后果：只守一处的测试，
+        #   等于给另一处发了免检证。
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+        # ⚠ Makefile 的 help 文本用**阿拉伯数字**（"9 步"），README 用
+        #   中文数字（"九步"）—— 两种写法都要认。
+        #   我第一版只查中文，结果 Makefile 明明写对了却报"没提到九步"。
+        def _mentions(text: str, n: int) -> bool:
+            word = zh.get(n)
+            return (f"{n} 步" in text) or (f"{n}步" in text) or \
+                   (word is not None and f"{word}步" in text)
+
+        stale_mk = [n for n in zh if n != actual_steps and _mentions(makefile, n)]
+        assert not stale_mk, (
+            f"Makefile 里出现过时的步数 {stale_mk}（实际 {actual_steps} 步）"
+        )
+        assert _mentions(makefile, actual_steps), (
+            f"Makefile 没有提到实际步数（{actual_steps} 步）"
+            f"—— help 文本应与 demo 一致"
+        )
+
 
 class TestAcceptanceGuideClaims:
     """``docs/acceptance-guide.md`` 是"能验收什么"的权威说明。

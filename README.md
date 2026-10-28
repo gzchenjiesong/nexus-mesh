@@ -112,16 +112,25 @@ make demo-net      # 同一套九步断言，走真实 HTTP
 数据与判断见 [`docs/artifact-size.md`](docs/artifact-size.md)，
 可用 `python examples/probe_artifact_size.py` 复现。
 
-`nxs demo` 会跑出一段完整的协作流程，包括**三条安全断言**：
+`nxs demo` 跑 **9 步**，其中第 4–6 步是**三条安全断言**（以下是实际输出）：
 
 ```
-[4/7] 安全断言① 下发未注册的任务类型
-      → REJECTED  rule_id=WL-TYPE-404   （不进入任何执行逻辑）
-[5/7] 安全断言② 请求超出字段白名单的内容
-      → REJECTED  rule_id=WL-FIELD-001  （协调节点仅收到 rule_id，无内容）
-[6/7] 安全断言③ 跨信任域发布任务
-      → REJECTED  rule_id=MX-DOMAIN-02  （默认拒绝）
+[4/9] ★ 安全断言①  未注册的任务类型
+       REJECTED  WL-TYPE-404  类型未注册，不进入任何执行逻辑
+
+[5/9] ★ 安全断言②  越界字段（核心收不到内容）
+       REJECTED  WL-FIELD-001  对外响应 = {'denied': 'true', 'rule_id': ...}
+       对外响应不含字段名、不含内容——详情仅入本地审计
+
+[6/9] ★ 安全断言③  控制是逐层收窄的（角色 → 白名单 → 矩阵）
+       REJECTED  MX-ISSUER-01  node-a  roles.issuer=false → 角色层拦截
+       REJECTED  MX-DOMAIN-02  node-b → node-a  有发布权，但矩阵无规则
+       ★ 角色层放行、矩阵层拦截——两层互相独立，这是关键性质
 ```
+
+第 7–9 步是另外三条断言：**断电恢复**（节点被 kill 后任务回队列）、
+**自动匹配**（不指定目标也能派出活且可复现）、
+**可观测**（单看都正常的指标，合起来才说明问题）。
 
 **这三条断言是这个项目区别于普通消息传递的地方。** 若它们不能稳定复现地通过，本项目就没有达成设计目标。
 
