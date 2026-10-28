@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 #  setup-work-laptop.ps1 —— 在 Windows 公司电脑上准备 Nexus Mesh 执行者节点
 # ==============================================================================
 #
@@ -54,18 +54,38 @@ Say "   凭据目录  : $AgentDir"
 Say ""
 Say "-> Python（桥接是 Python 程序，必须 >= 3.11）"
 $Py = $null
+$PyVer = $null
 foreach ($cand in @("python", "python3", "py")) {
-    try {
-        $ver = & $cand -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $ver) {
-            $ok = $false
-            try {
-                $ok = ([version]$ver -ge [version]"3.11")
-            } catch { $ok = $false }
-            if ($ok) { $Py = $cand; Ok "$cand -> $ver"; break }
-            else { Warn "$cand -> ${ver}（版本不够）" }
-        }
-    } catch { }
+    $exe = Get-Command $cand -ErrorAction SilentlyContinue
+    if (-not $exe) { continue }
+
+    # 用**单引号**包 Python 代码：PowerShell 单引号内不做任何展开，
+    # 里面的引号、括号、$ 都是字面量 —— 不会像双引号那样参与解析。
+    # （原来用双引号 + 嵌套括号，一旦文件编码出问题就崩在解析阶段。）
+    $code = 'import sys; print(str(sys.version_info[0]) + "." + str(sys.version_info[1]))'
+
+    $raw = $null
+    try { $raw = & $exe.Source -c $code 2>$null } catch { continue }
+    if (-not $raw) { continue }
+
+    $verText = ([string]$raw).Trim()
+
+    # 不用 [version] 强转 —— 它能接受 "3.11" 但遇到多余空白或后缀就抛异常，
+    # 而那个异常会被 catch 吞掉，看起来像"版本不够"。分段比较更直白。
+    $parts = $verText.Split('.')
+    if ($parts.Length -lt 2) { continue }
+    $major = 0; $minor = 0
+    if (-not [int]::TryParse($parts[0], [ref]$major)) { continue }
+    if (-not [int]::TryParse($parts[1], [ref]$minor)) { continue }
+
+    $versionOk = ($major -gt 3) -or (($major -eq 3) -and ($minor -ge 11))
+    if ($versionOk) {
+        $Py = $exe.Source
+        $PyVer = $verText
+        Ok "$cand -> $PyVer"
+        break
+    }
+    Warn "$cand -> ${verText}（需要 3.11+）"
 }
 if (-not $Py) {
     Bad "没有可用的 Python 3.11+"
@@ -247,11 +267,11 @@ if ($InstallTask) {
     # pythonw.exe：无控制台窗口。找不到就退回 python.exe（会有黑窗）
     $pyw = $null
     try {
-        $pyDir = Split-Path (Get-Command $Py -ErrorAction Stop).Source
+        $pyDir = Split-Path -Parent $Py
         $pywCand = Join-Path $pyDir "pythonw.exe"
         if (Test-Path $pywCand) { $pyw = $pywCand }
     } catch { }
-    if (-not $pyw) { $pyw = (Get-Command $Py).Source; Warn "找不到 pythonw.exe，将使用 python.exe（会有黑窗）" }
+    if (-not $pyw) { $pyw = $Py; Warn "找不到 pythonw.exe，将使用 python.exe（会有黑窗）" }
 
     $taskName = "NexusMesh-$NodeId"
 
@@ -305,11 +325,11 @@ Say ""
 Say "  2) 确认 CodeBuddy 能用（会消耗一点额度）："
 Say ""
 Say "     cd $RepoDir"
-Say "     $Py examples\codebuddy_node.py --check-tools"
+Say "     & `"$Py`" examples\codebuddy_node.py --check-tools"
 Say ""
 Say "  3) 注册节点："
 Say ""
-Say "     $Py examples\codebuddy_node.py --dry-run"
+Say "     & `"$Py`" examples\codebuddy_node.py --dry-run"
 Say ""
 Say "  4) 在服务器上批准："
 Say ""

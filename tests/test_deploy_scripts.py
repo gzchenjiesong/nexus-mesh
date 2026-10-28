@@ -112,6 +112,37 @@ class TestPowerShellScript:
         assert self.path.is_file(), "Windows 部署脚本缺失"
 
     @covers("M14.F8")
+    def test_has_utf8_bom(self):
+        """★★ **必须有 UTF-8 BOM。**
+
+        ⚠ 这是实测踩到的第一个坑，而且报了 10 条莫名其妙的解析错误。
+
+        Windows PowerShell 5.1 判断编码的方式很粗暴：**看前 3 字节有没有
+        BOM，没有就按系统 ANSI（中文系统上是 GBK）读**。
+
+        于是无 BOM 的 UTF-8 中文会被误解码。更糟的是：某个中文字符的
+        UTF-8 字节可能在 GBK 下与后面的引号拼成一个字符 ——
+        **字符串的结束引号被吞掉**，解析器从那里开始把后面的代码当成
+        字符串内容，于是报出的错误位置跟真正的问题完全无关：
+
+            第59行「方法调用中缺少 )」   ← 真正的问题在第55行的中文
+
+        PowerShell 7+ 默认按 UTF-8 读，所以这个问题只在 5.1（Windows 自带）上出现。
+        而用户公司电脑上跑的就是 5.1。
+        """
+        raw = self.path.read_bytes()
+        assert raw.startswith(b"\xef\xbb\xbf"), (
+            "缺 UTF-8 BOM —— Windows PowerShell 5.1 会按 GBK 读，"
+            "中文乱码并吞掉引号，报出一堆与真实原因无关的解析错误"
+        )
+
+    @covers("M14.F8")
+    def test_no_bom_duplication(self):
+        """BOM 只能有一个（重复加会变成一个可见的乱码字符）。"""
+        raw = self.path.read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf\xef\xbb\xbf"), "BOM 重复了"
+
+    @covers("M14.F8")
     def test_brackets_balanced(self):
         """括号必须配对，且嵌套顺序正确。
 
@@ -236,3 +267,111 @@ class TestDocMentionsWindows:
     def test_bridge_doc_covers_windows(self):
         doc = (REPO_ROOT / "docs" / "agent-bridges.md").read_text(encoding="utf-8")
         assert "Windows" in doc, "桥接文档没提 Windows —— 而公司电脑就是 Windows"
+
+
+class TestPowerShellFragility:
+    """★ Windows PowerShell 5.1 上容易出错的具体写法。
+
+    这些不是"风格问题" —— 每一条都会导致脚本跑不起来或行为不可预期。
+    """
+
+    path = DEPLOY / "setup-work-laptop.ps1"
+
+    def _code(self) -> str:
+        """去掉注释后的代码（注释里提到某个写法不算问题）。"""
+        raw = self.path.read_bytes().decode("utf-8-sig")
+        return "\n".join(l for l in raw.splitlines()
+                         if not l.lstrip().startswith("#"))
+
+    @covers("M14.F8")
+    def test_no_version_cast(self):
+        """★ 不用 `[version]` 强转来做版本比较。
+
+        `[version]$ver -ge [version]"3.11"` 看起来对，但：
+        - `$ver` 若是 `"3.11.9 "`（带空白）会抛异常
+        - 异常被 `catch { $ok = $false }` 吞掉，**表现成"版本不够"**
+        - 于是用户会以为装错了版本，实际是解析问题
+
+        改成分段比较：取 major/minor 两个整数，直白且不会静默失败。
+        """
+        assert "[version]" not in self._code(), (
+            "[version] 强转遇空白/后缀会抛异常，而异常被 catch 吞掉，"
+            "看起来像「版本不够」"
+        )
+
+    @covers("M14.F8")
+    def test_inline_python_uses_single_quotes(self):
+        """★ 内联 Python 代码用**单引号**包。
+
+        PowerShell 双引号里 `$` 会展开、`(` `)` 参与解析；
+        单引号内**一切都是字面量**。跑内联脚本必须用单引号。
+
+        原来是：
+            & $cand -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+                                             ↑ 嵌套三层括号 + 引号
+
+        一旦文件编码出问题（见上面 BOM 那条），这种写法会崩在解析阶段，
+        而不是给出"编码有问题"的明确报错。
+        """
+        code = self._code()
+        import re
+        # `& <某命令> -c "..."` 这种形式不许出现
+        assert not re.search(r'&\s*\S+\s+-c\s+"', code), (
+            "内联 Python 用了双引号 —— 应改成单引号，避免嵌套括号与 $ 展开"
+        )
+
+    @covers("M14.F8")
+    def test_dollar_paren_balanced_inside_strings(self):
+        """★ 双引号字符串内的 `$()` 子表达式必须平衡。
+
+        这类不平衡时，PowerShell 的报错位置会指向后面几行 ——
+        而真正的问题在字符串里。所以单独验一遍。
+        """
+        raw = self.path.read_bytes().decode("utf-8-sig")
+        for idx, line in enumerate(raw.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            j, n, in_str, sub = 0, len(line), False, 0
+            while j < n:
+                c = line[j]
+                if not in_str:
+                    if c == "#":
+                        break
+                    if c == '"':
+                        in_str = True
+                    j += 1
+                    continue
+                if c == "`":
+                    j += 2
+                    continue
+                if c == '"':
+                    if j + 1 < n and line[j + 1] == '"':
+                        j += 2
+                        continue
+                    assert sub == 0, f"第 {idx} 行：$() 未闭合就结束了字符串"
+                    in_str = False
+                    j += 1
+                    continue
+                if c == "$" and j + 1 < n and line[j + 1] == "(":
+                    sub += 1
+                    j += 2
+                    continue
+                if c == ")" and sub:
+                    sub -= 1
+                    j += 1
+                    continue
+                j += 1
+            assert not in_str, f"第 {idx} 行：双引号字符串未闭合"
+
+    @covers("M14.F8")
+    def test_python_path_is_absolute(self):
+        """★ `$Py` 存的是**完整路径**，不是命令名。
+
+        计划任务启动时不保证 PATH 与交互式终端相同。存命令名
+        （`python`）的话，任务可能报"找不到 python"——
+        而手工跑一切正常，非常难查。
+        """
+        code = self._code()
+        assert "$Py = $exe.Source" in code, (
+            "$Py 应存可执行文件的完整路径（$exe.Source），而不是命令名"
+        )
