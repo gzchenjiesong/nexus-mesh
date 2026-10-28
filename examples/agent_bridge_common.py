@@ -32,6 +32,18 @@ import logging
 import subprocess
 from typing import Callable
 
+#: 「摘要」能力的回答上限（字节）。
+#:
+#: ⚠ 为什么不直接复用 MAX_ANSWER_BYTES：那个是**协议允许的上限**，
+#: 而这里是**业务上愿意给出去的上限**。两件事不同。
+#:
+#: 场景：公司电脑作为执行者去查内部系统。凭证留在内网（正确），
+#: 但**结果要过云服务器**。所以回传内容必须收窄 —— 只给摘要，
+#: 原文留在内网。这个数字就是那道闸门。
+#:
+#: 1500 字节 ≈ 500 个汉字。够一份结构化摘要，装不下完整会议纪要。
+SUMMARY_LIMIT = 1500
+
 #: 自由文本上限，与 ``nxs/control/policy.MAX_FREETEXT_BYTES`` 保持一致。
 #: 在节点侧先截到同样的长度，好处是**截断发生在自己这里** ——
 #: 自己截可以加省略号、可以记日志；被边界截是静默的。
@@ -140,7 +152,8 @@ def build_prompt(question: str, *, via: str) -> str:
     )
 
 
-def finalize_answer(raw: str, logger: logging.Logger) -> dict:
+def finalize_answer(raw: str, logger: logging.Logger,
+                    *, limit: int = MAX_ANSWER_BYTES) -> dict:
     """把 Agent 的原始输出整理成节点产出。
 
     **空产出比失败更危险**：调用方会以为"它答了，只是没内容"。
@@ -148,15 +161,30 @@ def finalize_answer(raw: str, logger: logging.Logger) -> dict:
 
     返回的键必须严格等于角色卡里的 ``response_fields`` ——
     多一个就会被边界拒绝，而且拒绝信息里不含字段名（字段名本身可能带信息）。
+
+    ## ``limit``：按能力收紧上限
+
+    ⚠ **这是"只回传摘要"的技术保障。** 光在 prompt 里写"只要摘要"是不够的 ——
+    被提示注入的 Agent 照样会回传原文，而它自己认为在"配合"。
+
+    所以上限必须由**桥接进程**执行，而不是由 Agent 自觉：
+
+    * ``work.query``（摘要）→ ``limit=SUMMARY_LIMIT``（1500 字节）
+    * ``agent.ask``（对话）→ 默认 4096 字节
+
+    这个数字是**硬边界**：超过就截断，并在末尾留标记。
+    调用方看到标记就知道"还有内容没给我" —— 而不是以为那就是全部。
     """
     answer = (raw or "").strip()
     if not answer:
         raise RuntimeError("Agent 返回空内容（不是失败，但没有可回传的内容）")
 
     encoded = answer.encode("utf-8")
-    if len(encoded) > MAX_ANSWER_BYTES:
-        logger.warning("回答 %d 字节，超出上限，截断", len(encoded))
-        budget = MAX_ANSWER_BYTES - len(TRUNCATION_MARK.encode("utf-8"))
+    if len(encoded) > limit:
+        logger.warning("回答 %d 字节，超出上限 %d，截断", len(encoded), limit)
+        mark_bytes = len(TRUNCATION_MARK.encode("utf-8"))
+        # 上限必须容得下标记本身，否则截断后反而更长
+        budget = max(limit - mark_bytes, 0)
         answer = truncate_utf8(answer, budget) + TRUNCATION_MARK
 
     logger.info("← 收到回答（%d 字符）", len(answer))
@@ -208,16 +236,26 @@ def make_ask_handler(
     *,
     logger: logging.Logger,
     via: str = "任务总线",
+    limit: int = MAX_ANSWER_BYTES,
+    prompt_note: str = "",
 ) -> Callable[[dict], dict]:
-    """把 ``runner`` 包成 ``agent.ask`` 的处理器。
+    """把 ``runner`` 包成任务处理器。
 
     :param runner: 吃问题文本，吐 Agent 的原始文字输出
+    :param limit: 回答的硬上限（字节）。**"只回传摘要"靠这个落实**，
+        不靠 prompt 自觉 —— 见 :func:`finalize_answer` 的说明。
+    :param prompt_note: 追加给 Agent 的额外约束（会拼进 prompt 末尾）。
+        用于"只给摘要、不要原文"这类**行为要求**。
+        注意：它只是要求，不保证 —— 真正的保证是 ``limit``。
     """
 
     def handle(params: dict) -> dict:
         question = validate_question(params)
         logger.info("→ 转给 Agent（问题 %d 字符）", len(question))
-        raw = runner(build_prompt(question, via=via))
-        return finalize_answer(raw, logger)
+        prompt = build_prompt(question, via=via)
+        if prompt_note:
+            prompt = f"{prompt}\n\n{prompt_note}"
+        raw = runner(prompt)
+        return finalize_answer(raw, logger, limit=limit)
 
     return handle
