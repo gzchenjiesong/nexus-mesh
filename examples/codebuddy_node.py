@@ -669,13 +669,32 @@ _KNOWN_FAILURES: tuple[tuple[str, str], ...] = (
     ),
     (
         "Authentication required",
-        "**未登录**。codebuddy 需要先登录才能跑无头调用。\n"
-        "        → 在终端里运行一次交互式 `codebuddy`，输入 /login 完成登录\n"
-        "        → 登录后 ~/.codebuddy 下会有凭据，再回来跑本命令"
+        "**CLI 未登录**（注意：与 IDE 的登录状态是两回事，见下）。\n"
+        "\n"
+        "        ⚠ **CodeBuddy IDE 登录了不代表 CLI 登录了。**\n"
+        "          两者是独立应用，凭据存在不同地方：\n"
+        "            · IDE（Electron）→ 自己的应用数据目录 + Safe Storage\n"
+        "            · CLI            → 操作系统的凭据库（Keychain /\n"
+        "                              Windows 凭据管理器）\n"
+        "          所以 IDE 里显示已登录，CLI 这边仍然是未登录。\n"
+        "\n"
+        "        两条路，选一条：\n"
+        "\n"
+        "        【A 推荐】交互式登录一次（凭据进系统凭据库，之后常驻任务也能用）：\n"
+        "            codebuddy\n"
+        "          进去后按提示选登录方式（国内选 Chinese Site）完成授权，\n"
+        "          然后 Ctrl+C 退出，回来重跑本命令。\n"
+        "\n"
+        "        【B 适合无人值守】用 API Key（不依赖浏览器和交互）：\n"
+        "            $env:CODEBUDDY_API_KEY = \"<你的 API Key>\"\n"
+        "            $env:CODEBUDDY_INTERNET_ENVIRONMENT = \"internal\"   # 国内版必须\n"
+        "          两个变量缺一不可 —— 只设 API Key 会 401。\n"
+        "          API Key 从 https://copilot.tencent.com 获取。"
     ),
     (
         "not logged in",
-        "**未登录**。→ 交互式跑一次 `codebuddy` 完成 /login",
+        "**CLI 未登录**。→ 交互式跑一次 `codebuddy` 完成登录；"
+        "或用 CODEBUDDY_API_KEY + CODEBUDDY_INTERNET_ENVIRONMENT（见 --check-tools 说明）",
     ),
 )
 
@@ -743,6 +762,124 @@ def _report_probe(label: str, ok: bool, out: str, err: str, rc: int,
                      "但没往 stdout 写东西）")
 
 
+def _detect_cli_auth() -> dict:
+    """探测 **CLI 自己**的登录状态，返回 ``{"ok", "summary", "detail"}``。
+
+    ## 为什么不能只看 IDE
+
+    CodeBuddy IDE 和 CLI 是两个独立应用（虽然同一引擎）：
+
+    ======  ================================  ==========================
+    应用     凭据存放                           实测证据
+    ======  ================================  ==========================
+    IDE      Electron 应用数据目录 +            keychain 里有
+             Safe Storage                      "CodeBuddy CN Safe Storage"
+    CLI      OS 凭据库（独立 service 名）        没有对应条目 = 未登录
+    ======  ================================  ==========================
+
+    所以「IDE 里已登录」对 CLI **没有任何帮助**。
+
+    ## 判定顺序（与官方文档一致）
+
+    ``CODEBUDDY_AUTH_TOKEN`` > ``apiKeyHelper`` > ``CODEBUDDY_API_KEY`` > 交互登录
+    """
+    import sys as _sys
+
+    # ① 环境变量方式 —— 最明确，优先
+    token = os.environ.get("CODEBUDDY_AUTH_TOKEN", "")
+    if token:
+        return {"ok": True, "summary": "CODEBUDDY_AUTH_TOKEN（环境变量）",
+                "detail": ""}
+
+    api_key = os.environ.get("CODEBUDDY_API_KEY", "")
+    if api_key:
+        env_scope = os.environ.get("CODEBUDDY_INTERNET_ENVIRONMENT", "")
+        # ⚠ 官方文档明确要求：国内版必须同时设 CODEBUDDY_INTERNET_ENVIRONMENT=internal，
+        #   只设 API Key 会 401。实测确认过：错误里会带
+        #   (auth-type:...,token-type:ApiKey,token-length:N) 但仍 401。
+        if env_scope:
+            return {"ok": True,
+                    "summary": f"CODEBUDDY_API_KEY（环境={env_scope}）",
+                    "detail": ""}
+        return {
+            "ok": False,
+            "summary": "CODEBUDDY_API_KEY 已设，但缺 CODEBUDDY_INTERNET_ENVIRONMENT",
+            "detail": (
+                "⚠ 只设 CODEBUDDY_API_KEY 会返回 401。官方文档要求同时设：\n"
+                "    国内版  → CODEBUDDY_INTERNET_ENVIRONMENT=internal\n"
+                "    海外版  → 不设（或留空）\n"
+                "    iOA     → ioa\n"
+                "    专享版  → cloudhosted（还需在 settings.json 配 endpoint）\n"
+                "  补上环境变量再重试；或改用交互式登录。"
+            ),
+        }
+
+    # ② OS 凭据库
+    if _sys.platform == "darwin":
+        found, names = _keychain_codebuddy_entries()
+        if found:
+            return {"ok": True, "summary": f"macOS Keychain（{names}）",
+                    "detail": ""}
+        return {
+            "ok": False,
+            "summary": "未检测到 CLI 凭据",
+            "detail": (
+                "macOS Keychain 里没有 codebuddy CLI 的凭据条目。\n"
+                "  注意：能看到的 'CodeBuddy CN Safe Storage' 是 **IDE** 的，\n"
+                "        不是 CLI 的 —— 两者不通用。"
+            ),
+        }
+
+    if _sys.platform == "win32":
+        return {
+            "ok": False,
+            "summary": "未检测到环境变量方式的凭据",
+            "detail": (
+                "没有 CODEBUDDY_API_KEY / CODEBUDDY_AUTH_TOKEN。\n"
+                "  CLI 也可能已通过交互登录把凭据存进了 Windows 凭据管理器，\n"
+                "  那种情况本函数读不出来（需要 DPAPI）。\n"
+                "  → 直接往下试一次就知道了；若报 401，按提示登录。"
+            ),
+        }
+
+    return {"ok": True, "summary": "（无法判定，直接试）", "detail": ""}
+
+
+def _keychain_codebuddy_entries() -> tuple[bool, str]:
+    """在 macOS Keychain 里找 CLI 的凭据条目。
+
+    ⚠ 只看 **service 名**，不读凭据内容 —— 那是敏感数据。
+    """
+    import subprocess as _sp
+
+    try:
+        r = _sp.run(["security", "dump-keychain"], capture_output=True,
+                    text=True, timeout=20)
+    except (OSError, _sp.TimeoutExpired):
+        return False, ""
+
+    if r.returncode != 0:
+        return False, ""
+
+    # 从 dump 里抽 svce 值
+    names = []
+    for line in r.stdout.splitlines():
+        s = line.strip()
+        if '"svce"' in s and "blob" in s:
+            # 形如：  "svce"<blob>="XXX"
+            val = s.rsplit("=", 1)[-1].strip().strip('"')
+            names.append(val)
+
+    # CLI 的条目名里通常带 codebuddy 且**不**含 "Safe Storage"
+    # （Safe Storage 是 Electron 应用用来加密本地存储的，与 CLI 无关）
+    cli_names = [n for n in names
+                 if "codebuddy" in n.lower() and "safe storage" not in n.lower()
+                 and "workbuddy" not in n.lower()]
+    if cli_names:
+        return True, ", ".join(sorted(set(cli_names))[:3])
+    return False, ""
+
+
 def check_tools(bin_path: str, logger: logging.Logger) -> int:
     """确认 CodeBuddy 能被**程序**调用。注册之前必须先过这一关。
 
@@ -779,6 +916,49 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
         _report_probe("--version", ok, out, err, rc, logger)
         logger.error("  → 二进制本身跑不起来，先解决这个")
         return 1
+
+    # ---- 认证方式预检 ----
+    #
+    # ⚠ **CodeBuddy IDE 登录了不代表 CLI 登录了。**
+    #
+    #   两者是独立应用，凭据存的地方不同（实测确认）：
+    #     · IDE（Electron）→ ~/Library/Application Support/CodeBuddy CN
+    #                        + 系统 Safe Storage（"CodeBuddy CN Safe Storage"）
+    #     · CLI            → 操作系统凭据库，service 名与 IDE 不同
+    #
+    #   所以先在 keychain / 凭据管理器里找 CLI 自己的那条；
+    #   找不到就说明 CLI 没登录过，直接给两条路，不用浪费一次调用去试。
+    auth_hint = _detect_cli_auth()
+    logger.info("认证方式：%s", auth_hint["summary"])
+
+    # ⚠ 预检**只在该阻断时阻断**。
+    #
+    #   "检测不到凭据" ≠ "一定没登录" —— 我的探测有盲区：
+    #     · macOS：不知道 CLI 实际用的 keychain service 名，
+    #       条目名可能不匹配我的过滤规则
+    #     · Windows：凭据管理器内容需要 DPAPI 才能读，根本读不到
+    #
+    #   所以"检测不到"只警告、继续试。否则会**假阴性阻断**：
+    #   用户明明登录了，脚本却说没登录，还不肯试 —— 那比不预检更糟。
+    #
+    #   唯一确定会失败、值得提前阻断的：API Key 设了但缺
+    #   CODEBUDDY_INTERNET_ENVIRONMENT —— 实测必 401。
+    if auth_hint["summary"].startswith("CODEBUDDY_API_KEY 已设") \
+            and not auth_hint["ok"]:
+        logger.error("")
+        for line in auth_hint["detail"].splitlines():
+            logger.error("  %s", line)
+        logger.error("")
+        logger.error("  这个组合确定会 401，先不跑了。补上环境变量再重试。")
+        return 1
+
+    if not auth_hint["ok"]:
+        logger.warning("")
+        for line in auth_hint["detail"].splitlines():
+            logger.warning("  %s", line)
+        logger.warning("")
+        logger.warning("  ⚠ 但这只是**预检**，可能漏判 —— 还是试一次。")
+        logger.warning("     若下面报 401，就按提示登录或配 API Key。")
 
     logger.info("下面两次会消耗少量额度…")
 

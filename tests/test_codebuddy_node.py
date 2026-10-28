@@ -944,7 +944,11 @@ class TestRealCodebuddyFindings:
             "to your account")
         assert advice, "没认出未登录"
         assert "未登录" in advice
-        assert "/login" in advice, "没告诉用户怎么登录"
+        # ⚠ 原文里虽然写着 "use /login command"，但实测**没有 /login 这个
+        #   CLI 子命令** —— 正确做法是交互式跑 `codebuddy`，进 REPL 后
+        #   按提示选登录方式。照抄原文的 /login 会让人在 shell 里白试。
+        assert "codebuddy" in advice, "没给出可执行的登录办法"
+        assert "CODEBUDDY_API_KEY" in advice, "没给 API Key 这条无人值守的路"
 
     @covers("M14.F8")
     def test_unknown_error_returns_empty(self):
@@ -970,3 +974,129 @@ class TestRealCodebuddyFindings:
             "探活判定只看 returncode，没检查 stdout 是否为空 —— "
             "未登录时 returncode 是 0，会被误判为成功"
         )
+
+
+class TestIdeAuthIsNotCliAuth:
+    """★★ **CodeBuddy IDE 登录了 ≠ CLI 登录了。**
+
+    ⚠ 用户实测反馈：「我的 codebuddy IDE 是有登录的，为啥还会提示没登录」
+
+    我在 macOS 上查清了原因（有真实环境，可复现）：
+
+    ==========  ======================================  ==================
+    应用         凭据存放                                  实测证据
+    ==========  ======================================  ==================
+    IDE          Electron 应用数据目录                    keychain 里有
+                 + Safe Storage                         "CodeBuddy CN
+                                                        Safe Storage"
+    CLI          操作系统凭据库（独立 service 名）           **没有**对应条目
+    ==========  ======================================  ==================
+
+    两者是同一引擎的两个**独立应用**，凭据完全隔离。
+    所以 IDE 里显示已登录，对 CLI 没有任何帮助。
+    """
+
+    @covers("M14.F9")
+    def test_detect_auth_token_env(self, monkeypatch):
+        """CODEBUDDY_AUTH_TOKEN 是最高优先级（官方文档明确）。"""
+        from examples.codebuddy_node import _detect_cli_auth
+
+        monkeypatch.setenv("CODEBUDDY_AUTH_TOKEN", "tok-123")
+        r = _detect_cli_auth()
+        assert r["ok"] is True
+        assert "AUTH_TOKEN" in r["summary"]
+
+    @covers("M14.F9")
+    def test_detect_api_key_with_env(self, monkeypatch):
+        """API Key + INTERNET_ENVIRONMENT 才算配好。"""
+        from examples.codebuddy_node import _detect_cli_auth
+
+        monkeypatch.delenv("CODEBUDDY_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("CODEBUDDY_API_KEY", "key-123")
+        monkeypatch.setenv("CODEBUDDY_INTERNET_ENVIRONMENT", "internal")
+        r = _detect_cli_auth()
+        assert r["ok"] is True
+        assert "internal" in r["summary"]
+
+    @covers("M14.F9")
+    def test_api_key_without_env_blocks(self, monkeypatch):
+        """★ 只设 API Key、缺 INTERNET_ENVIRONMENT —— 必须阻断。
+
+        官方文档明确要求两者同时设。实测确认：只设 Key 会
+        ``401 ... (token-type:ApiKey)`` —— 奇怪的是错误里显示
+        token 已读取，但仍 401，很容易误判成 "Key 无效"。
+
+        所以这个组合要在跑之前就拦住，别白耗一次调用。
+        """
+        from examples.codebuddy_node import _detect_cli_auth
+
+        monkeypatch.delenv("CODEBUDDY_AUTH_TOKEN", raising=False)
+        monkeypatch.setenv("CODEBUDDY_API_KEY", "key-123")
+        monkeypatch.delenv("CODEBUDDY_INTERNET_ENVIRONMENT", raising=False)
+        r = _detect_cli_auth()
+        assert r["ok"] is False
+        assert "INTERNET_ENVIRONMENT" in r["detail"]
+        # 要列出各版本该填什么
+        for v in ("internal", "ioa", "cloudhosted"):
+            assert v in r["detail"], f"没说明 {v} 这个取值"
+
+    @covers("M14.F9")
+    def test_no_credential_only_warns_not_blocks(self, monkeypatch):
+        """★ 检测不到凭据时**只警告，不能阻断**。
+
+        这个判定有盲区：
+          · macOS：不知道 CLI 实际用的 keychain service 名
+          · Windows：凭据管理器内容需要 DPAPI，读不到
+
+        如果"检测不到"就阻断，会产生**假阴性**：
+        用户明明登录了，脚本却说没登录，还不肯试一次 ——
+        那比完全不预检更糟。
+        """
+        from examples.codebuddy_node import _detect_cli_auth
+
+        for v in ("CODEBUDDY_AUTH_TOKEN", "CODEBUDDY_API_KEY",
+                  "CODEBUDDY_INTERNET_ENVIRONMENT"):
+            monkeypatch.delenv(v, raising=False)
+
+        r = _detect_cli_auth()
+        # 允许 ok=False（检测不到），但 detail 里不能出现"不跑了"这种阻断语气
+        # 真正的阻断判断在 check_tools 里，只对 API Key 缺环境变量生效
+        assert "detail" in r
+        assert "不跑了" not in r["detail"], (
+            "预检函数不该自己下阻断结论 —— 那会让调用方无法区分"
+            "「确定失败」和「检测不到」"
+        )
+
+    @covers("M14.F9")
+    def test_keychain_filter_excludes_safe_storage(self):
+        """★ Keychain 过滤必须排除 Electron 的 Safe Storage 条目。
+
+        「CodeBuddy CN Safe Storage」是 **IDE** 用来加密本地存储的，
+        与 CLI 无关。若把它当成 CLI 凭据，就会误判"已登录" ——
+        然后探活得到 401，反而更混乱。
+        """
+        import inspect
+        from examples.codebuddy_node import _keychain_codebuddy_entries
+
+        src = inspect.getsource(_keychain_codebuddy_entries)
+        assert "safe storage" in src.lower(), (
+            "没排除 Safe Storage 条目 —— 那是 IDE 的，会误判为 CLI 已登录"
+        )
+
+    @covers("M14.F9")
+    def test_advice_mentions_ide_not_cli(self):
+        """未登录的建议里必须点明「IDE ≠ CLI」。
+
+        否则用户会一直困惑："我明明登录了"。
+        """
+        from examples.codebuddy_node import explain_failure
+
+        advice = explain_failure(
+            "Authentication required. Please use /login command to sign in")
+        assert "IDE" in advice, "没提到 IDE"
+        assert "不代表" in advice or "不是" in advice, (
+            "没说清 IDE 登录不等于 CLI 登录"
+        )
+        # 两条路都要给
+        assert "codebuddy" in advice, "没给交互登录的办法"
+        assert "CODEBUDDY_API_KEY" in advice, "没给 API Key 的办法"
