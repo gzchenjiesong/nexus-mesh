@@ -524,14 +524,17 @@ if ($env:CODEBUDDY_ALLOWED_TOOLS) {
     Bad "未配置 CODEBUDDY_ALLOWED_TOOLS"
     Say ""
     Say "   这一步必须你自己填 —— 我不知道你公司内网的 CLI 叫什么。"
+    Say "   不知道有哪些？先跑："
+    Say "     powershell -ExecutionPolicy Bypass -File deploy\list-internal-tools.ps1"
+    Say ""
     Say "   PowerShell 里设（当前窗口临时生效）："
     Say ""
-    Say '     $env:CODEBUDDY_ALLOWED_TOOLS = "Bash(projectctl:*),Bash(meetingctl:*),Read,Grep"'
+    Say '     $env:CODEBUDDY_ALLOWED_TOOLS = "Bash(<内部CLI名>:*),Read,Grep"'
     Say ""
     Say "   永久生效（用户级）："
     Say ""
     Say '     [Environment]::SetEnvironmentVariable("CODEBUDDY_ALLOWED_TOOLS",'
-    Say '         "Bash(projectctl:*),Read,Grep", "User")'
+    Say '         "Bash(<内部CLI名>:*),Read,Grep", "User")'
 }
 
 if ($Check) {

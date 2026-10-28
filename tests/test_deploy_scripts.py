@@ -1230,6 +1230,7 @@ class TestPowerShellVariablesDefined:
         DEPLOY / "setup-work-node.ps1",
         DEPLOY / "diag-net.ps1",
         DEPLOY / "diag-python.ps1",
+        DEPLOY / "list-internal-tools.ps1",
     ]
 
     @covers("M14.F8")
@@ -1848,4 +1849,62 @@ class TestToolWhitelistValidation:
         parsed = [l.strip() for l in r.stdout.splitlines() if l.strip()]
         assert parsed == ["git", "npm"], (
             f"解析结果不对：{parsed} —— 期望 ['git','npm']"
+        )
+
+
+class TestNoFakeToolNamesInExamples:
+    """★ 示例里不能放"看起来像真名"的假工具名。
+
+    ⚠ **这是我自己造成的用户错误。**
+
+    我在 ``CODEBUDDY_ALLOWED_TOOLS`` 的示例里写了：
+
+        Bash(projectctl:*),Bash(meetingctl:*),Read,Grep
+
+    ``projectctl`` / ``meetingctl`` 是我编的 —— 但它们**太像真的**了，
+    用户直接照抄，于是得到"白名单里的 CLI 一个都找不到"。
+
+    用户完全没错，错在示例。**给可复制的示例，占位符必须一眼看出是占位符。**
+
+    正确写法：``Bash(<内部CLI名>:*)`` —— 尖括号明确表示"换成你的"，
+    而且它故意不符合 ``[A-Za-z0-9_.-]+``，所以校验器不会把它当成真名去查。
+    """
+
+    @covers("M14.F9")
+    def test_no_plausible_fake_names(self):
+        """setup 脚本的示例里不能出现 projectctl / meetingctl 这类假名字。"""
+        for name in ("setup-work-node.ps1", "setup-work-node.sh"):
+            p = DEPLOY / name
+            if not p.exists():
+                continue
+            text = (p.read_bytes().decode("utf-8-sig") if name.endswith("ps1")
+                    else p.read_text(encoding="utf-8"))
+            for fake in ("projectctl", "meetingctl", "yourctl", "myctl"):
+                assert fake not in text, (
+                    f"{name} 里还有假工具名 {fake!r} —— 用户会照抄，然后校验失败。"
+                    f"改成 <内部CLI名> 这种明显占位符。"
+                )
+
+    @covers("M14.F9")
+    def test_uses_explicit_placeholder(self):
+        """示例要用尖括号占位符，让人一眼知道要替换。"""
+        ps = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        assert "<内部CLI名>" in ps, (
+            "ps1 的示例没用尖括号占位符"
+        )
+
+    @covers("M14.F9")
+    def test_placeholder_not_parsed_as_tool(self):
+        """★ 占位符不能被白名单校验器当成真名去查。
+
+        校验器解析 ``Bash\\(([A-Za-z0-9_.-]+)`` —— ``<内部CLI名>`` 含尖括号
+        和中文，不匹配这个模式，所以会被跳过。这是刻意的：
+        占位符本来就不是真名，拿它去 Get-Command 只会得到误导性的"找不到"。
+        """
+        import re
+
+        pattern = r"Bash\(\s*([A-Za-z0-9_.\-]+)"
+        placeholder = "Bash(<内部CLI名>:*)"
+        assert not re.search(pattern, placeholder), (
+            "占位符被解析成了工具名 —— 它会被误报为'找不到'"
         )

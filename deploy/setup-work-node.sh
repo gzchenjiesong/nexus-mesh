@@ -294,7 +294,7 @@ else
   say "  这一步**必须你自己填** —— 我不知道你公司内网的 CLI 叫什么。"
   say "  形如（尖括号里的换成真实的）："
   say ""
-  say "    export CODEBUDDY_ALLOWED_TOOLS='Bash(projectctl:*),Bash(meetingctl:*),Read,Grep'"
+  say "    export CODEBUDDY_ALLOWED_TOOLS='Bash(<内部CLI名>:*),Read,Grep'"
   say ""
   say "  含义：只能调这两个 CLI + 读文件 + 搜文件。"
   say "  **不能执行任意命令、不能写文件。**"
