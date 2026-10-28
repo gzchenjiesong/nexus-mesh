@@ -1100,3 +1100,112 @@ class TestIdeAuthIsNotCliAuth:
         # 两条路都要给
         assert "codebuddy" in advice, "没给交互登录的办法"
         assert "CODEBUDDY_API_KEY" in advice, "没给 API Key 的办法"
+
+
+class TestCredentialPersistence:
+    """★★ 凭据能不能扛过重启 —— 直接决定部署方式。
+
+    ⚠ 用户的疑问很实际：
+
+    > 走 A 每次重启以后都会要重新登录吧，但是如果走 B 方案，
+    > 用 API KEY 是不是就跟重启无关了
+
+    两个方向都需要纠正，因为凭据持久化机制和直觉不同：
+
+    ==========  ==============================  ==========================
+                 A 交互式登录                      B API Key
+    ==========  ==============================  ==========================
+    存哪          `<配置目录>/.credentials.json`    环境变量（进程级）
+    重启后       还在 ✓（文件在磁盘上）              进程环境没了 ✗
+                 除非写进**用户级**环境变量
+    自动续期     有 refreshToken，会刷新            无，静态不变
+    ==========  ==============================  ==========================
+
+    所以 A **不是**"每次重启都要重新登录"；
+    B 也**不是**"天然与重启无关"。
+    """
+
+    @covers("M14.F9")
+    def test_advice_says_a_persists(self):
+        """★ A 方案的建议里必须说清"不需要每次重启重新登录"。
+
+        用户的顾虑正是这一点。如果不解释，他会误以为 A 不可用于常驻。
+        """
+        from examples.codebuddy_node import explain_failure
+
+        advice = explain_failure("Authentication required")
+        assert "credentials.json" in advice, (
+            "没说明凭据存在哪 —— 用户无法判断是否持久"
+        )
+        assert "refreshToken" in advice, "没提自动续期机制"
+        # 必须直接反驳"每次重启都要登录"这个误解
+        assert "每次重启" in advice, (
+            "没有正面回应「重启要不要重新登录」这个疑问"
+        )
+
+    @covers("M14.F9")
+    def test_advice_says_b_needs_user_scope(self):
+        """★ B 方案必须说明：环境变量是进程级的，要持久化到用户级。
+
+        否则用户以为设了 API Key 就一劳永逸，
+        结果机器重启后计划任务全挂，而报错还是"未登录"。
+        """
+        from examples.codebuddy_node import explain_failure
+
+        advice = explain_failure("Authentication required")
+        assert "进程级" in advice or "进程" in advice, (
+            "没说明环境变量是进程级的"
+        )
+        assert "SetEnvironmentVariable" in advice, (
+            "没给出写进用户级环境变量的具体做法"
+        )
+
+    @covers("M14.F9")
+    def test_advice_warns_api_key_leak_risk(self):
+        """★★ **必须警告 API Key 会被 LLM 读到。**
+
+        这是个真实的安全差异，不是理论风险：
+          · 环境变量对 CodeBuddy 子进程可见
+          · 而 CodeBuddy 有 Bash 工具
+          · LLM 一句 `echo $CODEBUDDY_API_KEY` 就把长期密钥读进上下文了
+
+        相比之下 A 方案的凭据在**文件**里，CodeBuddy 进程不需要它出现在环境里。
+        所以 A 明显更安全 —— 这个取舍必须让用户知道，不能只给两条路。
+        """
+        from examples.codebuddy_node import explain_failure
+
+        advice = explain_failure("Authentication required")
+        assert "echo" in advice or "泄露" in advice, (
+            "没有警告 API Key 的泄露风险"
+        )
+        assert "不如 A 安全" in advice or "不如" in advice, (
+            "没有明确说 B 不如 A 安全"
+        )
+        # 要给出更安全的替代
+        assert "apiKeyHelper" in advice, (
+            "没提 apiKeyHelper —— 那是官方支持的「不落长期密钥」方案"
+        )
+
+    @covers("M14.F9")
+    def test_scrub_keeps_codebuddy_api_key(self):
+        """★ scrub_secrets 不能剔除 CODEBUDDY_API_KEY。
+
+        它必须传给子进程，否则 CodeBuddy 无法认证。
+        （这跟 NXS_SECRET 的处理**刻意不同** —— 那是网格自己的密钥，
+         CodeBuddy 完全不需要，必须剔除。）
+        """
+        import os
+        from examples.agent_bridge_common import scrub_secrets
+
+        env = {
+            "PATH": "/bin",
+            "NXS_SECRET_FOO": "should-be-removed",
+            "NXS_OPS_SECRET": "should-be-removed",
+            "CODEBUDDY_API_KEY": "must-be-kept",
+        }
+        out = scrub_secrets(env)
+        assert "CODEBUDDY_API_KEY" in out, (
+            "把 CODEBUDDY_API_KEY 也剔了 —— CodeBuddy 就没法认证了"
+        )
+        assert "NXS_SECRET_FOO" not in out
+        assert "NXS_OPS_SECRET" not in out
