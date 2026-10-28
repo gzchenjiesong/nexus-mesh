@@ -849,3 +849,102 @@ ok "协调节点可达（HTTP $code）"     # ✗ 崩在 unbound variable
 | 共享宿主环境 | 测不出状态目录隔离问题 |
 
 所以：**同机跑通 ≠ 接入没问题**。跨网络那一层必须补验。
+
+---
+
+## 十四、Windows 支持（公司电脑是 Windows）
+
+v0.19 的桥接最初只在 macOS/Linux 上验过。用户告知公司电脑是 **Windows** 后，
+补了三处平台差异。**这三处不是"顺便兼容"，是必然会碰到的**。
+
+### ① npm 装的 `codebuddy` 是 `.cmd`，Python 跑不了
+
+```python
+subprocess.run(["C:\\npm\\codebuddy.cmd", "-p", "x"])   # ✗ WinError 193
+```
+
+Python 在 Windows 上**不能直接执行 `.cmd`/`.bat`** —— 报
+`%1 is not a valid Win32 application`。而 npm 全局安装生成的正是 `.cmd`：
+
+```
+npm i -g @tencent-ai/codebuddy-code
+→ %APPDATA%\npm\codebuddy.cmd        ← 不是 .exe
+```
+
+那个错误信息完全不会让人想到"后缀名"。所以加了一层处理：
+
+```python
+if sys.platform == "win32" and cmd[0].lower().endswith((".cmd", ".bat")):
+    return ["cmd", "/c", *cmd]
+```
+
+**不用 `shell=True`** —— 那会把 prompt 交给 shell 解析，而 prompt 里可能有
+引号、`&`、`|`，在 shell 下都变成注入面。`cmd /c` + 列表参数保留了逐个传参。
+
+非 Windows 平台**原样返回**（有测试守着）。
+
+### ② 可执行文件路径三平台三个位置
+
+写死 `~/.local/bin/codebuddy` 的话，Windows 上永远找不到，
+而症状是"没装 codebuddy"——用户会去重装一遍。
+
+现在按平台探测，**PATH 优先**：
+
+| 平台 | 候选 |
+|---|---|
+| 通用 | `shutil.which("codebuddy")` ← 先看这个 |
+| macOS | `~/.local/bin`、`/usr/local/bin`、`/opt/homebrew/bin` |
+| Windows | `%LOCALAPPDATA%\codebuddy\bin\codebuddy.exe`、`%APPDATA%\npm\codebuddy.cmd` |
+
+### ③ 常驻：计划任务，且要关掉 3 天上限
+
+macOS 用 launchd，Windows 用计划任务（`deploy/setup-work-laptop.ps1`）。
+
+两个必须做对的细节：
+
+**用 `pythonw.exe` 而不是 `python.exe`**
+否则会有一个黑色控制台窗口，用户会关掉它 —— 然后节点就死了。
+
+**`-ExecutionTimeLimit ([TimeSpan]::Zero)`**
+计划任务默认有 **3 天执行上限**。不关的话，节点跑满 72 小时被系统杀掉，
+而症状是"莫名其妙不干活了"，很难联想到计划任务设置。
+
+**`-AtLogOn` 而不是 `-AtStartup`**
+`AtStartup` 要"无论用户是否登录都运行"，那需要存储账户密码或用 SYSTEM 账户 ——
+公司电脑上两者都不合适。代价是**用户注销后进程会停**。
+对"7x24 开机且保持登录"的机器没问题；如果公司策略会自动注销，要改用别的方式。
+
+### ⚠ 一个比 bash 更危险的坑：`$var` 后面跟中文
+
+bash 里 `"$code）"` 会把全角括号算进变量名（报 `unbound variable`）。
+
+**PowerShell 里更糟** —— 它的变量名**允许 Unicode**，所以 `"$ver（"`
+会解析出一个叫 `ver（` 的变量，值是**空**，而且**不报错**。
+脚本继续往下跑，行为诡异但不明确失败。
+
+修法一样：`${var}`。两个脚本都有测试守着这条。
+
+### 无法验证的部分（诚实说明）
+
+**我没有在 Windows 上跑过 `setup-work-laptop.ps1`。**
+沙箱里装不了 PowerShell（`sandbox_apply: Operation not permitted`）。
+
+所以做了静态检查：括号配对与嵌套顺序、`$var` 污染、关键逻辑存在性
+（有 `tests/test_deploy_scripts.py` 守着）。但**这不等于能跑**。
+
+第一次在公司电脑上执行时，如果报语法错，直接看报错行号 —— 大概率是
+我某处引号或转义写错了。
+
+### 一个可能的阻塞：公司电脑没装 Python
+
+桥接是 Python 程序（`requires-python = ">=3.11"`，依赖只有 PyYAML）。
+公司电脑上如果没装，整个方案跑不了。脚本第一件事就是查这个：
+
+```powershell
+winget install Python.Python.3.12
+```
+
+装的时候**要勾上 Add python.exe to PATH**，否则脚本找不到。
+
+如果公司禁止装 Python，替代方向是把桥接用 PyInstaller 打成单个 exe ——
+但那会让"改一行代码看效果"变得很麻烦。先用 Python，卡住了再考虑。

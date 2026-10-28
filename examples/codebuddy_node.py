@@ -70,6 +70,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -89,8 +90,57 @@ from examples.agent_bridge_common import (
     scrub_secrets,
 )
 
-#: `codebuddy` 可执行文件。装在 ~/.local/bin（原生二进制）或 npm 全局。
-DEFAULT_BIN = os.path.expanduser("~/.local/bin/codebuddy")
+def find_codebuddy() -> str:
+    """找 ``codebuddy`` 可执行文件。**按平台找，不写死路径。**
+
+    ⚠ 三个平台三个位置，写死一个就有一边跑不起来：
+
+    ========  ==========================================================
+    macOS     ``~/.local/bin/codebuddy``（原生二进制安装）
+              ``/usr/local/bin/codebuddy``、``/opt/homebrew/bin/codebuddy``
+    Linux     ``~/.local/bin/codebuddy``
+    Windows   ``%USERPROFILE%\\AppData\\Local\\codebuddy\\bin\\codebuddy.exe``
+              以及 npm 全局下的 ``codebuddy.cmd``
+    ========  ==========================================================
+
+    先看 PATH（最可靠 —— 用户装了之后 PATH 就该是对的），
+    再退回已知的几个固定位置。
+    """
+    exe = "codebuddy.exe" if sys.platform == "win32" else "codebuddy"
+
+    # ① PATH 上有就用它 —— 这是用户装完后的正常状态
+    found = shutil.which("codebuddy")
+    if found:
+        return found
+
+    # ② 退回已知安装位置
+    home = Path.home()
+    candidates: list[Path] = []
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        candidates += [
+            Path(local) / "codebuddy" / "bin" / exe,
+            # npm 全局在 Windows 上生成 .cmd 而不是 .exe
+            home / "AppData" / "Roaming" / "npm" / "codebuddy.cmd",
+        ]
+    else:
+        candidates += [
+            home / ".local" / "bin" / exe,
+            Path("/usr/local/bin") / exe,
+            Path("/opt/homebrew/bin") / exe,      # macOS Apple Silicon
+            Path("/usr/bin") / exe,
+        ]
+
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+
+    # 都找不到：返回第一个期望位置。调用方会给出"没装"的报错与安装指引。
+    return str(candidates[0]) if candidates else exe
+
+
+#: ``codebuddy`` 的路径。启动时按平台探测，可用 --bin / CODEBUDDY_BIN 覆盖。
+DEFAULT_BIN = find_codebuddy()
 
 #: 「摘要」约束。**这是行为引导，不是保障** —— 保障是 SUMMARY_LIMIT。
 SUMMARY_PROMPT_NOTE = (

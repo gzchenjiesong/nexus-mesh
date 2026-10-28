@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 from typing import Callable
 
 #: 「摘要」能力的回答上限（字节）。
@@ -191,6 +192,37 @@ def finalize_answer(raw: str, logger: logging.Logger,
     return {"answer": answer, "level": "summary"}
 
 
+#: Windows 上需要经 cmd.exe 启动的脚本后缀。
+#:
+#: ⚠ **这是个必然踩的坑，不是理论风险。** Python 的 ``subprocess`` 在 Windows
+#: 上**不能直接执行 .bat/.cmd** —— 会报 ``WinError 193``（%1 is not a valid
+#: Win32 application）。
+#:
+#: 而 npm 全局安装的 CLI（``npm i -g @tencent-ai/codebuddy-code``）在 Windows
+#: 上生成的正是 ``codebuddy.cmd`` 而不是 ``.exe``。所以只要用户选了 npm 方式
+#: 安装，桥接就一条任务都跑不了，症状还很难联想到后缀名。
+#:
+#: 处理方式：给命令加 ``cmd /c`` 前缀。**不用 shell=True** ——
+#: 那会把参数交给 shell 解析，而 prompt 里可能有引号、& 、| 等字符，
+#: 在 shell 下会变成命令注入面。``cmd /c`` + 列表参数保留了逐个传参的语义。
+_SCRIPT_EXTS_NEEDING_SHELL = (".cmd", ".bat")
+
+
+def normalize_command(cmd: list[str]) -> list[str]:
+    """按平台修正命令，让它真的能被 ``subprocess`` 执行。
+
+    只有 Windows + .cmd/.bat 时才加 ``cmd /c``；其余原样返回。
+
+    这样做的另一个好处：**其它平台零影响** —— 不是"顺便兼容一下"，
+    而是明确只在需要的地方变。
+    """
+    if sys.platform != "win32" or not cmd:
+        return cmd
+    if cmd[0].lower().endswith(_SCRIPT_EXTS_NEEDING_SHELL):
+        return ["cmd", "/c", *cmd]
+    return cmd
+
+
 def run_subprocess(
     cmd: list[str],
     *,
@@ -210,7 +242,8 @@ def run_subprocess(
     """
     try:
         result = subprocess.run(
-            cmd,
+            # Windows + .cmd/.bat 时必须经 cmd.exe，否则 WinError 193
+            normalize_command(cmd),
             capture_output=True,
             text=True,
             timeout=timeout,

@@ -356,3 +356,101 @@ class TestRefusesToStartWithoutWhitelist:
         # 关键是**不是 2**（2 = 白名单缺失）
         rc = mod.main()
         assert rc == 1, "有了白名单就应当越过启动检查"
+
+
+class TestWindowsCompat:
+    """★ Windows 上的两个必然踩到的坑。
+
+    公司电脑是 Windows，而之前所有代码都是在 macOS/Linux 上验的。
+    下面两条不是"理论风险"，是**一定会发生**的行为差异。
+    """
+
+    @covers("M14.F8")
+    def test_cmd_suffix_wrapped_with_cmd_c(self):
+        """★ `.cmd` 必须经 `cmd /c` 启动，否则 WinError 193。
+
+        Python 的 subprocess 在 Windows 上**不能直接执行 .cmd/.bat**。
+        而 npm 全局安装的 CLI 在 Windows 上生成的正是 `.cmd`：
+
+            npm i -g @tencent-ai/codebuddy-code
+            → %APPDATA%\\npm\\codebuddy.cmd      ← 不是 .exe
+
+        所以只要用户选了 npm 方式，桥接就一条任务都跑不了 ——
+        而错误信息是 `WinError 193: %1 is not a valid Win32 application`，
+        很难让人联想到"后缀名"这个原因。
+        """
+        import sys
+        from unittest import mock
+
+        from examples.agent_bridge_common import normalize_command
+
+        cmd = ["C:\\Users\\x\\AppData\\Roaming\\npm\\codebuddy.cmd", "-p", "hi"]
+        with mock.patch.object(sys, "platform", "win32"):
+            out = normalize_command(cmd)
+        assert out[:2] == ["cmd", "/c"]
+        assert out[2] == cmd[0], "原命令要完整保留在 cmd /c 后面"
+
+    @covers("M14.F8")
+    def test_exe_not_wrapped(self):
+        """`.exe` 不需要包装 —— 多加一层 cmd /c 会改变参数解析。"""
+        import sys
+        from unittest import mock
+
+        from examples.agent_bridge_common import normalize_command
+
+        cmd = ["C:\\cb\\codebuddy.exe", "-p", "hi"]
+        with mock.patch.object(sys, "platform", "win32"):
+            assert normalize_command(cmd) == cmd
+
+    @covers("M14.F8")
+    def test_posix_untouched(self):
+        """★ 其它平台必须**原样返回**。
+
+        `.cmd` 的处理不能被"顺便"应用到 macOS/Linux ——
+        那会给每个命令凭空加一层 shell，改变引号与转义语义。
+        """
+        import sys
+        from unittest import mock
+
+        from examples.agent_bridge_common import normalize_command
+
+        cmd = ["/usr/local/bin/codebuddy", "-p", "hi"]
+        for plat in ("darwin", "linux"):
+            with mock.patch.object(sys, "platform", plat):
+                assert normalize_command(cmd) == cmd
+
+    @covers("M14.F8")
+    def test_does_not_use_shell_true(self):
+        """★ 不用 `shell=True`，用 `cmd /c`。
+
+        `shell=True` 会把参数交给 shell 解析，而 prompt 里可能有
+        引号、`&`、`|` —— 在 shell 下那些会变成命令注入面。
+
+        `cmd /c` + 列表参数保留了"逐个传参"的语义，没有这层风险。
+        """
+        from examples.agent_bridge_common import run_subprocess
+        import inspect
+
+        src = inspect.getsource(run_subprocess)
+        assert "shell=True" not in src, (
+            "run_subprocess 用了 shell=True —— prompt 里的特殊字符会变成注入面"
+        )
+
+    @covers("M14.F8")
+    def test_find_codebuddy_covers_platforms(self):
+        """★ 找可执行文件要按平台找，不能写死路径。
+
+        写死 `~/.local/bin/codebuddy` 的话，Windows 上永远找不到 ——
+        而症状是"没装 codebuddy"，用户会以为真的要重装一遍。
+        """
+        from examples.codebuddy_node import find_codebuddy
+        import inspect
+
+        src = inspect.getsource(find_codebuddy)
+        # 三个平台都要有分支
+        assert "win32" in src
+        assert "LOCALAPPDATA" in src or "AppData" in src
+        assert "codebuddy.exe" in src
+        assert "codebuddy.cmd" in src
+        # PATH 优先
+        assert "shutil.which" in src
