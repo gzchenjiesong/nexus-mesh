@@ -192,34 +192,63 @@ def finalize_answer(raw: str, logger: logging.Logger,
     return {"answer": answer, "level": "summary"}
 
 
-#: Windows 上需要经 cmd.exe 启动的脚本后缀。
+#: Windows 上**不能直接被 subprocess 执行**的后缀。
 #:
-#: ⚠ **这是个必然踩的坑，不是理论风险。** Python 的 ``subprocess`` 在 Windows
-#: 上**不能直接执行 .bat/.cmd** —— 会报 ``WinError 193``（%1 is not a valid
-#: Win32 application）。
+#: ⚠ **这是必然踩的坑，不是理论风险。** Python 的 ``subprocess`` 在 Windows 上
+#: 不能直接执行脚本文件 —— 会报 ``WinError 193``
+#: （``%1 is not a valid Win32 application``）。
 #:
-#: 而 npm 全局安装的 CLI（``npm i -g @tencent-ai/codebuddy-code``）在 Windows
-#: 上生成的正是 ``codebuddy.cmd`` 而不是 ``.exe``。所以只要用户选了 npm 方式
-#: 安装，桥接就一条任务都跑不了，症状还很难联想到后缀名。
+#: 而 npm 全局安装的 CLI 在 Windows 上生成的是 **三个 shim**，一个 .exe 都没有：
 #:
-#: 处理方式：给命令加 ``cmd /c`` 前缀。**不用 shell=True** ——
-#: 那会把参数交给 shell 解析，而 prompt 里可能有引号、& 、| 等字符，
-#: 在 shell 下会变成命令注入面。``cmd /c`` + 列表参数保留了逐个传参的语义。
+#: ==========================  ============================================
+#: ``codebuddy``               sh 脚本（git-bash / WSL 用）
+#: ``codebuddy.cmd``           cmd.exe 用
+#: ``codebuddy.ps1``           PowerShell 用
+#: ==========================  ============================================
+#:
+#: 更麻烦的是：**PowerShell 的 ``Get-Command`` 按 PATHEXT 优先返回 ``.ps1``**。
+#: 实测时 ``find_codebuddy()`` 拿到的是 ``...\npm\codebuddy.ps1`` ——
+#: 而我最初只处理了 ``.cmd``，漏了 ``.ps1``。
 _SCRIPT_EXTS_NEEDING_SHELL = (".cmd", ".bat")
+_PS1_EXTS = (".ps1",)
 
 
 def normalize_command(cmd: list[str]) -> list[str]:
     """按平台修正命令，让它真的能被 ``subprocess`` 执行。
 
-    只有 Windows + .cmd/.bat 时才加 ``cmd /c``；其余原样返回。
+    ============  ==========================================
+    可执行形态     处理
+    ============  ==========================================
+    ``.exe``       原样（最好 —— 见下）
+    ``.cmd/.bat``  加 ``cmd /c``
+    ``.ps1``       加 ``powershell -ExecutionPolicy Bypass -File``
+    ============  ==========================================
 
-    这样做的另一个好处：**其它平台零影响** —— 不是"顺便兼容一下"，
-    而是明确只在需要的地方变。
+    ## ⚠ 为什么这三种里 ``.exe`` 明显最好
+
+    ``.cmd`` 和 ``.ps1`` 都要经一层 shell 中转，而**中转会把参数重新解析**：
+
+    * 中文参数经 ``cmd.exe`` 可能因代码页（中文系统 936/GBK）乱码
+    * prompt 里的引号、``&``、``|`` 在 shell 下有被解释的风险
+    * ``.ps1`` 还额外受 PowerShell 执行策略限制
+
+    而 ``.exe`` 走 ``CreateProcess``，参数以 UTF-16 逐字传递，**没有这些层面**。
+
+    所以：**能装原生二进制就装原生二进制**（``irm .../install.ps1 | iex``
+    产出的就是 ``codebuddy.exe``）。下面这些后缀处理是**兜底**，
+    让 npm 安装方式也能跑，但不是首选。
+
+    其它平台原样返回 —— 不是"顺便兼容一下"，而是明确只在需要的地方变。
     """
     if sys.platform != "win32" or not cmd:
         return cmd
-    if cmd[0].lower().endswith(_SCRIPT_EXTS_NEEDING_SHELL):
+    first = cmd[0].lower()
+    if first.endswith(_SCRIPT_EXTS_NEEDING_SHELL):
         return ["cmd", "/c", *cmd]
+    if first.endswith(_PS1_EXTS):
+        # 必须带 -ExecutionPolicy Bypass —— 否则默认策略可能禁止运行脚本，
+        # 而错误信息（"无法加载文件……未数字签名"）与 mesh 完全无关，很难联想。
+        return ["powershell", "-ExecutionPolicy", "Bypass", "-File", *cmd]
     return cmd
 
 

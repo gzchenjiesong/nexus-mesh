@@ -517,18 +517,29 @@ class TestPowerShellQuoting:
             for idx, line in enumerate(text.splitlines(), 1):
                 if line.lstrip().startswith("#"):
                     continue
-                # 只看 # 之前的部分（行内注释不算）
-                hashpos = line.find("#")
-                code_part = line[:hashpos] if hashpos >= 0 else line
-                j, n, cnt = 0, len(code_part), 0
+                # 逐字符扫描：只有**字符串外**的 # 才是注释开头。
+                # ⚠ 初版用 line.find("#") 无条件截断，把
+                #   Say "... # 推荐 ..." 里的 # 当成了注释，
+                #   于是误报"引号不成对" —— 那是测试的 bug，不是脚本的。
+                j, n, cnt, in_str = 0, len(line), 0, False
                 while j < n:
-                    if code_part[j] == "`":      # 反引号转义
-                        j += 2
-                        continue
-                    if code_part[j] == '"':
-                        if j + 1 < n and code_part[j + 1] == '"':  # "" 是字面引号
+                    c = line[j]
+                    if in_str:
+                        if c == "`":                 # 反引号转义
                             j += 2
                             continue
+                        if c == '"':
+                            if j + 1 < n and line[j + 1] == '"':   # "" 字面引号
+                                j += 2
+                                continue
+                            in_str = False
+                            cnt += 1
+                        j += 1
+                        continue
+                    if c == "#":                     # 字符串外 → 注释，本行结束
+                        break
+                    if c == '"':
+                        in_str = True
                         cnt += 1
                     j += 1
                 assert cnt % 2 == 0, (
@@ -578,3 +589,100 @@ class TestDiagScript:
         """诊断脚本本身也不能卡住 —— 否则失去意义。"""
         text = self.path.read_bytes().decode("utf-8-sig")
         assert "WaitForExit(" in text
+
+
+class TestExecutableShimHandling:
+    """★ npm 在 Windows 上生成三个 shim，一个 .exe 都没有。
+
+    ⚠ 这是**实测**发现的：用户机器上 `Get-Command codebuddy` 返回的是
+
+        C:\\Users\\Admin\\AppData\\Roaming\\npm\\codebuddy.ps1
+
+    而我最初只处理了 `.cmd`，漏了 `.ps1` —— Python 的 subprocess
+    同样无法直接执行 `.ps1`。
+
+    更隐蔽的一层：**两边看到的不是同一个文件**。
+
+    * PowerShell 的 `Get-Command` 按 PATHEXT 匹配，`.PS1` 优先级最高
+      → 返回 `.ps1`
+    * Python 的 `shutil.which` 用的 PATHEXT 默认值里**没有** `.PS1`
+      → 返回 `.cmd`
+
+    所以部署脚本和桥接必须用**同一套优先级规则**，否则用户看到的路径
+    不是桥接实际会用的那个。
+    """
+
+    @covers("M14.F8")
+    def test_ps1_wrapped_with_powershell(self):
+        """`.ps1` 必须用 `powershell -ExecutionPolicy Bypass -File` 包装。
+
+        `-ExecutionPolicy Bypass` 不能少 —— 默认策略可能禁止运行脚本，
+        而错误信息（"无法加载文件……未数字签名"）与 mesh 完全无关，
+        用户很难联想到是这个原因。
+        """
+        import sys
+        from unittest import mock
+
+        from examples.agent_bridge_common import normalize_command
+
+        cmd = ["C:\\Users\\x\\AppData\\Roaming\\npm\\codebuddy.ps1", "-p", "hi"]
+        with mock.patch.object(sys, "platform", "win32"):
+            out = normalize_command(cmd)
+        assert out[:2] == ["powershell", "-ExecutionPolicy"]
+        assert "Bypass" in out
+        assert "-File" in out
+        # 原命令必须完整保留
+        assert cmd[0] in out
+
+    @covers("M14.F8")
+    def test_prefers_exe_over_shims(self):
+        """★ 三者的优先级：`.exe` > `.cmd` > `.ps1`。
+
+        理由不是洁癖：`.cmd` / `.ps1` 都要经一层 shell 中转，
+        而**中转会把参数重新解析** —— 中文 prompt 可能因控制台代码页
+        （中文系统 936/GBK）乱码；prompt 里的引号、`&` 也有被解释的风险。
+
+        `.exe` 走 CreateProcess，参数以 UTF-16 逐字传递，没有这些层面。
+        """
+        import inspect
+        from examples.codebuddy_node import find_codebuddy
+
+        src = inspect.getsource(find_codebuddy)
+        # 三个后缀都要在候选列表里
+        assert "codebuddy.exe" in src
+        assert "codebuddy.cmd" in src
+        assert "codebuddy.ps1" in src
+        # .exe 的候选必须在 .ps1 之前（顺序即优先级）
+        assert src.index("codebuddy.exe") < src.index("codebuddy.ps1"), (
+            ".exe 必须排在 .ps1 之前 —— 它是唯一无编码风险的形态"
+        )
+
+    @covers("M14.F8")
+    def test_describe_warns_about_encoding(self):
+        """要能说清每种形态的代价，尤其是中文乱码风险。"""
+        from examples.codebuddy_node import describe_executable
+
+        exe = describe_executable("x\\codebuddy.exe")
+        cmd = describe_executable("x\\codebuddy.cmd")
+        ps1 = describe_executable("x\\codebuddy.ps1")
+
+        assert "最佳" in exe
+        assert "cmd.exe" in cmd and "乱码" in cmd
+        assert "PowerShell" in ps1 and "执行策略" in ps1
+
+    @covers("M14.F8")
+    def test_deploy_script_matches_bridge_order(self):
+        """★ 部署脚本的检测顺序必须与桥接一致。
+
+        不一致的话，脚本显示的路径不是桥接实际会用的那个 ——
+        用户会据此做出错误判断（比如以为要用 .ps1 而实际是 .cmd）。
+        """
+        text = (DEPLOY / "setup-work-laptop.ps1").read_bytes().decode("utf-8-sig")
+        # 脚本里也要有 .exe → .cmd → .ps1 的顺序
+        i_exe = text.find("codebuddy.exe")
+        i_cmd = text.find("codebuddy.cmd")
+        i_ps1 = text.find("codebuddy.ps1")
+        assert i_exe > 0 and i_cmd > 0 and i_ps1 > 0
+        assert i_exe < i_cmd < i_ps1, (
+            "部署脚本的候选顺序应为 .exe → .cmd → .ps1，与桥接保持一致"
+        )

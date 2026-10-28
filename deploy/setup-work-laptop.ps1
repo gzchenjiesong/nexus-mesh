@@ -194,27 +194,62 @@ if ($healthOk) {
 # ------------------------------------------------------------------ codebuddy
 Say ""
 Say "-> CodeBuddy CLI（执行者靠它，与 IDE 是两个独立软件）"
+
+# ⚠ 检测顺序必须与桥接（examples/codebuddy_node.py 的 find_codebuddy）
+#   **完全一致** —— 否则这里显示的路径不是桥接实际会用的那个。
+#
+# 优先级：.exe > .cmd > .ps1
+#   .exe  原生二进制，参数不经 shell，中文 prompt 无乱码风险（最佳）
+#   .cmd  npm shim，经 cmd.exe 中转，中文可能因代码页（936/GBK）乱码
+#   .ps1  npm shim，经 PowerShell 中转，还受执行策略限制
+#
+# 为什么不能直接用 `Get-Command codebuddy`：
+#   它按 PATHEXT 匹配，**PowerShell 自己的 .PS1 优先级最高**，
+#   所以永远返回 .ps1 —— 而桥接（Python 的 shutil.which）因为
+#   PATHEXT 默认值里没有 .PS1，返回的是 .cmd。
+#   两边看到的不是同一个文件，会误导判断。
+
 $CbPath = $null
-$cand = Get-Command codebuddy -ErrorAction SilentlyContinue
-if ($cand) { $CbPath = $cand.Source }
-if (-not $CbPath) {
-    # 原生二进制安装位置
-    foreach ($p in @(
-        (Join-Path $env:LOCALAPPDATA "codebuddy\bin\codebuddy.exe"),
-        (Join-Path $HOME "AppData\Roaming\npm\codebuddy.cmd")
-    )) {
-        if (Test-Path $p) { $CbPath = $p; break }
-    }
+$CbCandidates = @(
+    (Join-Path $env:LOCALAPPDATA "codebuddy\bin\codebuddy.exe"),
+    (Join-Path $env:APPDATA "npm\codebuddy.exe"),
+    (Join-Path $env:APPDATA "npm\codebuddy.cmd"),
+    (Join-Path $env:APPDATA "npm\codebuddy.ps1")
+)
+foreach ($cand in $CbCandidates) {
+    if ($cand -and (Test-Path $cand)) { $CbPath = $cand; break }
 }
+if (-not $CbPath) {
+    # 退回 PATH 查找
+    $c = Get-Command codebuddy -ErrorAction SilentlyContinue
+    if ($c) { $CbPath = $c.Source }
+}
+
 if ($CbPath) {
     Ok "codebuddy -> $CbPath"
-    try { & $CbPath --version 2>$null | ForEach-Object { Say "        $_" } } catch { }
+
+    # 说清这个形态的代价 —— 中文 prompt 是主要用途，
+    # 编码问题一旦出现很难联想，所以提前讲明白
+    $low = $CbPath.ToLower()
+    if ($low.EndsWith(".exe")) {
+        Say "       形态：原生二进制 —— 参数不经 shell，中文无乱码风险（最佳）"
+    } elseif ($low.EndsWith(".cmd")) {
+        Warn "形态：npm shim（.cmd）—— 经 cmd.exe 中转"
+        Say "       中文 prompt 可能因控制台代码页（936/GBK）乱码。"
+        Say "       建议改装原生二进制：irm https://www.codebuddy.cn/cli/install.ps1 | iex"
+    } elseif ($low.EndsWith(".ps1")) {
+        Warn "形态：npm shim（.ps1）—— 经 PowerShell 中转，受执行策略限制"
+        Say "       桥接会用 powershell -ExecutionPolicy Bypass -File 包装它。"
+        Say "       建议改装原生二进制：irm https://www.codebuddy.cn/cli/install.ps1 | iex"
+    }
+
+    try { & $CbPath --version 2>$null | ForEach-Object { Say "       版本 $_" } } catch { }
 } else {
     Bad "没装 codebuddy（只有 IDE 不够）"
     Say ""
     Say "   二选一（PowerShell 里跑）："
-    Say "     irm https://www.codebuddy.cn/cli/install.ps1 | iex"
-    Say "     npm install -g @tencent-ai/codebuddy-code"
+    Say "     irm https://www.codebuddy.cn/cli/install.ps1 | iex      ← 推荐，产出 .exe"
+    Say "     npm install -g @tencent-ai/codebuddy-code               ← 产出 .cmd/.ps1"
     Say ""
     Say "   装完先跑一次交互式 codebuddy 完成登录，再回来。"
     if ($Check) { exit 1 }

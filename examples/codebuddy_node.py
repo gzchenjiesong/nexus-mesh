@@ -91,53 +91,86 @@ from examples.agent_bridge_common import (
 )
 
 def find_codebuddy() -> str:
-    """找 ``codebuddy`` 可执行文件。**按平台找，不写死路径。**
+    """找 ``codebuddy`` 可执行文件。**按平台找，并按后缀优劣排序。**
 
-    ⚠ 三个平台三个位置，写死一个就有一边跑不起来：
+    ## 后缀优先级：``.exe`` > ``.cmd`` > ``.ps1``
 
-    ========  ==========================================================
-    macOS     ``~/.local/bin/codebuddy``（原生二进制安装）
-              ``/usr/local/bin/codebuddy``、``/opt/homebrew/bin/codebuddy``
-    Linux     ``~/.local/bin/codebuddy``
-    Windows   ``%USERPROFILE%\\AppData\\Local\\codebuddy\\bin\\codebuddy.exe``
-              以及 npm 全局下的 ``codebuddy.cmd``
-    ========  ==========================================================
+    ⚠ 这不是洁癖，是实测得出的：
 
-    先看 PATH（最可靠 —— 用户装了之后 PATH 就该是对的），
-    再退回已知的几个固定位置。
+    * **``.exe``**（原生二进制安装）走 ``CreateProcess``，参数以 UTF-16
+      逐字传递 —— 中文 prompt 不变形，没有转义层。**首选。**
+    * **``.cmd``**（npm 安装）要经 ``cmd.exe`` 中转。中文参数可能因
+      控制台代码页（中文系统 936/GBK）乱码；prompt 里的引号、``&``
+      也有被解释的风险。
+    * **``.ps1``**（npm 安装）要经 PowerShell 中转，还额外受执行策略限制。
+
+    ## 两个"容易看错"的地方
+
+    ① **PowerShell 的 ``Get-Command codebuddy`` 返回 ``.ps1``** ——
+       因为它按 PATHEXT 匹配，而 PowerShell 自己的扩展名优先级最高。
+
+    ② **Python 的 ``shutil.which("codebuddy")`` 返回 ``.cmd``** ——
+       因为 PATHEXT 默认值里**没有** ``.PS1``。
+
+    所以两边看到的不是同一个文件。部署脚本里必须以**这里的规则**为准，
+    否则用户会以为桥接要用 .ps1（实际不是）。
+
+    ## 平台路径
+
+    ========  ========================================================
+    macOS     ``~/.local/bin``、``/usr/local/bin``、``/opt/homebrew/bin``
+    Windows   ``%LOCALAPPDATA%\\codebuddy\\bin\\codebuddy.exe``（原生）
+              ``%APPDATA%\\npm\\codebuddy.cmd``（npm）
+    ========  ========================================================
     """
-    exe = "codebuddy.exe" if sys.platform == "win32" else "codebuddy"
+    home = Path.home()
 
-    # ① PATH 上有就用它 —— 这是用户装完后的正常状态
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        roam = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+        # ★ 顺序即优先级：.exe 在前
+        candidates = [
+            Path(local) / "codebuddy" / "bin" / "codebuddy.exe",
+            Path(roam) / "npm" / "codebuddy.exe",
+            Path(roam) / "npm" / "codebuddy.cmd",
+            Path(roam) / "npm" / "codebuddy.ps1",
+        ]
+        for cand in candidates:
+            if cand.is_file():
+                return str(cand)
+        # 退回 which（多半是 .cmd，PATHEXT 里没有 .PS1）
+        found = shutil.which("codebuddy")
+        if found:
+            return found
+        return str(candidates[0])
+
+    # POSIX
     found = shutil.which("codebuddy")
     if found:
         return found
-
-    # ② 退回已知安装位置
-    home = Path.home()
-    candidates: list[Path] = []
-    if sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
-        candidates += [
-            Path(local) / "codebuddy" / "bin" / exe,
-            # npm 全局在 Windows 上生成 .cmd 而不是 .exe
-            home / "AppData" / "Roaming" / "npm" / "codebuddy.cmd",
-        ]
-    else:
-        candidates += [
-            home / ".local" / "bin" / exe,
-            Path("/usr/local/bin") / exe,
-            Path("/opt/homebrew/bin") / exe,      # macOS Apple Silicon
-            Path("/usr/bin") / exe,
-        ]
-
-    for cand in candidates:
+    for cand in (
+        home / ".local" / "bin" / "codebuddy",
+        Path("/usr/local/bin/codebuddy"),
+        Path("/opt/homebrew/bin/codebuddy"),
+        Path("/usr/bin/codebuddy"),
+    ):
         if cand.is_file():
             return str(cand)
+    return str(home / ".local" / "bin" / "codebuddy")
 
-    # 都找不到：返回第一个期望位置。调用方会给出"没装"的报错与安装指引。
-    return str(candidates[0]) if candidates else exe
 
+def describe_executable(path: str) -> str:
+    """说明这个可执行形态的优劣（给日志与自检用）。"""
+    low = path.lower()
+    if low.endswith(".exe"):
+        return "原生二进制 —— 参数不经 shell，中文无乱码风险（最佳）"
+    if low.endswith(".cmd") or low.endswith(".bat"):
+        return ("npm shim（.cmd）—— 经 cmd.exe 中转，中文 prompt 可能因"
+                "代码页乱码；建议改装原生二进制")
+    if low.endswith(".ps1"):
+        return ("npm shim（.ps1）—— 经 PowerShell 中转，受执行策略限制；"
+                "建议改装原生二进制")
+    return "未知形态"
 
 #: ``codebuddy`` 的路径。启动时按平台探测，可用 --bin / CODEBUDDY_BIN 覆盖。
 DEFAULT_BIN = find_codebuddy()
