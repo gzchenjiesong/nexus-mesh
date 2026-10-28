@@ -27,6 +27,7 @@
 param(
     [switch]$Check,                 # 只检查，不改动
     [switch]$InstallTask,           # 顺便创建计划任务（常驻）
+    [switch]$Uninstall,             # 移除计划任务并退出（不影响凭据文件）
     [switch]$WriteEnv,              # 把环境变量真正写入用户级（永久）
     [string]$AllowedTools = $(if ($env:CODEBUDDY_ALLOWED_TOOLS) { $env:CODEBUDDY_ALLOWED_TOOLS } else { "" }),
     [string]$ExtraDirs = $(if ($env:CODEBUDDY_EXTRA_DIRS) { $env:CODEBUDDY_EXTRA_DIRS } else { "" }),
@@ -63,6 +64,67 @@ function Say($msg) { Write-Host $msg }
 function Ok($msg)  { Write-Host "  OK   $msg" -ForegroundColor Green }
 function Bad($msg) { Write-Host "  FAIL $msg" -ForegroundColor Red }
 function Warn($msg){ Write-Host "  WARN $msg" -ForegroundColor Yellow }
+
+# ------------------------------------------------------------------ 平台守卫
+#
+# ⚠ **先确认这是 Windows。**
+#
+#   PowerShell 现在跨平台（pwsh 在 macOS/Linux 上都能装）。所以完全可能
+#   有人在 Linux 上顺手跑了这个 `.ps1` —— 然后在很后面才炸：
+#
+#     The term 'Get-ScheduledTask' is not recognized...
+#     The term 'New-ScheduledTaskAction' is not recognized...
+#
+#   报错点离真正原因（"选错脚本了"）隔了几十行，很容易误判成脚本有 bug。
+#   明确说一句，比让人猜好。
+if (-not $IsWindows) {
+    Say ""
+    Bad "这是 Windows 专用脚本，当前不是 Windows（$($PSVersionTable.Platform)）。"
+    Say ""
+    Say "   macOS / Linux 请用："
+    Say "     bash deploy/setup-work-node.sh"
+    Say ""
+    exit 1
+}
+
+# ------------------------------------------------------------------ 卸载
+#
+# ⚠ **必须有一条明确的卸载路径。**
+#
+#   把工具交给别人试用，就得让人能干净地退回原状。
+#   没有卸载命令的话，用户只能自己猜 "Register-ScheduledTask 的逆操作是什么"，
+#   猜错了会留下一个每 1 分钟重启一次、却永远失败的任务 ——
+#   比没装更糟。
+#
+#   刻意只删计划任务，**不动凭据文件**：
+#   凭据可能还要给手工/其他方式用，删环境变量和删任务不该被捆在一起。
+if ($Uninstall) {
+    $taskName = "NexusMesh-$NodeId"
+    Say ""
+    Say "-> 卸载（移除计划任务 ${taskName}）"
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        # 先停再删：运行中的任务直接 Unregister 会失败
+        try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch { }
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+        Ok "已移除计划任务: $taskName"
+    } else {
+        Say "   没有找到该计划任务（可能本来就没装）"
+    }
+    Say ""
+    Say "   保留了："
+    Say "     凭据文件  $AgentDir\$NodeId.env"
+    Say "     环境变量  （未改动，另需手工清理）"
+    Say ""
+    Say "   想连环境变量一起清，在 PowerShell 里跑："
+    Say "     'NXS_ACTOR_DIR','NXS_COORDINATOR_URL','NXS_CA_FILE','NXS_NODE_ID' |"
+    Say "       ForEach-Object { [Environment]::SetEnvironmentVariable(`$_, `$null, 'User') }"
+    Say "     'CODEBUDDY_BIN','CODEBUDDY_WORKDIR','CODEBUDDY_ALLOWED_TOOLS' |"
+    Say "       ForEach-Object { [Environment]::SetEnvironmentVariable(`$_, `$null, 'User') }"
+    Say ""
+    Say "   想连凭据文件一起删："
+    Say "     Remove-Item `"$AgentDir\$NodeId.env`""
+    exit 0
+}
 
 Say "-> 环境"
 
@@ -709,8 +771,19 @@ if ($InstallTask) {
         Say "   已移除旧任务"
     }
 
+    # ⚠ **必须带 --log-file。**
+    #   计划任务不捕获 stdout/stderr —— 输出直接丢弃。
+    #   没有日志文件的话，用户装完发现"不工作"，手上一点线索都没有：
+    #   没有控制台、没有输出、任务状态只说"上次运行结果 0x0"。
+    #   对"交给别人试用"来说这是致命的。
+    $logDir  = Join-Path $ConfDir "logs"
+    if (-not (Test-Path $logDir)) {
+        New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    }
+    $logFile = Join-Path $logDir "$NodeId.log"
+
     $action = New-ScheduledTaskAction -Execute $pyw `
-        -Argument "`"$nodeScript`"" -WorkingDirectory $RepoDir
+        -Argument "`"$nodeScript`" --log-file `"$logFile`"" -WorkingDirectory $RepoDir
 
     # ⚠ 用 AtLogOn 而不是 AtStartup：
     #   AtStartup 要"无论用户是否登录都运行"，那需要存储账户密码或用 SYSTEM。
@@ -732,7 +805,10 @@ if ($InstallTask) {
     Ok "计划任务已创建: $taskName"
     Say "       启动: Start-ScheduledTask -TaskName $taskName"
     Say "       状态: Get-ScheduledTask -TaskName $taskName | Get-ScheduledTaskInfo"
-    Say "       日志: 日志写 stderr，计划任务不捕获 —— 用 Start-Process 手工跑一次看输出"
+    Say "       日志: $logFile"
+    Say "             （轮转 5 MB x 3，最多 20 MB。计划任务不捕获控制台输出，"
+    Say "               所以日志只能由程序自己写 —— 排查先看这个文件）"
+    Say "       卸载: 重跑本脚本加 -Uninstall"
 } else {
     Say "   跳过（加 -InstallTask 才会创建）"
     Say ""

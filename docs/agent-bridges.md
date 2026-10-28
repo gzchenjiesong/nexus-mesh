@@ -914,26 +914,68 @@ macOS 用 launchd，Windows 用计划任务（`deploy/setup-work-node.ps1`）。
 公司电脑上两者都不合适。代价是**用户注销后进程会停**。
 对"7x24 开机且保持登录"的机器没问题；如果公司策略会自动注销，要改用别的方式。
 
-### ⚠ 一个比 bash 更危险的坑：`$var` 后面跟中文
+### ⚠ 一个坑，两个 shell 的规则**不一样**
 
-bash 里 `"$code）"` 会把全角括号算进变量名（报 `unbound variable`）。
+`$var` 后面紧接非 ASCII 字符时，bash 与 PowerShell 的行为**不同**，
+不能照搬结论。实测（bash 5.x + PowerShell 7.5.4）：
 
-**PowerShell 里更糟** —— 它的变量名**允许 Unicode**，所以 `"$ver（"`
-会解析出一个叫 `ver（` 的变量，值是**空**，而且**不报错**。
-脚本继续往下跑，行为诡异但不明确失败。
+| 写法 | bash（`set -u`） | PowerShell |
+|---|---|---|
+| `"$code）"` 全角括号 | ✗ `unbound variable` | ✓ 正常展开 |
+| `"$code，"` 全角逗号 | ✗ `unbound variable` | ✓ 正常展开 |
+| `"$code。"` 全角句号 | ✗ `unbound variable` | ✓ 正常展开 |
+| `"$code版本"` 中文 | ✗ `unbound variable` | ✗ **静默取到空值** |
 
-修法一样：`${var}`。两个脚本都有测试守着这条。
+**bash 更严**：任何非 ASCII 紧跟变量名都会报错 —— 因为多字节字符的
+首字节被当成了标识符的一部分。报错明确，容易发现。
 
-### 无法验证的部分（诚实说明）
+**PowerShell 更阴**：它只把**字母类**字符算进变量名（中文、全角字母
+都算），**标点不算**。所以：
 
-**我没有在 Windows 上跑过 `setup-work-node.ps1`。**
-沙箱里装不了 PowerShell（`sandbox_apply: Operation not permitted`）。
+```powershell
+$ver = "1.0"
+"$ver版本"    # → 空。变量名被解析成 ver版本，未定义 → $null，不报错
+"$ver（左"     # → 1.0（左。全角括号是标点，正常
+```
 
-所以做了静态检查：括号配对与嵌套顺序、`$var` 污染、关键逻辑存在性
-（有 `tests/test_deploy_scripts.py` 守着）。但**这不等于能跑**。
+危险在于**它不报错**。脚本继续往下跑，行为诡异但不明确失败。
 
-第一次在公司电脑上执行时，如果报语法错，直接看报错行号 —— 大概率是
-我某处引号或转义写错了。
+修法两边一样：`${var}`。两个脚本各有测试守着，但**判据不同** ——
+bash 那条查"后面是否非 ASCII"，PowerShell 那条查"后面是否是字母"
+（早期版本照搬了 bash 的判据，会对全角标点误报）。
+
+### 验证覆盖到哪一步（诚实说明）
+
+分成三档，别混着看：
+
+| 项 | 状态 | 怎么验的 |
+|---|---|---|
+| `.ps1` **语法** | ✅ 已验证 | 真实 PowerShell 解析器（`Parser::ParseFile`），CI 里也跑 |
+| 脚本**静态约定** | ✅ 已验证 | `tests/test_deploy_scripts.py`：括号配对、`$var` 污染、变量赋值、CA 顺序 |
+| `-Check` / `-WriteEnv` / 探活 | ✅ 已验证 | 在 macOS 的 pwsh 7.5.4 上实际执行过 |
+| Windows 上 `--dry-run` | ✅ 已验证 | 在公司电脑上实际跑通（注册成功、被批准） |
+| Windows 上 `-InstallTask` | ⚠ **未验证** | 计划任务的创建/自启/重启尚无实机结果 |
+| Windows 上 `-Uninstall` | ⚠ **未验证** | 同上 |
+
+⚠ **最后两项是本文件当前唯一的空白。** 计划任务那段代码是按
+Task Scheduler 的标准用法写的（`-AtLogOn` + `-ExecutionTimeLimit 0`
++ `RestartCount`），但没有在真实 Windows 上跑过。
+
+第一次执行 `-InstallTask` 后，建议按这个顺序确认：
+
+```powershell
+# 1) 任务是否建出来、状态如何
+Get-ScheduledTask -TaskName NexusMesh-<节点ID> | Format-List
+Get-ScheduledTaskInfo -TaskName NexusMesh-<节点ID>
+
+# 2) 手动起一次，看日志（计划任务不捕获控制台输出，只能看文件）
+Start-ScheduledTask -TaskName NexusMesh-<节点ID>
+Get-Content "$HOME\.nexus-mesh\logs\<节点ID>.log" -Tail 20
+
+# 3) 注销再登录，确认 AtLogOn 触发（这条最容易出意外）
+```
+
+若某一步不对，用 `-Uninstall` 退回干净状态再排查。
 
 ### 一个可能的阻塞：公司电脑没装 Python
 

@@ -1381,6 +1381,69 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
 # 主流程
 # ---------------------------------------------------------------------------
 
+def _setup_logging(verbose: bool, log_file: str) -> None:
+    """配置日志：**始终写 stderr**，可选再写一个轮转文件。
+
+    ## 为什么必须有 ``--log-file``
+
+    计划任务 / systemd / launchd 拉起的进程**没有终端**。
+    其中 **Windows 计划任务不捕获 stderr** —— 输出直接丢弃。
+
+    于是用户装完计划任务后，如果节点起不来，**什么线索都没有**：
+    没有日志文件、没有控制台，任务状态只说"上次运行结果"。
+    这对"交给别人试用"是致命的：装不上就是装不上，无从排查。
+
+    （systemd 好一些，默认进 journald，``journalctl -u xxx`` 能看。
+    launchd 也能把 stdout/stderr 重定向到文件。
+    Windows 计划任务两样都没有，只能由程序自己写。）
+
+    ## 为什么轮转
+
+    这是常驻进程，一天几千行很正常。不轮转会无限增长，最终写满磁盘 ——
+    而磁盘满之后的表现是"任务开始莫名失败"，与日志本身无关，
+    很难联想到是日志把盘写满了。
+    """
+    # ⚠ **不要用 ``basicConfig(force=True, handlers=[...])``。**
+    #
+    #   那会**清掉 root logger 上已有的 handler** —— 包括调用方（或测试框架）
+    #   装的。实测：pytest 的 ``caplog`` 就是这么失效的，
+    #   表现为"日志明明打了，caplog 里什么都抓不到"。
+    #
+    #   对可嵌入的模块来说更糟：宿主可能已经配好了自己的日志格式，
+    #   我们一进来就把它抹了。
+    #
+    #   改成**增量添加 + 幂等标记**：只加自己那两个 handler，
+    #   不碰别人的；重复调用也不会叠加。
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG if verbose else logging.INFO)
+
+    if not any(getattr(h, "_nxs_node_handler", False) for h in root.handlers):
+        formatter = logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s · %(message)s",
+            datefmt="%H:%M:%S",
+        )
+
+        stream = logging.StreamHandler()
+        stream.setFormatter(formatter)
+        stream._nxs_node_handler = True       # type: ignore[attr-defined]
+        root.addHandler(stream)
+
+        if log_file:
+            from logging.handlers import RotatingFileHandler
+
+            path = Path(log_file).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                path,
+                maxBytes=5 * 1024 * 1024,   # 5 MB
+                backupCount=3,              # 共 4 个文件，最多 20 MB
+                encoding="utf-8",           # ⚠ 显式 UTF-8：Windows 默认 GBK
+            )
+            file_handler.setFormatter(formatter)
+            file_handler._nxs_node_handler = True   # type: ignore[attr-defined]
+            root.addHandler(file_handler)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="把 CodeBuddy Code 接入 Nexus Mesh（公司内网执行者）")
@@ -1422,14 +1485,14 @@ def main() -> int:
                              "不连接任何服务")
     parser.add_argument("--dry-run", action="store_true",
                         help="探活 + 注册，不进入领任务循环")
+    parser.add_argument("--log-file", default="", metavar="PATH",
+                        help="额外把日志写入文件（轮转：5 MB × 3）。"
+                             "⚠ **常驻/计划任务下几乎必须加** —— "
+                             "计划任务不捕获 stderr，不加就完全没有日志可查")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s · %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    _setup_logging(args.verbose, args.log_file)
     log = logging.getLogger("codebuddy-node")
 
     if args.check_credential:

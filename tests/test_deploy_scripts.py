@@ -88,10 +88,44 @@ class TestBashScript:
         """
         text = self.path.read_text(encoding="utf-8")
         # 只检查代码与字符串，跳过注释（注释里的 $null， 是无害的）
-        bad = re.findall(r"\$([A-Za-z_]\w*)(?=[^\x00-\x7F])",
-                         _ps_strip_comments(text))
+        # ⚠ **不能用正则的 \w 来找"变量名之后那一个字符"。**
+        #
+        #   Python 里 \w 匹配 Unicode 词字符，**中文也算**。所以
+        #   ``\$([A-Za-z_]\w*)(.)`` 遇到 ``$scriptVer版本`` 时，
+        #   ``\w*`` 会把「版本」吞进 group(1)，group(2) 拿到的是
+        #   后面的引号 —— ASCII，于是**漏报**。
+        #
+        #   改成手工扫描：从 $ 后取连续的 **ASCII** 标识符字符，
+        #   然后看紧跟的那一个字符是什么。
+        code = _ps_strip_comments(text)
+        bad: list[str] = []
+        for i, ch in enumerate(code):
+            if ch != "$":
+                continue
+            j = i + 1
+            # ${var} 形式是安全的，跳过
+            if j < len(code) and code[j] == "{":
+                continue
+            start = j
+            while j < len(code) and (code[j].isalnum() or code[j] == "_") \
+                    and ord(code[j]) < 0x80:
+                j += 1
+            if j == start:          # $ 后面不是标识符（如 $ 、$"）
+                continue
+            name = code[start:j]
+            if j >= len(code):
+                continue
+            nxt = code[j]
+            # isalpha() 对全角标点（（）、，、。、；：) 返回 False，
+            # 对中文/全角字母返回 True —— 正是判据。
+            # 数字和下划线也是标识符字符，同样会被吞，一并算上。
+            if ord(nxt) > 0x7F and (nxt.isalpha() or nxt.isdigit()):
+                bad.append(name)
+
         assert not bad, (
-            f"这些变量后面紧跟非 ASCII 字符，会被当成变量名的一部分：{sorted(set(bad))}\n"
+            f"这些变量后面紧跟字母类字符（中文/全角字母），"
+            f"会被吞进变量名导致取到空值：{sorted(set(bad))}\n"
+            f"  注：全角标点（（）、，、。、；）不影响，无需处理\n"
             f"  修法：改成 ${{var}} 形式"
         )
 
@@ -167,7 +201,38 @@ class TestPowerShellScript:
 
     @covers("M14.F8")
     def test_no_var_followed_by_nonascii(self):
-        """★ 与 bash 同一个坑，但 **PowerShell 更危险**。
+        """★ `$var` 后面紧跟**字母**会被吞进变量名（PowerShell）。
+
+        ## ⚠ 与 bash 不同：PowerShell 只吞"字母"，不吞标点
+
+        实测（PowerShell 7.5.4）::
+
+            $ver = "1.0"
+            "$ver（左"   →  1.0（左      ← 全角括号，正常
+            "$ver）"     →  1.0）        ← 正常
+            "$ver，"     →  1.0，        ← 正常
+            "$ver版本"   →  （空！）      ← 中文被吞成变量名的一部分
+            "$verＡ"     →  （空！）      ← 全角字母同样被吞
+
+        所以判据是「后面跟的是 **Unicode 字母**」，不是「后面跟非 ASCII」。
+
+        ## 为什么这条以前写成"跟非 ASCII"
+
+        从 bash 那侧的坑直接照搬过来的。而 **bash 的行为确实更严**：
+        在 `set -u` 下，`$code）`、`$code，`、`$code。` **全都**报
+        `unbound variable`（多字节的首字节被当成标识符）。
+
+        于是同一个正则放在两个 shell 上：
+          · bash   → 正确
+          · PowerShell → **误报标点**，会让人以为 `${}` 到处都得加，
+            而真正危险的只是"变量名后面直接接中文/字母"。
+
+        ## 为什么要区分
+
+        一个"说错原因"的检查比没有检查更糟 —— 它会把注意力引向
+        不是问题的地方。修法建议仍然是统一的 `${var}`（最安全），
+        但**报错信息必须说对是哪一类字符**。
+        
 
         PowerShell 的变量名**允许 Unicode 字符** —— 所以
         `"$ver（"` 里的全角括号会被真的吃进变量名，变成 `ver（`，
@@ -1256,10 +1321,19 @@ def _ps_code_only(text: str) -> str:
 
 
 #: PowerShell 自动提供、不需要赋值的变量
+#:
+#: ⚠ 平台判定变量（``$IsWindows`` 等）只在 **PowerShell 6+** 存在。
+#:   它们是只读自动变量，不需要也不允许赋值 —— 用它们做平台守卫是标准做法。
+#:   初版这份清单没有它们，于是我刚加的 ``if (-not $IsWindows)`` 被误报成
+#:   "用到了没赋值的变量"。
 _PS_AUTOMATIC = {
     "_", "args", "input", "this", "true", "false", "null", "psitem",
     "lastExitCode", "LASTEXITCODE", "Error", "Matches", "PSScriptRoot",
     "PSCommandPath", "HOME", "PWD", "ShellId", "StackTrace", "MyInvocation",
+    # ---- PowerShell 6+ 平台判定（只读）----
+    "IsWindows", "IsLinux", "IsMacOS", "IsCoreCLR",
+    # ---- 其他常用只读/自动变量 ----
+    "PSVersionTable", "PID", "Profile", "NestedPromptLevel", "ExecutionContext",
 }
 
 

@@ -21,6 +21,7 @@ v0.2 起 **``serve`` 会真的监听端口**（``nxs/edge/gateway.py``）。
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import threading
 import time
@@ -268,12 +269,45 @@ def cmd_serve(args: argparse.Namespace) -> int:
           + (_color("启用", "ok") if gateway.ops_enabled
              else _color("未启用（未设置 NXS_OPS_SECRET）", "warn")))
     _info("")
-    _info(_color(f"开始常驻（Ctrl-C 退出）", "dim"))
+    _info(_color("开始常驻（Ctrl-C 或 SIGTERM 退出）", "dim"))
+
+    # ⚠⚠ **必须处理 SIGTERM。**
+    #
+    #   初版只 ``except KeyboardInterrupt``（那是 SIGINT，Ctrl-C 才有）。
+    #   **systemd 的 ``systemctl stop`` / ``restart`` 发的是 SIGTERM** ——
+    #   而 Python 对 SIGTERM 的默认动作是**立即终止进程**：不抛异常、
+    #   不走 ``finally``。后果：
+    #
+    #     · ``gateway.stop()`` 根本不执行 → SSE 长连接被硬断
+    #       （节点侧看到的是连接被掐，不是服务端说"我要关了"）
+    #     · 日志里没有"已停止" —— journalctl 里看着像崩溃退出
+    #     · unit 里那句 ``TimeoutStopSec=20``（"给 SSE 与在途请求留时间
+    #       优雅退出"）**永远是空话**，它等的是不会发生的优雅退出
+    #
+    #   实测：``kill -TERM`` 后 0.05 秒退出、退出码 143、日志无收尾消息。
+    #
+    #   改成：捕获 SIGTERM → 置事件 → 主循环退出，走同一套收尾。
+    stop = threading.Event()
+
+    def _on_sigterm(signum, frame):  # noqa: ARG001 - 签名由 signal 决定
+        _info("")
+        _info("收到 SIGTERM，准备关闭…")
+        stop.set()
+
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except (AttributeError, ValueError, OSError):
+        # 非主线程 / 平台不支持（部分 Windows 场景）：忽略。
+        # 退回"只靠 Ctrl-C"的老行为，不会更差。
+        pass
 
     ticks = 0
     try:
-        while True:
-            time.sleep(args.interval)
+        # 用 Event.wait 而不是 time.sleep：sleep 要睡满 interval 才看得到
+        # stop，运维会误以为"停不下来"。同时保留 --max-ticks 语义。
+        while not stop.is_set():
+            if stop.wait(args.interval):
+                break
             result = app.sweep()
             ticks += 1
             if result["marked_stale"] or result["released"]:
