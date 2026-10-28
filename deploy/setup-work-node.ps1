@@ -48,6 +48,26 @@ function Bad($msg) { Write-Host "  FAIL $msg" -ForegroundColor Red }
 function Warn($msg){ Write-Host "  WARN $msg" -ForegroundColor Yellow }
 
 Say "-> 环境"
+
+# ⚠ 打印脚本自身的版本与 commit。
+#
+#   为什么需要：我们因为"用户跑的是旧版"浪费了好几轮对话 ——
+#   用户报的错在最新版里已经修好了，但两边都没意识到版本不同。
+#   把版本打出来，一眼就能对上。
+$scriptVer = "unknown"
+$scriptCommit = "unknown"
+try {
+    $verFile = Join-Path $RepoDir "nxs\__init__.py"
+    if (Test-Path $verFile) {
+        $m = Select-String -Path $verFile -Pattern '__version__\s*=\s*"([^"]+)"' |
+             Select-Object -First 1
+        if ($m) { $scriptVer = $m.Matches[0].Groups[1].Value }
+    }
+    $gitRev = & git -C $RepoDir rev-parse --short HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and $gitRev) { $scriptCommit = $gitRev.Trim() }
+} catch { }
+
+Say "   脚本版本  : $scriptVer @ $scriptCommit"
 Say "   节点 ID   : $NodeId"
 Say "   协调节点  : $ServerUrl"
 Say "   凭据目录  : $AgentDir"

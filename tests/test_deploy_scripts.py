@@ -327,44 +327,87 @@ class TestPowerShellFragility:
     def test_dollar_paren_balanced_inside_strings(self):
         """★ 双引号字符串内的 `$()` 子表达式必须平衡。
 
-        这类不平衡时，PowerShell 的报错位置会指向后面几行 ——
-        而真正的问题在字符串里。所以单独验一遍。
+        ⚠ 这个检查器我改了三次，每次都是**检查器自己的 bug**：
+
+        ================================================  ====================
+        问题                                              现象
+        ================================================  ====================
+        只处理双引号字符串                                  单引号内的 " 被误判
+        不处理 here-string（``@' ... '@``）                 跨行结构被逐行误读
+        ================================================  ====================
+
+        ## 根本局限，要说清
+
+        **逐行扫描处理不了跨行结构。** PowerShell 的 here-string：
+
+            $code = @'
+            ...多行内容，里面的引号都是字面量...
+            '@
+
+        逐行看，第一行的 ``@'`` 是个没闭合的单引号。
+
+        所以这里显式跟踪 here-string 状态，遇到就整段跳过。
+
+        ## 但真正的权威是解析器
+
+        这个检查的价值只在于"没有 pwsh 时也能兜一层"。
+        ``$()`` 不平衡会导致解析失败，``Parser::ParseFile`` 一定能抓到。
+        所以遇到本检查误报时，**先怀疑检查器**，用 lint-ps1.sh 复核。
         """
         raw = self.path.read_bytes().decode("utf-8-sig")
+        in_here = None          # "@'" 或 '@"'
         for idx, line in enumerate(raw.splitlines(), 1):
-            if line.lstrip().startswith("#"):
+            stripped = line.lstrip()
+
+            # ——— here-string 状态机 ———
+            if in_here:
+                # 结束标记必须在行首（允许前导空白）
+                if stripped.startswith(in_here):
+                    in_here = None
                 continue
-            j, n, in_str, sub = 0, len(line), False, 0
+            hm = re.match(r"\s*[\w\$\.\[\]]+\s*=\s*@(['\"])", line)
+            if hm:
+                in_here = "'@" if hm.group(1) == "'" else '"@'
+                continue
+
+            if stripped.startswith("#"):
+                continue
+
+            j, n = 0, len(line)
+            quote = None
+            sub = 0
             while j < n:
                 c = line[j]
-                if not in_str:
-                    if c == "#":
-                        break
-                    if c == '"':
-                        in_str = True
-                    j += 1
-                    continue
-                if c == "`":
-                    j += 2
-                    continue
-                if c == '"':
-                    if j + 1 < n and line[j + 1] == '"':
+                if quote:
+                    if c == "`":
                         j += 2
                         continue
-                    assert sub == 0, f"第 {idx} 行：$() 未闭合就结束了字符串"
-                    in_str = False
+                    if c == quote:
+                        if j + 1 < n and line[j + 1] == quote:
+                            j += 2
+                            continue
+                        assert not (quote == '"' and sub > 0), (
+                            f"第 {idx} 行：$() 未闭合就结束了字符串"
+                        )
+                        sub = 0
+                        quote = None
+                    elif quote == '"' and c == "$" and j + 1 < n and line[j + 1] == "(":
+                        sub += 1
+                        j += 2
+                        continue
+                    elif quote == '"' and c == ")" and sub > 0:
+                        sub -= 1
                     j += 1
                     continue
-                if c == "$" and j + 1 < n and line[j + 1] == "(":
-                    sub += 1
-                    j += 2
-                    continue
-                if c == ")" and sub:
-                    sub -= 1
-                    j += 1
-                    continue
+                if c == "#":
+                    break
+                if c in "\"'":
+                    quote = c
                 j += 1
-            assert not in_str, f"第 {idx} 行：双引号字符串未闭合"
+            assert quote is None, (
+                f"第 {idx} 行：字符串未闭合 —— {line.strip()[:60]}"
+            )
+
 
     @covers("M14.F8")
     def test_python_path_is_absolute(self):
@@ -522,32 +565,44 @@ class TestPowerShellQuoting:
             for idx, line in enumerate(text.splitlines(), 1):
                 if line.lstrip().startswith("#"):
                     continue
-                # 逐字符扫描：只有**字符串外**的 # 才是注释开头。
-                # ⚠ 初版用 line.find("#") 无条件截断，把
-                #   Say "... # 推荐 ..." 里的 # 当成了注释，
-                #   于是误报"引号不成对" —— 那是测试的 bug，不是脚本的。
-                j, n, cnt, in_str = 0, len(line), 0, False
+                # 逐字符扫描，**同时处理单引号和双引号字符串**。
+                #
+                # ⚠ 这里修过两次，两次都是检查器的 bug：
+                #
+                #   ① 初版用 line.find("#") 无条件截断，把
+                #      Say "... # 推荐 ..." 里的 # 当成注释 → 误报。
+                #   ② 第二版只处理双引号字符串，于是
+                #      -Pattern '__version__\s*=\s*"([^"]+)"'
+                #      里**单引号内的双引号**被当成字符串边界 → 误报。
+                #
+                # 教训：真解析器（Parser::ParseFile）才是权威。
+                # 这个检查只是快速兜底，遇到误报先怀疑检查器。
+                j, n = 0, len(line)
+                dq = 0          # 双引号计数（不含单引号字符串内的）
+                quote = None    # 当前所在字符串的引号类型
                 while j < n:
                     c = line[j]
-                    if in_str:
+                    if quote:
                         if c == "`":                 # 反引号转义
                             j += 2
                             continue
-                        if c == '"':
-                            if j + 1 < n and line[j + 1] == '"':   # "" 字面引号
-                                j += 2
+                        if c == quote:
+                            if j + 1 < n and line[j + 1] == quote:
+                                j += 2                   # '' 或 "" 是字面引号
                                 continue
-                            in_str = False
-                            cnt += 1
+                            if quote == '"':
+                                dq += 1
+                            quote = None
                         j += 1
                         continue
-                    if c == "#":                     # 字符串外 → 注释，本行结束
+                    if c == "#":                     # 字符串外 → 注释
                         break
-                    if c == '"':
-                        in_str = True
-                        cnt += 1
+                    if c in "\"'":
+                        quote = c
+                        if c == '"':
+                            dq += 1
                     j += 1
-                assert cnt % 2 == 0, (
+                assert dq % 2 == 0, (
                     f"{p.name} 第 {idx} 行双引号不成对（{cnt} 个）："
                     f"{line.strip()[:70]}\n"
                     f"  字符串里的强调改用「」或单引号，别用 ASCII 双引号"
@@ -2044,3 +2099,76 @@ class TestRealPowerShellParser:
         assert not re.search(r'\$PWSH"?\s+-NoProfile\s+-File', text), (
             "lint 脚本用 -File 执行了 .ps1 —— 那会触发副作用"
         )
+
+
+class TestParamBlockIntegrity:
+    """★★ param 块的每个参数都必须还在。
+
+    ⚠ 背景：我插入 `-AllowedTools` / `-ExtraDirs` 时漏了第 32 行的逗号，
+    整段 param 列表断裂，脚本**根本解析不了**。
+
+    真解析器能抓到「漏逗号」，但抓不到「整行被删掉」——
+    那仍然能解析通过，只是少了个参数，于是 `-WriteEnv` 之类的开关
+    静默失效（用户传了但没用）。
+
+    所以除了真解析器，还要单独守一遍"参数齐全"。
+    """
+
+    @staticmethod
+    def _params(pwsh: str, path) -> list[str]:
+        """用 PowerShell AST 取 param 块里的参数名。"""
+        import os
+        import subprocess
+
+        script = (
+            '$ast = [System.Management.Automation.Language.Parser]::ParseFile('
+            '$env:NXS_P1, [ref]$null, [ref]$null)\n'
+            'if ($ast.ParamBlock) {\n'
+            '  foreach ($p in $ast.ParamBlock.Parameters) {\n'
+            '    Write-Output $p.Name.VariablePath.UserPath\n'
+            '  }\n'
+            '}\n'
+        )
+        env = dict(os.environ)
+        env["NXS_P1"] = str(path)
+        r = subprocess.run([pwsh, "-NoProfile", "-Command", script],
+                           capture_output=True, text=True, timeout=60, env=env)
+        return [l.strip() for l in r.stdout.splitlines() if l.strip()]
+
+    @covers("M14.F9")
+    def test_setup_has_all_switches(self):
+        """setup 脚本必须保留这些参数（它们是功能入口）。"""
+        pwsh = TestRealPowerShellParser._find_pwsh()
+        if not pwsh:
+            pytest.skip("本机没有 pwsh")
+
+        params = self._params(pwsh, DEPLOY / "setup-work-node.ps1")
+        required = ["Check", "InstallTask", "WriteEnv",
+                    "AllowedTools", "ExtraDirs", "NodeId", "Server"]
+        missing = [p for p in required if p not in params]
+        assert not missing, (
+            f"param 块缺了这些参数：{missing}\n"
+            f"  当前有：{params}\n"
+            f"  常见原因：插入新参数时漏了行尾逗号或整行被删"
+        )
+
+
+class TestVersionReporting:
+    """★ 脚本要自报版本与 commit。
+
+    ⚠ **我们因为"用户跑的是旧版"浪费了好几轮对话。**
+
+    用户报的错误在最新版里已经修好了，但两边都没意识到版本不同：
+    用户以为是他环境的问题，我以为是我代码的问题，来回查。
+
+    把版本打进第一屏输出，一眼就能对上 —— 这是最低成本的诊断信息。
+    """
+
+    @covers("M14.F9")
+    def test_setup_prints_version(self):
+        """setup 脚本启动时要打印版本与 commit。"""
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        assert "脚本版本" in text, "没打印脚本版本"
+        # 必须真的去读 __init__.py 和 git
+        assert "__version__" in text, "没从 __init__.py 读版本号"
+        assert "rev-parse" in text, "没取 git commit"
