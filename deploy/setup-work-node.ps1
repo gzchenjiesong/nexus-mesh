@@ -523,18 +523,33 @@ if ($env:CODEBUDDY_ALLOWED_TOOLS) {
 } else {
     Bad "未配置 CODEBUDDY_ALLOWED_TOOLS"
     Say ""
-    Say "   这一步必须你自己填 —— 我不知道你公司内网的 CLI 叫什么。"
-    Say "   不知道有哪些？先跑："
-    Say "     powershell -ExecutionPolicy Bypass -File deploy\list-internal-tools.ps1"
+    Say "   ⚠ 先想清楚这个节点的定位：**派任务给 CodeBuddy，让它自己查**。"
+    Say "     不是「指挥它跑某个固定脚本」——它要靠 LLM 判断该读哪个文件、"
+    Say "     该用哪个 skill、该跑什么命令。所以工具面不能收得太窄。"
     Say ""
-    Say "   PowerShell 里设（当前窗口临时生效）："
+    Say "   推荐（够它自主工作，又不过宽）："
     Say ""
-    Say '     $env:CODEBUDDY_ALLOWED_TOOLS = "Bash(<内部CLI名>:*),Read,Grep"'
+    Say '     $env:CODEBUDDY_ALLOWED_TOOLS = "Read,Grep,Glob,Bash,WebFetch"'
+    Say ""
+    Say "     各工具的用途："
+    Say "       Read     读文件（会议纪要、项目文档）"
+    Say "       Grep     在文件里搜关键词"
+    Say "       Glob     按名字找文件"
+    Say "       Bash     执行命令 / 跑 skill 里的脚本"
+    Say "       WebFetch 调内部 HTTP API（如果有）"
+    Say ""
+    Say "   安全边界不靠「少给工具」，而靠这三条（更硬）："
+    Say "     ① 只注册 work.query 一种能力，不开放任意任务类型"
+    Say "     ② 回答硬截断到 1500 字节（原文出不了内网）"
+    Say "     ③ 域矩阵只允许特定来源派任务"
     Say ""
     Say "   永久生效（用户级）："
     Say ""
     Say '     [Environment]::SetEnvironmentVariable("CODEBUDDY_ALLOWED_TOOLS",'
-    Say '         "Bash(<内部CLI名>:*),Read,Grep", "User")'
+    Say '         "Read,Grep,Glob,Bash,WebFetch", "User")'
+    Say ""
+    Say "   ⚠ 如果连 Bash 都不想给（只让它读文件），那就去掉 Bash。"
+    Say "     代价：大部分 skill 用不了 —— 它们内部要执行命令。"
 }
 
 if ($Check) {

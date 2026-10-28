@@ -1886,25 +1886,49 @@ class TestNoFakeToolNamesInExamples:
                 )
 
     @covers("M14.F9")
-    def test_uses_explicit_placeholder(self):
-        """示例要用尖括号占位符，让人一眼知道要替换。"""
+    def test_example_uses_real_builtin_tools(self):
+        """★ 示例要给**真实存在的内置工具名**，不是编的 CLI。
+
+        ⚠ 这里有个认识上的转变：
+
+        早期版本让用户填 ``Bash(<内部CLI名>:*)`` —— 即"指定一个取数命令"。
+        但那是把 CodeBuddy 当脚本执行器用。它的真实价值是
+        **自己判断该读哪个文件、该用哪个 skill、该跑什么命令**。
+
+        所以示例改成真实的内置工具：
+        ``Read, Grep, Glob, Bash, WebFetch`` —— 这些名字在任何 CodeBuddy
+        安装里都成立，不会因为用户环境不同而失败。
+        """
         ps = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
-        assert "<内部CLI名>" in ps, (
-            "ps1 的示例没用尖括号占位符"
+        for tool in ("Read", "Grep", "Glob", "Bash", "WebFetch"):
+            assert tool in ps, f"示例里没提到内置工具 {tool}"
+        # 推荐值要成组出现（可复制）
+        assert "Read,Grep,Glob,Bash,WebFetch" in ps, (
+            "没有给出一整条可复制的推荐值"
         )
 
     @covers("M14.F9")
-    def test_placeholder_not_parsed_as_tool(self):
-        """★ 占位符不能被白名单校验器当成真名去查。
+    def test_whitelist_not_overly_narrow(self):
+        """★ 白名单示例不能收窄到"只允许某个 CLI"。
 
-        校验器解析 ``Bash\\(([A-Za-z0-9_.-]+)`` —— ``<内部CLI名>`` 含尖括号
-        和中文，不匹配这个模式，所以会被跳过。这是刻意的：
-        占位符本来就不是真名，拿它去 Get-Command 只会得到误导性的"找不到"。
+        收窄的后果：skill 跑不了（它们内部要执行命令）、读不了非工作目录的
+        文件、调不了内部 API —— 于是 Agent 只能说"我做不到"，
+        而用户以为是能力不足或权限问题。
+
+        安全边界应该在**任务类型 + 输出截断 + 域矩阵**这三层，
+        而不是靠"少给工具"。
         """
+        ps = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        # 推荐行里必须同时有读类和执行类工具
+        line = next((l for l in ps.splitlines()
+                     if "Read,Grep,Glob,Bash,WebFetch" in l), "")
+        assert line, "找不到推荐的白名单行"
+        assert "Bash" in line, (
+            "推荐值里没有 Bash —— skill 内部执行命令会失败"
+        )
+        # 不能只有 Bash(某个具体命令)
         import re
-
-        pattern = r"Bash\(\s*([A-Za-z0-9_.\-]+)"
-        placeholder = "Bash(<内部CLI名>:*)"
-        assert not re.search(pattern, placeholder), (
-            "占位符被解析成了工具名 —— 它会被误报为'找不到'"
+        assert not re.search(r'"Bash\([A-Za-z]', line), (
+            "推荐值把 Bash 限制到了具体命令 —— 那等于只允许跑那一个工具，"
+            "Agent 无法自主选择"
         )

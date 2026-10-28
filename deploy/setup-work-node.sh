@@ -248,12 +248,26 @@ say "→ 工具白名单（决定这个节点能做什么）"
 if [ -n "${CODEBUDDY_ALLOWED_TOOLS:-}" ]; then
   ok "已配置: $CODEBUDDY_ALLOWED_TOOLS"
 
-  # ⚠ **必须校验里面的 CLI 真的存在。**
+  # 白名单里有两类东西，校验方式不同：
   #
-  #   白名单写错（拼错、或工具不在 PATH）时注册照样成功 ——
-  #   白名单只是"允许 CodeBuddy 调什么"，协议层不检查程序存不存在。
-  #   于是任务能派进来，但 Agent 执行时报"我做不到"——
-  #   那看起来像能力不足，很难联想到是名字拼错了。
+  #   ① **内置工具名**（Read / Grep / Glob / Bash / WebFetch）
+  #      它们是 CodeBuddy 自己实现的，不在 PATH 里，**不该去查**。
+  #      查了只会得到误导性的"找不到"。
+  #
+  #   ② **Bash(具体命令)** 形式
+  #      这个才需要在 PATH 里存在。拼错时注册照样成功，但 Agent
+  #      执行时报"我做不到" —— 那看起来像能力不足，很难联想到拼错。
+  builtin=""
+  for t in $(printf '%s' "$CODEBUDDY_ALLOWED_TOOLS" | tr ',' ' '); do
+    case "$t" in
+      Read|Grep|Glob|Write|Bash|WebFetch|NotebookEdit|Edit|Task|TodoWrite)
+        builtin="$builtin $t" ;;
+    esac
+  done
+  if [ -n "$builtin" ]; then
+    ok "内置工具:$builtin"
+  fi
+
   tools=$(printf '%s' "$CODEBUDDY_ALLOWED_TOOLS" \
           | grep -oE 'Bash\([[:space:]]*[A-Za-z0-9_.-]+' \
           | sed 's/^Bash([[:space:]]*//' | sort -u)
@@ -291,16 +305,27 @@ if [ -n "${CODEBUDDY_ALLOWED_TOOLS:-}" ]; then
 else
   bad "未配置 CODEBUDDY_ALLOWED_TOOLS"
   say ""
-  say "  这一步**必须你自己填** —— 我不知道你公司内网的 CLI 叫什么。"
-  say "  形如（尖括号里的换成真实的）："
+  say "   ⚠ 先想清楚这个节点的定位：**派任务给 CodeBuddy，让它自己查**。"
+  say "     不是「指挥它跑某个固定脚本」—— 它要靠 LLM 判断该读哪个文件、"
+  say "     该用哪个 skill、该跑什么命令。所以工具面不能收得太窄。"
   say ""
-  say "    export CODEBUDDY_ALLOWED_TOOLS='Bash(<内部CLI名>:*),Read,Grep'"
+  say "   推荐（够它自主工作，又不过宽）："
   say ""
-  say "  含义：只能调这两个 CLI + 读文件 + 搜文件。"
-  say "  **不能执行任意命令、不能写文件。**"
+  say "     export CODEBUDDY_ALLOWED_TOOLS='Read,Grep,Glob,Bash,WebFetch'"
   say ""
-  say "  为什么必须给：不给白名单意味着 CodeBuddy 能用全部工具（含任意 Bash），"
-  say "  那这个节点就等于把公司电脑的 shell 挂到了任务总线上。"
+  say "       Read     读文件（会议纪要、项目文档）"
+  say "       Grep     在文件里搜关键词"
+  say "       Glob     按名字找文件"
+  say "       Bash     执行命令 / 跑 skill 里的脚本"
+  say "       WebFetch 调内部 HTTP API（如果有）"
+  say ""
+  say "   安全边界不靠「少给工具」，而靠这三条（更硬）："
+  say "     ① 只注册 work.query 一种能力，不开放任意任务类型"
+  say "     ② 回答硬截断到 1500 字节（原文出不了内网）"
+  say "     ③ 域矩阵只允许特定来源派任务"
+  say ""
+  say "   ⚠ 如果连 Bash 都不想给（只让它读文件），去掉 Bash 即可。"
+  say "     代价：大部分 skill 用不了 —— 它们内部要执行命令。"
 fi
 
 if [ "$CHECK_ONLY" = "1" ]; then

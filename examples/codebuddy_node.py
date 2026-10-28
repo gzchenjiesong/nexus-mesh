@@ -98,10 +98,18 @@ from examples.agent_bridge_common import (
 #: 2. 服务端环境变量名（``NXS_SECRET_<NODE_ID 大写>``）
 #: 3. 角色卡里的 ``node_id`` 字段
 #:
-#: 对不上的症状是 ``AU-SIG-01``（签名失败）—— 而那看起来像"密钥写错了"，
-#: 实际可能是"两边不是同一个名字"。
+#: 对不上的症状是 ``AU-SIG-01``（签名失败）—— 而那看起来像「密钥写错了」，
+#: 实际可能是「两边不是同一个名字」。
 #: 有测试守着这个常量与两个部署脚本的默认值一致。
 DEFAULT_NODE_ID = "work-desktop"
+
+#: 单次任务允许的最大回合数。
+#:
+#: ⚠ 初版是 8 —— 太少了。查一次数据往往要走：
+#:   找文件 → 读内容 → 跑命令 → 看输出 → 再查一次 → 汇总
+#: 8 轮会半路截断，而症状是「回答不完整」，看起来像模型能力问题。
+#: 30 轮给足余量；超了说明这个任务本来就该拆开。
+DEFAULT_MAX_TURNS = 30
 
 
 def find_codebuddy() -> str:
@@ -190,11 +198,22 @@ def describe_executable(path: str) -> str:
 DEFAULT_BIN = find_codebuddy()
 
 #: 「摘要」约束。**这是行为引导，不是保障** —— 保障是 SUMMARY_LIMIT。
+#:
+#: ⚠ 措辞上有个容易出错的地方：只写"给摘要"会让 agent 以为
+#: "不该动手、直接空手回答"。而这个节点的全部价值在于它**能自己去查**。
+#: 所以先说清"该怎么干就怎么干"，再收窄输出。
 SUMMARY_PROMPT_NOTE = (
-    "【重要约束】你的回答会被回传到一个外部系统。"
-    "因此**只给摘要与关键数据点**：结论、状态、时间、负责人、数量。"
-    "不要粘贴原文、不要贴完整文档、不要贴会议记录全文。"
-    "如果资料很长，只提炼要点。回答控制在 500 字以内。"
+    "【工作方式】\n"
+    "- 这是一个真实任务，不是闲聊。需要查数据就**主动使用你的工具和技能**"
+    "（读文件、搜索、执行命令、调用已安装的 skill），不要凭记忆猜测。\n"
+    "- 查不到就如实说查不到，不要编造。\n"
+    "\n"
+    "【输出约束】\n"
+    "- 你的最终回答会被回传到一个外部系统（云端的任务总线）。\n"
+    "- 因此**只给摘要与关键数据点**：结论、状态、时间、负责人、数量。\n"
+    "- 不要粘贴原文、不要贴完整文档、不要贴会议记录全文。\n"
+    "- 不要描述你用了哪些工具、执行了哪些步骤 —— 那些留在本机。\n"
+    "- 回答控制在 500 字以内。"
 )
 
 
@@ -275,28 +294,49 @@ def build_card(node_id: str, domain: str, *,
 def build_cmd(bin_path: str, prompt: str, *,
               allowed_tools: tuple[str, ...],
               permission_mode: str = "dontAsk",
-              timeout: int = DEFAULT_TIMEOUT) -> list[str]:
+              max_turns: int = DEFAULT_MAX_TURNS,
+              extra_dirs: tuple[str, ...] = ()) -> list[str]:
     """拼出调用命令。
 
-    ## 三个必须的参数
+    ## 这个节点的定位：**派任务给它，而不是指挥它**
+
+    早期版本把白名单收窄成"只允许某个取数 CLI"，本意是安全。
+    但那等于把 CodeBuddy 降级成一个脚本执行器 —— 它真正擅长的是：
+    自己判断该用哪个 skill、该读哪个文件、该跑什么命令。
+
+    所以设计上要给它足够的工具面：
+    ``Read`` / ``Grep`` / ``Glob``（找信息）、``Bash``（执行）、
+    ``WebFetch``（内部 HTTP API）。
+    安全边界不靠"少给工具"，而靠下面三条，它们更硬：
+
+    1. 只注册 ``work.query`` 一种能力（不开放任意任务类型）
+    2. 回答硬截断到 ``SUMMARY_LIMIT``（原文出不了内网）
+    3. 域矩阵只允许特定来源
+
+    ## 参数说明
 
     ``--output-format json``
         默认输出是给人看的文本。**解析人类可读输出是脆弱的** ——
-        改一次措辞就坏，还可能是"部分解析成功"。
-        加这个拿稳定信封，答案在 ``.result``。
+        改一次措辞就坏，还可能是"部分解析成功"。答案在 ``.result``。
 
     ``--permission-mode dontAsk``
-        `-p` 模式下需要授权的操作**被拒**而不是挂起等确认。
-        挂起会耗尽任务租约 —— 那比失败更糟（失败至少能重试）。
+        `-p` 模式下没人点确认框。默认模式会让需要授权的操作**挂起**，
+        直到租约过期 —— 比失败更糟。``dontAsk`` 让它被拒，快速失败。
 
-    ``--allowedTools``
-        细粒度白名单。**这是本节点最重要的安全控制**，见模块文档。
+    ``--max-turns``
+        ⚠ 这个值不能太小。查一次数据可能要：找文件 → 读 → 跑命令 →
+        看输出 → 再查一次 → 汇总。8 轮不够（初版就是 8，会半路截断）。
+        默认 30，可用 ``--max-turns`` 调。
+
+    ``--add-dir``
+        业务数据可能不在工作目录里。这些目录要加入信任范围，
+        否则 ``Read`` 会弹审批（而 ``dontAsk`` 下等于被拒）。
 
     ## 为什么不给 ``--dangerously-skip-permissions``
 
-    那个参数会放开几乎全部权限（连 HIGH/CRITICAL 命令都只"可能"拦）。
-    我们只需要读文件 + 调几个 CLI，用白名单精确表达就够了 ——
-    **能精确表达时，就不要用粗放的开关。**
+    那个参数会放开几乎全部权限。白名单 + ``dontAsk`` 已经能表达
+    "能用什么、不能用就快速失败"，不需要粗放的开关。
+    真要拦危险命令，用 settings.json 的 ``permissions.deny`` —— 那是可审计的。
     """
     cmd = [
         bin_path,
@@ -307,8 +347,10 @@ def build_cmd(bin_path: str, prompt: str, *,
     if allowed_tools:
         cmd.append("--allowedTools")
         cmd.extend(allowed_tools)
+    for d in extra_dirs:
+        cmd.extend(["--add-dir", d])
     # 单次模式不支持后台任务，显式关掉以免产生跨轮事件
-    cmd.extend(["--max-turns", "8"])
+    cmd.extend(["--max-turns", str(max_turns)])
     return cmd
 
 
@@ -338,8 +380,13 @@ def extract_answer(payload: dict) -> str:
 
 
 def make_runner(cmd_builder, *, timeout: int, logger: logging.Logger,
-                node_id: str):
-    """构造 runner：吃 prompt，吐 CodeBuddy 的回答文本。"""
+                node_id: str, workdir: str | None = None):
+    """构造 runner：吃 prompt，吐 CodeBuddy 的回答文本。
+
+    :param workdir: CodeBuddy 的工作目录。**这决定了它能发现哪些项目级 skill**
+        —— ``<workdir>/.codebuddy/skills/`` 下的会被加载。
+        也决定相对路径的基准。
+    """
 
     def runner(prompt: str) -> str:
         result = run_subprocess(
@@ -349,6 +396,7 @@ def make_runner(cmd_builder, *, timeout: int, logger: logging.Logger,
             # 只附加 NXS_ACTOR，其余继承（但剔掉凭据）——
             # CodeBuddy 要从 ~/.codebuddy 读配置，不能清空环境
             env=_actor_env(node_id),
+            cwd=workdir,
             what="CodeBuddy",
         )
         try:
@@ -468,8 +516,20 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--allowed-tool", action="append", default=None,
                         metavar="SPEC",
-                        help="允许的工具（可重复）。如 'Bash(projectctl:*)' 'Read'。 "
+                        help="允许的工具（可重复），如 'Read' 'Bash' 'WebFetch'。 "
                              "省略时从环境变量 CODEBUDDY_ALLOWED_TOOLS 读（逗号分隔）")
+    parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS,
+                        help=f"单次任务最大回合数（默认 {DEFAULT_MAX_TURNS}）。"
+                             "太小会半路截断，症状是「回答不完整」")
+    parser.add_argument("--workdir", default=os.environ.get("CODEBUDDY_WORKDIR", ""),
+                        help="CodeBuddy 的工作目录。决定它能发现哪些项目级 skill"
+                             "（<workdir>/.codebuddy/skills/）。"
+                             "也可用环境变量 CODEBUDDY_WORKDIR")
+    parser.add_argument("--add-dir", action="append", default=None,
+                        metavar="DIR",
+                        help="额外信任目录（可重复）。业务数据不在工作目录里时必须加，"
+                             "否则 Read 会弹审批（dontAsk 下等于被拒）。"
+                             "省略时从 CODEBUDDY_EXTRA_DIRS 读（逗号分隔）")
     parser.add_argument("--allow-raw", action="store_true",
                         help="⚠ 允许回传更长的内容（提升上限到 4096 字节）。"
                              "默认只给 1500 字节摘要 —— 见模块文档")
@@ -500,6 +560,13 @@ def main() -> int:
         raw = os.environ.get("CODEBUDDY_ALLOWED_TOOLS", "")
         allowed = [t.strip() for t in raw.split(",") if t.strip()]
     allowed_tools = tuple(allowed)
+
+    # 额外信任目录：命令行优先，其次环境变量
+    extra = args.add_dir
+    if extra is None:
+        raw = os.environ.get("CODEBUDDY_EXTRA_DIRS", "")
+        extra = [d.strip() for d in raw.split(",") if d.strip()]
+    extra_dirs = tuple(d for d in extra if d)
 
     if not allowed_tools:
         # ⚠ 不静默降级成"不限工具"。那等于把整个 shell 交出去。
@@ -544,9 +611,11 @@ def main() -> int:
                     lambda prompt: build_cmd(
                         args.bin, prompt,
                         allowed_tools=allowed_tools,
-                        timeout=args.timeout,
+                        max_turns=args.max_turns,
+                        extra_dirs=extra_dirs,
                     ),
                     timeout=args.timeout, logger=log, node_id=args.node_id,
+                    workdir=args.workdir or None,
                 ),
                 logger=log, via="任务总线",
                 limit=limit,
