@@ -1932,3 +1932,115 @@ class TestNoFakeToolNamesInExamples:
             "推荐值把 Bash 限制到了具体命令 —— 那等于只允许跑那一个工具，"
             "Agent 无法自主选择"
         )
+
+
+class TestRealPowerShellParser:
+    """★★ 用**真实的 PowerShell 解析器**检查 .ps1 语法。
+
+    ⚠ **这一节的存在，是因为我前面所有静态检查都漏了三个真错误。**
+
+    我写了一整套 Python 静态检查：BOM、引号配对、变量赋值、括号嵌套、
+    `$var` 接中文……测试全绿。但里面一直藏着：
+
+    ===============================================  ==================
+    错误                                              静态检查为何漏掉
+    ===============================================  ==================
+    ``param`` 块里漏了一个逗号                         括号数量是对的
+    ``$env:TEMP`` 为 null 时 ``Join-Path`` 崩           只看语法不看取值
+    ``'\\\\b(...)'`` 在单引号里不是单词边界               引号是配对的
+    ===============================================  ==================
+
+    第一个是**语法错误**（脚本根本解析不了），后两个是**运行期**问题。
+    这些只有真解析器能抓到。
+
+    ## 所以：能跑真解析器，就别满足于静态检查
+
+    只需要下载一个 68 MB 的 pwsh，检查 4 个文件耗时约 2 秒。
+    没有任何理由不做。
+    """
+
+    @staticmethod
+    def _find_pwsh():
+        import shutil
+
+        for cand in (shutil.which("pwsh"), "/tmp/nxs-pwsh/pwsh", "/tmp/pwsh/pwsh"):
+            if cand and pathlib.Path(cand).is_file():
+                return cand
+        return None
+
+    @covers("M14.F9")
+    def test_all_ps1_parse_cleanly(self):
+        """所有 .ps1 必须能通过 PowerShell 解析器。
+
+        没有 pwsh 时跳过 —— CI 环境未必装了。但要跑
+        ``deploy/lint-ps1.sh`` 的话它会自动下载。
+        """
+        import subprocess
+
+        pwsh = self._find_pwsh()
+        if not pwsh:
+            pytest.skip("本机没有 pwsh；跑 deploy/lint-ps1.sh 可自动下载")
+
+        script = (
+            '$d = Join-Path $env:NXS_LINT_DIR "deploy"\n'
+            '$files = Get-ChildItem -Path $d -Filter "*.ps1" -File\n'
+            '$fail = 0\n'
+            'foreach ($f in $files) {\n'
+            '  $t=$null;$e=$null\n'
+            '  [System.Management.Automation.Language.Parser]::ParseFile('
+            '$f.FullName,[ref]$t,[ref]$e) | Out-Null\n'
+            '  if ($e.Count -gt 0) {\n'
+            '    $fail++\n'
+            '    foreach ($x in $e) {\n'
+            '      Write-Output ("{0}|{1}|{2}" -f $f.Name, '
+            '$x.Extent.StartLineNumber, $x.Message)\n'
+            '    }\n'
+            '  }\n'
+            '}\n'
+            'exit $fail\n'
+        )
+        import os
+        env = dict(os.environ)
+        env["NXS_LINT_DIR"] = str(REPO_ROOT)
+        r = subprocess.run([pwsh, "-NoProfile", "-Command", script],
+                           capture_output=True, text=True, timeout=120, env=env)
+
+        assert r.returncode == 0, (
+            "PowerShell 解析失败：\n" + r.stdout +
+            "\n  修完后跑一遍：bash deploy/lint-ps1.sh"
+        )
+
+    @covers("M14.F9")
+    def test_lint_script_exists(self):
+        """★ 要有可复用的 lint 脚本 —— 不能只在我脑子里记得检查。
+
+        下次改完 .ps1，任何人（包括我）应该能一条命令验证，
+        而不是靠"我记得要检查哪些点"。
+        """
+        lint = DEPLOY / "lint-ps1.sh"
+        assert lint.is_file(), "缺 deploy/lint-ps1.sh"
+        text = lint.read_text(encoding="utf-8")
+        # 必须用真解析器，不是自己写的正则
+        assert "Parser]::ParseFile" in text, (
+            "lint 脚本没用真实解析器 —— 那和静态检查没区别"
+        )
+        # 必须能自动获取 pwsh
+        assert "releases/download" in text, "不会自动下载 pwsh"
+        # 必须能返回非零退出码（否则接不进 CI）
+        assert "exit 1" in text
+
+    @covers("M14.F9")
+    def test_lint_script_does_not_execute_scripts(self):
+        """★ lint 只能**解析**，不能**执行** .ps1。
+
+        ``pwsh -File x.ps1`` 会真的跑起来 —— 而 setup 脚本有副作用
+        （改环境变量、建计划任务）。检查语法的人不该顺带改系统状态。
+
+        Parser::ParseFile 只解析不执行，这是刻意的选择。
+        """
+        text = (DEPLOY / "lint-ps1.sh").read_text(encoding="utf-8")
+        # 不许出现 -File 执行 .ps1
+        import re
+        assert not re.search(r'\$PWSH"?\s+-NoProfile\s+-File', text), (
+            "lint 脚本用 -File 执行了 .ps1 —— 那会触发副作用"
+        )

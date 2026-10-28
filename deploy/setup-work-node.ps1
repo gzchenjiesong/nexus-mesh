@@ -29,7 +29,7 @@ param(
     [switch]$InstallTask,           # 顺便创建计划任务（常驻）
     [switch]$WriteEnv,              # 把环境变量真正写入用户级（永久）
     [string]$AllowedTools = $(if ($env:CODEBUDDY_ALLOWED_TOOLS) { $env:CODEBUDDY_ALLOWED_TOOLS } else { "" }),
-    [string]$ExtraDirs = $(if ($env:CODEBUDDY_EXTRA_DIRS) { $env:CODEBUDDY_EXTRA_DIRS } else { "" })
+    [string]$ExtraDirs = $(if ($env:CODEBUDDY_EXTRA_DIRS) { $env:CODEBUDDY_EXTRA_DIRS } else { "" }),
     [string]$NodeId = $(if ($env:NXS_NODE_ID) { $env:NXS_NODE_ID } else { "work-desktop" }),
     [string]$Server = $(if ($env:NXS_SERVER) { $env:NXS_SERVER } else { "43.138.222.206:18800" })
 )
@@ -74,9 +74,15 @@ $PyVer = $null
 # 把探测脚本写成临时文件，而不是内联 `-c "..."`。
 # 理由：内联要处理引号转义与括号嵌套，一旦编码或转义出问题就崩在解析阶段，
 # 而报错位置指向别处。写成文件后完全没有这层风险。
-$probeFile = Join-Path $env:TEMP "nxs_pyver_probe.py"
-$outFile   = Join-Path $env:TEMP "nxs_pyver_out.txt"
-$errFile   = Join-Path $env:TEMP "nxs_pyver_err.txt"
+# ⚠ 用 [System.IO.Path]::GetTempPath() 而不是 $env:TEMP。
+#   后者在环境变量缺失时是 $null，而 Join-Path 收到 null 会直接报
+#     Cannot bind argument to parameter 'Path' because it is null
+#   那句话完全看不出是"临时目录取不到"。
+#   GetTempPath() 在所有平台都有值，不依赖环境变量。
+$tempRoot = [System.IO.Path]::GetTempPath()
+$probeFile = Join-Path $tempRoot "nxs_pyver_probe.py"
+$outFile   = Join-Path $tempRoot "nxs_pyver_out.txt"
+$errFile   = Join-Path $tempRoot "nxs_pyver_err.txt"
 Set-Content -Path $probeFile -Encoding ASCII `
     -Value 'import sys; print("%d.%d" % sys.version_info[:2])'
 
@@ -185,6 +191,13 @@ Say "-> CA 证书"
 #
 # CA 是**公开证书**（不含私钥），本来就该随代码走 —— 放仓库里
 # deploy/ca.pem，脚本直接复制，一次都不用粘。
+# ⚠ 先建目录 —— CA 要往 $ConfDir 里写文件。
+#   这个顺序错误我犯过两次：CA 段落前移后，建目录还留在原处（后面），
+#   于是 Copy-Item 报 Could not find a part of the path。
+#   **移一个块，要检查它依赖的前提是否也移了。**
+if (-not (Test-Path $ConfDir)) {
+    New-Item -ItemType Directory -Force -Path $ConfDir | Out-Null
+}
 $repoCa = Join-Path $PSScriptRoot "ca.pem"
 if (Test-Path $CaFile) {
     Ok "CA 已存在: $CaFile"
@@ -271,9 +284,9 @@ if (-not $pyForCheck) {
     #
     #   环境变量没有这个问题：空值就是空串，不会被参数验证拦下。
     #   而且子进程默认继承父进程环境，不需要额外传参。
-    $chkFile = Join-Path $env:TEMP "nxs_health_check.py"
-    $chkOut  = Join-Path $env:TEMP "nxs_health_out.txt"
-    $chkErr  = Join-Path $env:TEMP "nxs_health_err.txt"
+    $chkFile = Join-Path ([System.IO.Path]::GetTempPath()) "nxs_health_check.py"
+    $chkOut  = Join-Path ([System.IO.Path]::GetTempPath()) "nxs_health_out.txt"
+    $chkErr  = Join-Path ([System.IO.Path]::GetTempPath()) "nxs_health_err.txt"
 
     $chkCode = @'
 import json, os, ssl, urllib.error, urllib.request
@@ -422,12 +435,23 @@ Say "-> CodeBuddy CLI（执行者靠它，与 IDE 是两个独立软件）"
 #   两边看到的不是同一个文件，会误导判断。
 
 $CbPath = $null
-$CbCandidates = @(
-    (Join-Path $env:LOCALAPPDATA "codebuddy\bin\codebuddy.exe"),
-    (Join-Path $env:APPDATA "npm\codebuddy.exe"),
-    (Join-Path $env:APPDATA "npm\codebuddy.cmd"),
-    (Join-Path $env:APPDATA "npm\codebuddy.ps1")
-)
+
+# ⚠ $env:LOCALAPPDATA / $env:APPDATA 在非 Windows 上是 $null，
+#   而 Join-Path 收到 null 会直接报
+#     Cannot bind argument to parameter 'Path' because it is null
+#   那句话完全看不出是"环境变量不存在"。
+#   所以先取到变量里判空，再拼路径。
+$localAppData = $env:LOCALAPPDATA
+$appData      = $env:APPDATA
+$CbCandidates = @()
+if ($localAppData) {
+    $CbCandidates += (Join-Path $localAppData "codebuddy\bin\codebuddy.exe")
+}
+if ($appData) {
+    $CbCandidates += (Join-Path $appData "npm\codebuddy.exe")
+    $CbCandidates += (Join-Path $appData "npm\codebuddy.cmd")
+    $CbCandidates += (Join-Path $appData "npm\codebuddy.ps1")
+}
 foreach ($cand in $CbCandidates) {
     if ($cand -and (Test-Path $cand)) { $CbPath = $cand; break }
 }
@@ -519,7 +543,11 @@ if ($env:CODEBUDDY_ALLOWED_TOOLS) {
     }
 
     # 只读工具（Read/Grep 等）不需要在 PATH 里 —— 它们是 CodeBuddy 内置的
-    if ($env:CODEBUDDY_ALLOWED_TOOLS -notmatch '\\b(Read|Grep|Glob|Write)\\b') {
+    # ⚠ PowerShell **单引号**字符串里不需要转义反斜杠 ——
+    #   '\\b' 是"反斜杠 + b"两个字面量字符，正则引擎会把它当成
+    #   转义后的反斜杠，而不是单词边界 \b。结果：永远匹配不到，
+    #   于是明明有 Read/Grep 也会警告"没有"。
+    if ($env:CODEBUDDY_ALLOWED_TOOLS -notmatch '\b(Read|Grep|Glob|Write)\b') {
         Warn "白名单里没有 Read/Grep —— Agent 可能读不了文件"
         Say "       如果你只打算让它调命令行工具，可以忽略这条。"
     }
@@ -696,18 +724,41 @@ if ($AllowedTools) { $envPairs["CODEBUDDY_ALLOWED_TOOLS"] = $AllowedTools }
 if ($ExtraDirs)    { $envPairs["CODEBUDDY_EXTRA_DIRS"]   = $ExtraDirs }
 
 if ($WriteEnv) {
-    Say "  1) 环境变量（**已写入用户级，新开的窗口生效**）："
+    Say "  1) 环境变量（写入用户级）："
     Say ""
+    $persistFailed = @()
     foreach ($k in $envPairs.Keys) {
         $v = $envPairs[$k]
         if (-not $v) { continue }
         [Environment]::SetEnvironmentVariable($k, $v, "User")
-        # 同时设进当前进程，方便紧接着的命令能用
+        # ⚠ **必须读回验证。**
+        #
+        #   [Environment]::SetEnvironmentVariable(x, y, "User") 在
+        #   不支持的平台上**静默失效** —— 不抛异常、不报错，读回是空。
+        #   实测：PowerShell 7.5 在 macOS/Linux 上就是这样。
+        #
+        #   所以不能"调完就说写好了"。打印成功 ≠ 真的成功 ——
+        #   这跟"提示不等于配置"是同一类错误。
+        $readback = [Environment]::GetEnvironmentVariable($k, "User")
+        if ($readback -ne $v) {
+            $persistFailed += $k
+        }
+        # 同时设进当前进程，方便紧接着的命令立刻能用
         Set-Item -Path "Env:$k" -Value $v
         Say ("     {0} = {1}" -f $k, $v)
     }
     Say ""
-    Say "     ⚠ 当前窗口已生效；**别的新窗口要重开一次**才读到。"
+    if ($persistFailed.Count -gt 0) {
+        Warn "这些没能持久化（当前窗口可用，重开窗口会丢）："
+        foreach ($k in $persistFailed) { Say "       $k" }
+        Say ""
+        Say "       原因：本平台不支持 User 作用域持久化环境变量。"
+        Say "       Windows 上正常；其它平台请写进 shell 配置文件。"
+        Say "       但**当前窗口已设好**，可以继续往下跑。"
+    } else {
+        Ok "已持久化到用户级（新开的窗口生效）"
+        Say "     ⚠ 当前窗口也生效了，但**别的新窗口要重开一次**才读到。"
+    }
 } else {
     Say "  1) 环境变量（**下面只是打印，没有写入**）："
     Say ""
