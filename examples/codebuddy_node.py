@@ -1590,6 +1590,28 @@ def main() -> int:
     if args.dry_run:
         log.info("--dry-run：探活与注册%s。",
                  "全部就绪" if approved else "正常，等批准后可接任务")
+        # ⚠ **必须说清"还没在跑"。**
+        #
+        #   ``--dry-run`` 打印「全部就绪」很容易被理解成"装好了、可以收任务了"。
+        #   但它的语义是**检查完就退出** —— 不发心跳。
+        #
+        #   而协调节点把心跳超时（3 个间隔）的节点标记为 stale，
+        #   stale 不可路由，派任务过来直接拒：
+        #       PolicyDenied: denied[MX-RECEIVE-03]
+        #
+        #   这个错误码看起来像"域不匹配 / 卡片不对"，很难联想到
+        #   "节点根本没在跑"。实测踩过两次。
+        if approved:
+            log.info("")
+            log.info("⚠ 但**现在还没有节点在跑** —— --dry-run 检查完就退出。")
+            log.info("   不收任务、不发心跳。超时后协调节点会把它判为 stale，")
+            log.info("   那时派任务过来会被拒（MX-RECEIVE-03，看着像域不匹配）。")
+            log.info("")
+            log.info("   下一步（二选一）：")
+            log.info("     python %s                     ← 前台常驻，窗口别关",
+                     "examples\\codebuddy_node.py")
+            log.info("     powershell ... -InstallTask                    "
+                     "← 装成计划任务，关窗口也在跑")
         return 0
 
     log.info("开始常驻（node=%s 域=%s）", args.node_id, args.domain)
