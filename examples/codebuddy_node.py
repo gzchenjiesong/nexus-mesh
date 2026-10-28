@@ -629,62 +629,152 @@ def check_credential(node_id: str, logger: logging.Logger) -> int:
     return 1
 
 
+def _probe_once(bin_path: str, args: list[str], *, timeout: int,
+                 logger: logging.Logger, label: str) -> tuple[bool, str, str, int]:
+    """跑一次探活，返回 ``(成功, stdout, stderr, 退出码)``。
+
+    ⚠ **一律把 stderr 拿出来。** 初版只看 stdout，于是输出为空时
+    只能报"输出不是 JSON："——冒号后面什么都没有，等于没给信息。
+    而 codebuddy 的失败原因（未登录、参数不认、权限被拒）
+    通常都在 stderr 里。
+    """
+    cmd = [bin_path, *args]
+    logger.debug("执行：%s", " ".join(cmd))
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        logger.error("  [%s] 超时 %d 秒", label, timeout)
+        return False, "", "", -1
+    except OSError as exc:
+        logger.error("  [%s] 跑不起来：%s", label, exc)
+        return False, "", str(exc), -1
+
+    out = (r.stdout or "").strip()
+    err = (r.stderr or "").strip()
+    ok = r.returncode == 0 and bool(out)
+    return ok, out, err, r.returncode
+
+
+def _report_probe(label: str, ok: bool, out: str, err: str, rc: int,
+                  logger: logging.Logger) -> None:
+    """把一次探活的结果完整打出来 —— 好与坏都要能看到细节。"""
+    if ok:
+        logger.info("  ✓ %s（%d 字节）", label, len(out))
+        return
+    logger.error("  ✗ %s", label)
+    logger.error("      退出码：%s", rc)
+    logger.error("      stdout：%d 字节%s", len(out),
+                 "" if out else "（空）")
+    if out:
+        for line in out.splitlines()[:5]:
+            logger.error("        | %s", line[:160])
+    logger.error("      stderr：%d 字节%s", len(err),
+                 "" if err else "（空）")
+    if err:
+        for line in err.splitlines()[:10]:
+            logger.error("        ! %s", line[:200])
+    else:
+        logger.error("        （没有 stderr —— 说明它自己认为成功了，"
+                     "但没往 stdout 写东西）")
+
+
 def check_tools(bin_path: str, logger: logging.Logger) -> int:
-    """确认 CodeBuddy 能用。**注册之前必须先过这一关。**
+    """确认 CodeBuddy 能被**程序**调用。注册之前必须先过这一关。
 
     ⚠ 顺序刻意：反过来的话桥接会先注册成功，然后每条任务都失败 ——
     而原因藏在节点日志里，运维在协调节点上完全看不见。
 
-    这里只验证"能不能跑一次最小的无头调用"，不验证公司内网的 CLI ——
-    后者需要在真实环境里试（``--allowedTools`` 里配的那些工具）。
+    ## 分层探活，而不是一步到位
+
+    初版只跑一次「json + 一个 prompt」，输出为空时报
+    「输出不是 JSON：」—— 什么信息都没有。而失败可能在任意一层：
+
+    ==========  ====================================================
+    层           能排除什么
+    ==========  ====================================================
+    --version    二进制本身能不能跑
+    text 模式    -p / 权限模式 / 登录状态（不涉及 JSON 格式）
+    json 模式    --output-format json 是否被支持、字段叫什么
+    ==========  ====================================================
+
+    分层之后，哪一层断一目了然。
     """
     if not Path(bin_path).exists():
         logger.error("找不到 %s", bin_path)
         logger.error("  安装：npm install -g @tencent-ai/codebuddy-code")
-        logger.error("  或：curl -fsSL https://www.codebuddy.cn/cli/install.sh | bash")
+        logger.error("  或：irm https://www.codebuddy.cn/cli/install.ps1 | iex")
         return 1
 
+    # ---- ① 版本 ----
+    ok, out, err, rc = _probe_once(bin_path, ["--version"], timeout=60,
+                                   logger=logger, label="--version")
+    if ok:
+        logger.info("版本：%s", out.splitlines()[0])
+    else:
+        _report_probe("--version", ok, out, err, rc, logger)
+        logger.error("  → 二进制本身跑不起来，先解决这个")
+        return 1
+
+    logger.info("下面两次会消耗少量额度…")
+
+    # ---- ② text 模式（不碰 JSON）----
+    #
+    # ⚠ 这一步刻意**不带** --output-format json。
+    #   如果它也失败，说明问题在 -p / 权限模式 / 登录，与 JSON 无关。
+    ok_t, out_t, err_t, rc_t = _probe_once(
+        bin_path,
+        ["-p", "回复两个字：就绪", "--permission-mode", "dontAsk"],
+        timeout=180, logger=logger, label="text 模式")
+    _report_probe("text 模式（-p + dontAsk）", ok_t, out_t, err_t, rc_t, logger)
+
+    if not ok_t:
+        logger.error("")
+        logger.error("  → text 模式都不出东西，问题不在 JSON 格式。按顺序查：")
+        logger.error("     1. 是否登录过？先跑一次交互式 `codebuddy` 完成登录")
+        logger.error("     2. 手动验证：在终端里跑下面这条，看有没有输出")
+        logger.error("        %s -p \"回复就绪\" --permission-mode dontAsk", bin_path)
+        logger.error("     3. 若手动有输出而这里没有，可能是 stdin 被当成空管道 ——")
+        logger.error("        把 --dry-run 换个目录再试（避开项目配置影响）")
+        return 1
+    logger.info("  → 原始输出：%r", out_t[:120])
+
+    # ---- ③ json 模式 ----
+    ok_j, out_j, err_j, rc_j = _probe_once(
+        bin_path,
+        ["-p", "回复两个字：就绪", "--output-format", "json",
+         "--permission-mode", "dontAsk"],
+        timeout=180, logger=logger, label="json 模式")
+    _report_probe("json 模式（--output-format json）", ok_j, out_j, err_j, rc_j, logger)
+
+    if not ok_j:
+        logger.error("")
+        logger.error("  → text 模式能出、json 模式不出。可能：")
+        logger.error("     · 这个版本的 --output-format json 行为不同")
+        logger.error("     · 输出被写到了别处（看上面的 stderr）")
+        logger.error("     兜底：桥接可以用 text 模式跑，只是要改 extract_answer()")
+        return 1
+
+    # ---- ④ 信封结构 ----
     try:
-        ver = subprocess.run([bin_path, "--version"], capture_output=True,
-                             text=True, timeout=60, stdin=subprocess.DEVNULL)
-        logger.info("版本：%s", (ver.stdout or "").strip() or "(取不到)")
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.error("跑不起来：%s", exc)
-        return 1
-
-    logger.info("试一次最小无头调用（会消耗额度）…")
-    try:
-        probe = subprocess.run(
-            [bin_path, "-p", "只回复两个字：就绪",
-             "--output-format", "json", "--permission-mode", "dontAsk"],
-            capture_output=True, text=True, timeout=180,
-            stdin=subprocess.DEVNULL,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.error("调用失败：%s", exc)
-        return 1
-
-    raw = (probe.stdout or "").strip()
-    if probe.returncode != 0:
-        logger.error("退出码 %s：%s", probe.returncode, (probe.stderr or "")[-300:])
-        logger.error("  常见原因：未登录。先跑一次交互式 `codebuddy` 完成登录。")
-        return 1
-
-    try:
-        payload = json.loads(raw)
+        payload = json.loads(out_j)
     except json.JSONDecodeError:
-        logger.error("输出不是 JSON：%s", raw[:300])
+        logger.error("  ✗ json 模式的输出不是合法 JSON")
+        for line in out_j.splitlines()[:8]:
+            logger.error("      | %s", line[:200])
         return 1
 
-    # ★ 这里顺便验证"答案在哪个字段" —— 两份文档说法不一致，实测一次就定
-    logger.info("返回信封的键：%s", sorted(payload))
+    logger.info("  ✓ 信封的键：%s", sorted(payload))
     try:
         answer = extract_answer(payload)
     except RuntimeError as exc:
-        logger.error("%s", exc)
-        logger.error("  → 说明文档写的字段名不对，改 extract_answer()")
+        logger.error("  ✗ %s", exc)
+        logger.error("     → 字段名与预期不符，改 extract_answer()")
         return 1
-    logger.info("探活成功：%r", answer.strip()[:40])
+
+    logger.info("  ✓ 取出回答：%r", answer.strip()[:60])
+    logger.info("")
+    logger.info("CodeBuddy 可以被程序调用 —— 可以往下走注册了。")
     return 0
 
 

@@ -699,3 +699,168 @@ class TestActorDirIsAgentDir:
         assert "NXS_CONF_DIR" in conf_line, (
             f"$ConfDir 应该读 NXS_CONF_DIR：{conf_line.strip()}"
         )
+
+
+class TestCheckToolsLayered:
+    """★ 探活要分层，且**每一层都要能看到细节**。
+
+    ⚠ 用户报的现象：`--dry-run` 输出
+
+        输出不是 JSON：
+        不注册节点。先修好 CodeBuddy 再试。
+
+    冒号后面什么都没有 —— 因为初版只看 stdout，而 stdout 是空的。
+    stderr 里可能有真正的原因（未登录、参数不认），但被丢掉了。
+
+    而且初版只有"一次 json 探活"这一层，失败时无法判断是
+    -p 有问题、权限模式有问题、还是 JSON 格式有问题。
+    """
+
+    @staticmethod
+    def _fake(tmp, name, body):
+        from pathlib import Path
+        p = Path(tmp) / name
+        p.write_text("#!/bin/bash\n" + body, encoding="utf-8")
+        p.chmod(0o755)
+        return p
+
+    @staticmethod
+    def _mk_tmp():
+        import tempfile
+        from pathlib import Path
+        return Path(tempfile.mkdtemp(prefix="nxs-probe-"))
+
+    @covers("M14.F8")
+    def test_silent_success_is_reported_clearly(self):
+        """★ returncode 0 但 stdout 空 —— 必须说清"它认为成功但没输出"。
+
+        这正是用户遇到的情况。含糊的"输出不是 JSON"没法定位。
+        """
+        import logging
+        import shutil
+        from examples.codebuddy_node import check_tools
+
+        tmp = self._mk_tmp()
+        try:
+            fake = self._fake(tmp, "silent.sh", (
+                'if [ "$1" = "--version" ]; then echo "2.177.1"; exit 0; fi\n'
+                'exit 0\n'))
+            log = logging.getLogger("t-silent")
+            records = []
+            h = logging.Handler()
+            h.emit = lambda r: records.append(r.getMessage())
+            log.addHandler(h)
+            log.setLevel(logging.DEBUG)
+
+            rc = check_tools(str(fake), log)
+            assert rc == 1
+            text = "\n".join(records)
+            assert "退出码：0" in text, "没报退出码"
+            assert "stdout：0 字节" in text, "没报 stdout 长度"
+            assert "没往 stdout 写东西" in text, (
+                "没解释「它自己认为成功了」这个关键事实"
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @covers("M14.F8")
+    def test_stderr_is_surfaced(self):
+        """★ stderr 必须显示出来。
+
+        未登录、参数不认这类原因都在 stderr 里。
+        初版把它丢了，于是用户只能靠猜。
+        """
+        import logging
+        import shutil
+        from examples.codebuddy_node import check_tools
+
+        tmp = self._mk_tmp()
+        try:
+            fake = self._fake(tmp, "err.sh", (
+                'if [ "$1" = "--version" ]; then echo "2.177.1"; exit 0; fi\n'
+                'echo "Error: not logged in" >&2\n'
+                'exit 1\n'))
+            log = logging.getLogger("t-err")
+            records = []
+            h = logging.Handler()
+            h.emit = lambda r: records.append(r.getMessage())
+            log.addHandler(h)
+            log.setLevel(logging.DEBUG)
+
+            rc = check_tools(str(fake), log)
+            assert rc == 1
+            text = "\n".join(records)
+            assert "not logged in" in text, (
+                "stderr 的内容没有出现在输出里 —— 用户无法知道真正原因"
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @covers("M14.F8")
+    def test_text_mode_tried_before_json(self):
+        """★ 必须先试 text 模式，再试 json。
+
+        这样失败时能区分：是 -p 有问题，还是 --output-format json 有问题。
+        一步到位只能得到"没输出"，无从定位。
+        """
+        import logging
+        import shutil
+        from examples.codebuddy_node import check_tools
+
+        tmp = self._mk_tmp()
+        try:
+            # text 模式有输出，json 模式沉默 → 应该报"text 能出、json 不出"
+            fake = self._fake(tmp, "textonly.sh", (
+                'if [ "$1" = "--version" ]; then echo "2.177.1"; exit 0; fi\n'
+                'for a in "$@"; do\n'
+                '  if [ "$a" = "json" ]; then exit 0; fi\n'
+                'done\n'
+                'echo "就绪"\n'))
+            log = logging.getLogger("t-textonly")
+            records = []
+            h = logging.Handler()
+            h.emit = lambda r: records.append(r.getMessage())
+            log.addHandler(h)
+            log.setLevel(logging.DEBUG)
+
+            rc = check_tools(str(fake), log)
+            assert rc == 1
+            text = "\n".join(records)
+            assert "text 模式（-p + dontAsk）" in text
+            assert "✓" in text, "text 模式应当被标为通过"
+            assert "json 模式" in text
+            assert "text 模式能出、json 模式不出" in text, (
+                "没有把两层结果对照起来说明"
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @covers("M14.F8")
+    def test_happy_path_extracts_answer(self):
+        """正常情况要跑通，并验证回答字段。"""
+        import logging
+        import shutil
+        from examples.codebuddy_node import check_tools
+
+        tmp = self._mk_tmp()
+        try:
+            fake = self._fake(tmp, "good.sh", (
+                'if [ "$1" = "--version" ]; then echo "2.177.1"; exit 0; fi\n'
+                'for a in "$@"; do\n'
+                '  if [ "$a" = "json" ]; then\n'
+                '    echo \'{"result":"就绪","is_error":false}\'; exit 0\n'
+                '  fi\n'
+                'done\n'
+                'echo "就绪"\n'))
+            log = logging.getLogger("t-good")
+            records = []
+            h = logging.Handler()
+            h.emit = lambda r: records.append(r.getMessage())
+            log.addHandler(h)
+            log.setLevel(logging.DEBUG)
+
+            rc = check_tools(str(fake), log)
+            assert rc == 0, "\n".join(records)
+            assert "可以往下走注册" in "\n".join(records)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
