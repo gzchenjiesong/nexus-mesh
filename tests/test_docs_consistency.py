@@ -972,3 +972,148 @@ class TestDesignDocGaps:
             assert "record_ops" not in metrics_block, (
                 "`metrics` 开始留痕了 —— 设计文档里「轮询不刷审计」的前提失效"
             )
+
+
+class TestCliCommandClaims:
+    """★★ 文档里"有几个子命令"必须与实际一致。
+
+    ⚠ 这条是手工核对时发现的：`docs/acceptance-guide.md` 的 G4 写着
+    「8 个命令全部返回 0」，而实际是 **9 个**（多了 `ui`）。
+
+    这类数字最容易漂移 —— 加一个子命令时没人会想起去改文档里的数字。
+    所以让测试自己数。
+    """
+
+    @covers("M11.F1")
+    def test_command_count_in_acceptance_guide(self):
+        """★ 验收指南里的命令数必须等于实际子命令数。"""
+        import re
+        import subprocess
+        import sys as _sys
+
+        out = subprocess.run(
+            [_sys.executable, "-m", "nxs", "--help"],
+            capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
+        ).stdout
+        subs = re.findall(r"^    ([a-z][a-z-]*)\s{2,}", out, re.M)
+        assert subs, "取不到 nxs 子命令列表"
+        actual = len(subs)
+
+        guide = (DOCS / "acceptance-guide.md").read_text(encoding="utf-8")
+        m = re.search(r"G4 CLI 全可用.*?(\d+)\s*个命令", guide)
+        assert m, "验收指南里找不到「N 个命令」这条声称"
+
+        claimed = int(m.group(1))
+        assert claimed == actual, (
+            f"验收指南说 {claimed} 个命令，实际 {actual} 个：{subs}\n"
+            f"  加/删子命令时记得同步这条"
+        )
+
+    @covers("M11.F1")
+    def test_all_commands_have_working_help(self):
+        """★ 每个子命令的 `--help` 都必须返回 0。
+
+        验收指南让使用者"逐个 --help 检查返回 0"。如果某个子命令
+        `--help` 崩了，那条验收步骤会直接失败 —— 而使用者会以为
+        是自己环境有问题。
+        """
+        import re
+        import subprocess
+        import sys as _sys
+
+        out = subprocess.run(
+            [_sys.executable, "-m", "nxs", "--help"],
+            capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
+        ).stdout
+        subs = re.findall(r"^    ([a-z][a-z-]*)\s{2,}", out, re.M)
+
+        broken = []
+        for s in subs:
+            r = subprocess.run(
+                [_sys.executable, "-m", "nxs", s, "--help"],
+                capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
+            )
+            if r.returncode != 0:
+                broken.append((s, r.returncode))
+
+        assert not broken, f"这些子命令的 --help 返回非 0：{broken}"
+
+
+class TestNoDuplicateSections:
+    """★★ 文档里不能有重复章节。
+
+    ⚠ **这是实测发现的问题**：`docs/agent-bridges.md` 曾有
+    **209 行完全重复**的内容 ——
+
+      · `## 十二、Skill` 出现两次（各 103 行，逐字相同）
+      · `## 十三、公司电脑作为内网执行者` 出现两次
+
+    而且章节编号也是乱的：`八` 排在 `十四` 之后，`九` 紧接 `七`。
+
+    这类问题的成因通常是**合并/粘贴时操作失误**，而它没有任何症状 ——
+    读者会读到两遍同样的内容，然后怀疑自己是不是看串行了。
+    对着别人发布时尤其糟：看起来像"这文档不严谨"。
+
+    去重后 992 → 759 行，内容零丢失（逐行核对过）。
+    """
+
+    #: 章节较多的文档（短文档不需要这条守护）
+    LONG_DOCS = ("agent-bridges.md", "protocol.md", "architecture.md",
+                 "acceptance-guide.md")
+
+    @covers("M11.F1")
+    def test_no_duplicate_h2_headings(self):
+        """同一个二级标题不能出现两次。"""
+        problems = []
+        for name in self.LONG_DOCS:
+            p = DOCS / name
+            if not p.is_file():
+                continue
+            heads = [l.strip() for l in
+                     p.read_text(encoding="utf-8").splitlines()
+                     if l.startswith("## ")]
+            dup = {h for h in heads if heads.count(h) > 1}
+            if dup:
+                problems.append((name, sorted(dup)))
+
+        assert not problems, (
+            "这些文档有重复的二级标题（合并时粘贴重复了？）：\n"
+            + "\n".join(f"  {n}: {d}" for n, d in problems)
+        )
+
+    @covers("M11.F1")
+    def test_h2_numbering_is_sequential(self):
+        """★ 二级标题的编号必须从「一」开始连续递增。
+
+        编号跳号或乱序会让读者以为漏看了内容，也会让交叉引用
+        （"见第 X 节"）指向错误的位置。
+        """
+        import re
+
+        zh = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
+              "十一", "十二", "十三", "十四", "十五", "十六", "十七",
+              "十八", "十九", "二十"]
+
+        problems = []
+        for name in self.LONG_DOCS:
+            p = DOCS / name
+            if not p.is_file():
+                continue
+            nums = []
+            for line in p.read_text(encoding="utf-8").splitlines():
+                m = re.match(r"^## ([一二三四五六七八九十]+)、", line)
+                if m:
+                    nums.append(m.group(1))
+            if not nums:
+                continue            # 这份文档不用中文编号
+            expected = zh[:len(nums)]
+            if nums != expected:
+                problems.append((name, nums, expected))
+
+        assert not problems, (
+            "这些文档的章节编号不是连续递增：\n"
+            + "\n".join(
+                f"  {n}:\n    实际 {a}\n    应为 {e}"
+                for n, a, e in problems
+            )
+        )

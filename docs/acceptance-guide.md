@@ -147,7 +147,7 @@
 | G1 部署自检 | `nxs doctor --production` | 全部 ✓（或明确说明为何某项豁免） |
 | G2 配置模板可用 | 按 `deploy/local.yaml.example` 起服务 | 启动成功，`doctor` 通过 |
 | G3 系统服务 | systemd unit 启停 | `Restart=always` 生效；停止时在途请求有时间完成 |
-| G4 CLI 全可用 | 逐个 `nxs <cmd> --help` | 8 个命令全部返回 0 |
+| G4 CLI 全可用 | 逐个 `nxs <cmd> --help` | 9 个命令（verify · demo · serve · status · candidates · metrics · doctor · ops · ui）全部返回 0 |
 | G5 demo 全通过 | `make demo` 与 `make demo-net` | 九步全过 |
 
 ---

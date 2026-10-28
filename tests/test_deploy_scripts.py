@@ -1562,19 +1562,20 @@ class TestHealthCheckLogic:
             assert r.returncode == 0, f"{c[0]} 失败：{r.stderr}"
         return ca_pem, srv_pem, srv_key
 
-    @staticmethod
-    @pytest.fixture()
-    def workdir():
-        """自建临时目录。
-
-        ⚠ 不用 pytest 的 ``tmp_path`` —— 沙箱的 sitecustomize 拦截了
-        ``Path.mkdir``，那个夹具会报 FileExistsError。
-        """
-        import tempfile
-        d = tempfile.mkdtemp(prefix="nxs-chk-")
-        yield pathlib.Path(d)
-        import shutil
-        shutil.rmtree(d, ignore_errors=True)
+    # ⚠ 这里原来自己定义了一个 ``workdir`` fixture，用
+    #   ``@staticmethod`` 套 ``@pytest.fixture()``。两个问题：
+    #
+    #   ① 装饰器顺序反了 —— pytest 会警告
+    #      "fixture 'workdir' is wrapped by @staticmethod above @pytest.fixture"，
+    #      并提示把 @pytest.fixture 放到上面。**每个跑测试的人都会看到这个
+    #      警告**，对"给别人试用"是噪音。
+    #
+    #   ② 更重要的是：它与 conftest.py 里的 ``workdir`` **重复定义**。
+    #      同一个名字两套实现，改一处忘另一处就会出现
+    #      "为什么这个文件里行为和别处不一样"。
+    #
+    #   现在删掉本地定义，统一用 conftest 的 —— 它已经处理了
+    #   tmp_path 不可用时的退化路径（项目内 uuid 唯一子目录）。
 
     @covers("M14.F8")
     def test_ok_when_ca_matches(self, workdir):

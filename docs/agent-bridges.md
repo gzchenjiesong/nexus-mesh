@@ -240,6 +240,22 @@ export NXS_CA_FILE=/etc/nexus-mesh/tls/ca.pem
 
 ---
 
+## 八、同机调试能验什么、不能验什么
+
+**能验**：协议正确性、策略矩阵、边界过滤、失败语义、配额、观察窗数据。
+
+**不能验**（等公司电脑接入才暴露）：
+
+| 盲区 | 后果 |
+|---|---|
+| 同一台机器、同一 IP | 跨网络延迟、断连重连、TLS 路径都没测 |
+| 都在 `cloud` 域 | **信任域的真实边界没被检验** — `zone-work → cloud` 一条规则都没跑过 |
+| 共享宿主环境 | 测不出状态目录隔离问题 |
+
+所以：**同机跑通 ≠ 接入没问题**。跨网络那一层必须补验。
+
+---
+
 ## 九、A2A 协作：Agent 之间怎么互相派任务
 
 ### 完整的接入形态
@@ -470,109 +486,6 @@ Skill 是通用文档，用的是 `<你的节点ID>` 占位符。所以装完还
 
 ---
 
-## 十二、Skill：让 Agent 知道怎么用 mesh
-
-### 装在哪（两个 Agent 位置不同）
-
-| Agent | 位置 | 加载方式 |
-|---|---|---|
-| Hermes | `/root/.hermes/profiles/<profile>/skills/<分类>/<名>/SKILL.md` | 扫目录 |
-| OpenClaw | `/root/.openclaw/workspace-<agent>/skills/<名>/SKILL.md` | 自己的 `skills install` |
-
-**同一份源文件**（仓库里的 `nexus-mesh-skill.md`），只是复制到不同位置。
-别各维护一份 —— 那会腐化。
-
-```bash
-bash deploy/install-skill.sh            # 装到全部已配置的 Agent
-bash deploy/install-skill.sh --verify   # 只检查，不改动
-```
-
-> ⚠ OpenClaw 的 `skills install` 覆盖已存在的 skill **必须加 `--force`**。
-> 不加时它只打印"已存在"然后退出 —— 脚本看起来成功了，内容还是旧的。
-
-### frontmatter 要两个命名空间
-
-```yaml
-metadata:
-  hermes:
-    tags: [Agent, Collaboration, A2A]
-  openclaw:
-    emoji: "🕸"
-    requires:
-      bins: ["nxs-cli"]     # OpenClaw 会据此检查二进制在不在
-```
-
-漏掉某一个不会报错，只是那一侧的元信息缺失。OpenClaw 那侧的
-`requires.bins` 有用 —— `skills info` 会显示 `Binaries: ✓ nxs-cli`。
-
-### ⚠ skill 是**渐进披露**的，不是全文注入
-
-这是最容易误解的一点。装完不等于 Agent 就"会了"：
-
-1. 系统提示里只有 **name + description**
-2. 全文（那个 SKILL.md）要 Agent **自己主动 read**
-3. 所以 **description 必须写清"什么时候该用它"**
-
-只写"这是 Agent 之间的任务网络"不够 —— Agent 不知道该在何时想起来。
-现在的写法是：
-
-> Nexus Mesh 是 Agent 之间的任务网络。用 nxs-cli 查看自己的身份、
-> 问别的 Agent 问题、发任务、取结果。**当需要跟另一个 Agent 协作、
-> 或需要确认自己在网络里的身份与能力时使用。**
-
-### ⚠ 改完 skill 文件，Agent 不一定立刻用新内容
-
-OpenClaw 的文档明说：`the node host does not watch the skills directory`。
-加上渐进披露的机制，实际表现是：
-
-- 装好之后 Agent "知道有这么个 skill"
-- 但那一次回答可能凭上下文里的旧印象，而不是重读文件
-- **明确要求它读文件**时，它会读到最新版
-
-实测过：同一天先后问两次，第一次引用了旧内容（"问运维 / 看角色卡"），
-第二次明确说"先读 /opt/nexus-mesh/nexus-mesh-skill.md 的全文"之后，
-准确列出了新版的三条途径（含刚加的"别指望 whoami"）。
-
-**结论**：文档写得对不对，比装得对不对更容易出问题。
-所以有 `tests/test_skill_doc.py` 守着。
-
-### 文档里踩过的两个坑（都实测暴露）
-
-**① 断言"桥接已为你设好身份" —— 对 OpenClaw 是假的**
-
-原话："省略 `--as` 时用 `NXS_ACTOR` 环境变量 —— 桥接进程已为你设好。"
-但 OpenClaw 的 exec 跑在常驻 gateway 里，拿不到桥接注入的环境。
-照这段话做会直接失败。
-
-现在改成：先跑 `nxs-cli whoami` 试一次，失败就每条都带 `--as`。
-
-**② 循环依赖 —— 教 Agent 用需要 ID 的命令去查 ID**
-
-原话："若报「无法确定身份」…（先跑 `nxs-cli whoami` 确认自己的节点 ID）"
-
-而 `whoami` **正是因为没 ID 才报错的**。实测 taskflow 复述了这个循环，
-说明它真被误导了。
-
-现在给出 whoami 之外的三种途径：
-
-```bash
-echo $NXS_ACTOR      # ① 有值就直接用（Hermes 一般有）
-```
-② 看 `AGENTS.md` / 系统提示里有没有「你的节点身份是 xxx」
-③ 问运维（他跑 `nxs ops nodes` 能看到全部）
-
-### 还有一件 skill 做不到的事：告诉每个 Agent **它自己的 ID**
-
-Skill 是通用文档，用的是 `<你的节点ID>` 占位符。所以装完还要：
-
-- **Hermes**：`NXS_ACTOR` 环境变量已注入（桥接的子进程），它能自己 `echo`
-- **OpenClaw**：拿不到，要写进它的 `AGENTS.md`（见第九节）
-
-技能文档可以共用，**身份不能共用**。
-
-
----
-
 ## 十三、公司电脑作为内网执行者（v0.19）
 
 ### 为什么是「执行者」而不是「云上拿 token 去查」
@@ -703,152 +616,6 @@ ok "协调节点可达（HTTP $code）"     # ✗ 崩在 unbound variable
 修法：`${code}`。中文为主的脚本里这个问题很普遍 —— `$var` 后面紧跟
 任何非 ASCII 字符都会犯。写这类脚本时**变量一律加花括号**最省事。
 
-
----
-
-## 十三、公司电脑作为内网执行者（v0.19）
-
-### 为什么是「执行者」而不是「云上拿 token 去查」
-
-用户的原话点破了核心：
-
-> 这样的方式能够使得不用把公司内部系统的 token 与鉴权信息暴露给云服务器上的
-> Agent，减少了数据泄露风险。
-
-这个论证比"云上存 token 不安全"更准确。真正的区别是：
-
-| 做法 | 云上拥有什么 |
-|---|---|
-| 云上存 token，自己查 | **查询本身的能力** —— 它能查任意东西，只在 token 权限范围内 |
-| 公司电脑当执行者 | 只有**请求查询的能力** —— 它只能说"帮我查 X"，查不查、查多少由内网决定 |
-
-差别不在"token 藏得好不好"，而在**能力边界**。前者的边界是 token 的权限，
-后者的边界是"内网那个 CLI 愿意做什么"。
-
-### 但凭证隔离只解决一半：结果要过云
-
-```
-云上 Agent ──"查 XX 项目本周进度"──> work-laptop 节点
-                                          │ 调公司 CLI（本机凭证）
-云上 Agent <──── 摘要（≤1500 字节）───────┘
-```
-
-凭证没出内网 ✅，但**回传内容会写进云服务器的 `/var/lib/nexus-mesh/queue.db`** ❌。
-
-所以还有第二道闸门。
-
-### ⚠⚠ 「只回传摘要」必须由代码执行，不能靠 prompt
-
-这是 v0.19 最重要的设计判断。在 prompt 里写"只要摘要"是不够的：
-
-* 被提示注入的 Agent 照样会回传原文
-* 而且它自己认为在**配合** —— 不会有任何报错
-
-所以分两层落地：
-
-| 层 | 手段 | 强度 |
-|---|---|---|
-| 行为引导 | `prompt_note` 里写"只要摘要、不要原文" | 弱（可能被绕过） |
-| **硬边界** | `SUMMARY_LIMIT = 1500` 字节，桥接进程截断 | **强** |
-
-截断时末尾留标记（`…（已截断）`），让调用方知道"还有内容没给我"——
-而不是以为那就是全部。
-
-有两条测试守着这个：
-
-* 截断后**总长**（含标记字节）不超上限 —— off-by-N 很容易算错，
-  标记看着 6 个字符，实际 18 字节
-* `SUMMARY_LIMIT` 必须**严格小于** `MAX_ANSWER_BYTES`。
-  两者相等的话，这道闸门就形同不存在
-
-### 工具白名单：这里比云端两个 Agent 更干净
-
-云端 `taskflow` 的 allow 列表含 `exec`/`process`/`write`（未收窄，
-靠矩阵和配额兜）。公司电脑这个节点不同 —— CodeBuddy 支持细粒度白名单：
-
-```bash
---allowedTools "Bash(projectctl:*)" "Bash(meetingctl:*)" "Read" "Grep"
-```
-
-含义：只能调这两个 CLI、读文件、搜文件。**不能执行任意命令、不能写文件。**
-
-**不给 `--dangerously-skip-permissions`。** 那个参数放开几乎全部权限
-（连 HIGH/CRITICAL 命令都只"可能"拦）。既然能用白名单精确表达，
-就不该用粗放的开关 —— 有测试守着这条（`test_never_skips_permissions`）。
-
-**没有白名单时拒绝启动**，不静默降级。静默降级是最糟的处理：
-节点启动了、能收任务了，但实际拥有全部工具，而运维只看得到"启动成功"。
-
-### `--permission-mode dontAsk`：为什么不是默认
-
-`-p` 是单次执行，没有人会去点权限确认框。默认模式下需要授权的操作会
-**挂起**，直到任务租约过期 —— 那比失败更糟（失败至少能重试）。
-
-`dontAsk` 让它**被拒**，快速失败。
-
-### 实现与部署
-
-| 文件 | 作用 |
-|---|---|
-| `examples/codebuddy_node.py` | 桥接（复用 `agent_bridge_common`） |
-| `deploy/setup-work-node.sh` | 本机准备：凭据 / CA / skill / PATH 提示 |
-| `tests/test_codebuddy_node.py` | 26 条，重点在边界而不是"能不能调通" |
-
-步骤：
-
-```bash
-# ① 本机检查（网络 + CodeBuddy + 白名单）
-bash deploy/setup-work-node.sh --check
-
-# ② 确认 CodeBuddy 能用（会消耗一点额度）
-python examples/codebuddy_node.py --check-tools
-
-# ③ 注册（会等批准）
-python examples/codebuddy_node.py --dry-run
-
-# ④ 服务器上批准
-nxs ops approve work-laptop --url ... --ca-file ...
-
-# ⑤ 常驻（launchd）
-```
-
-### 矩阵改动（v0.19）
-
-```yaml
-cloud      → zone-work   allow: [..., "work.query", "work.*"]
-zone-work  → cloud       allow: ["work.*", "agent.ask"]
-```
-
-第二条是新加的：原先只放行 `work.*`，意味着公司电脑**不能主动问云端**
-（会被 `MX-DOMAIN-02` 拒）—— 那是单向的。现在双向。
-
-### 一个 shell 坑（中文脚本专属）
-
-`deploy/setup-work-node.sh` 里第一版有：
-
-```bash
-ok "协调节点可达（HTTP $code）"     # ✗ 崩在 unbound variable
-```
-
-**shell 把全角括号 `）` 当成了变量名的一部分** → 变量名变成 `code）`，
-未定义，`set -u` 下直接报错。
-
-修法：`${code}`。中文为主的脚本里这个问题很普遍 —— `$var` 后面紧跟
-任何非 ASCII 字符都会犯。写这类脚本时**变量一律加花括号**最省事。
-
-## 八、同机调试能验什么、不能验什么
-
-**能验**：协议正确性、策略矩阵、边界过滤、失败语义、配额、观察窗数据。
-
-**不能验**（等公司电脑接入才暴露）：
-
-| 盲区 | 后果 |
-|---|---|
-| 同一台机器、同一 IP | 跨网络延迟、断连重连、TLS 路径都没测 |
-| 都在 `cloud` 域 | **信任域的真实边界没被检验** — `zone-work → cloud` 一条规则都没跑过 |
-| 共享宿主环境 | 测不出状态目录隔离问题 |
-
-所以：**同机跑通 ≠ 接入没问题**。跨网络那一层必须补验。
 
 ---
 
