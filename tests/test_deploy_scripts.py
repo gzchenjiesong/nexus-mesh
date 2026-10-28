@@ -59,7 +59,7 @@ def _strip_strings_and_comments(text: str, *, ps: bool) -> str:
 class TestBashScript:
     """macOS / Linux 版。"""
 
-    path = DEPLOY / "setup-work-laptop.sh"
+    path = DEPLOY / "setup-work-node.sh"
 
     @covers("M14.F8")
     def test_exists_and_executable(self):
@@ -100,7 +100,7 @@ class TestPowerShellScript:
     ⚠ **无法在本机执行** —— 沙箱不允许装 PowerShell。所以只做静态检查。
     """
 
-    path = DEPLOY / "setup-work-laptop.ps1"
+    path = DEPLOY / "setup-work-node.ps1"
 
     @covers("M14.F8")
     def test_exists(self):
@@ -275,7 +275,7 @@ class TestPowerShellFragility:
     这些不是"风格问题" —— 每一条都会导致脚本跑不起来或行为不可预期。
     """
 
-    path = DEPLOY / "setup-work-laptop.ps1"
+    path = DEPLOY / "setup-work-node.ps1"
 
     def _code(self) -> str:
         """去掉注释后的代码（注释里提到某个写法不算问题）。"""
@@ -384,7 +384,7 @@ class TestPythonDetectionRobustness:
     Python 检测那一段既没报错也没进展）。这两个坑都会造成那种症状。
     """
 
-    path = DEPLOY / "setup-work-laptop.ps1"
+    path = DEPLOY / "setup-work-node.ps1"
 
     def _text(self) -> str:
         return self.path.read_bytes().decode("utf-8-sig")
@@ -474,7 +474,7 @@ class TestPowerShellQuoting:
     修法：字符串里要强调就用「」或单引号，不要用 ASCII 双引号。
     """
 
-    paths = [DEPLOY / "setup-work-laptop.ps1", DEPLOY / "diag-python.ps1"]
+    paths = [DEPLOY / "setup-work-node.ps1", DEPLOY / "diag-python.ps1"]
 
     @covers("M14.F8")
     def test_all_scripts_have_bom(self):
@@ -677,7 +677,7 @@ class TestExecutableShimHandling:
         不一致的话，脚本显示的路径不是桥接实际会用的那个 ——
         用户会据此做出错误判断（比如以为要用 .ps1 而实际是 .cmd）。
         """
-        text = (DEPLOY / "setup-work-laptop.ps1").read_bytes().decode("utf-8-sig")
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
         # 脚本里也要有 .exe → .cmd → .ps1 的顺序
         i_exe = text.find("codebuddy.exe")
         i_cmd = text.find("codebuddy.cmd")
@@ -686,3 +686,113 @@ class TestExecutableShimHandling:
         assert i_exe < i_cmd < i_ps1, (
             "部署脚本的候选顺序应为 .exe → .cmd → .ps1，与桥接保持一致"
         )
+
+
+class TestNodeIdConsistency:
+    """★ 节点 ID 在四处出现，任何一处不一致都会失败。
+
+    节点 ID 决定三件事：
+
+    1. 凭据文件名 —— ``<node_id>.env``
+    2. 服务端环境变量名 —— ``NXS_SECRET_<NODE_ID 大写，非字母数字转下划线>``
+    3. 角色卡里的 ``node_id`` 字段
+
+    对不上的症状是 ``AU-SIG-01``（签名失败）—— 而那个错误看起来像
+    "密钥写错了"。实际可能是"两边不是同一个名字"，而密钥本身没问题。
+
+    ⚠ 所以默认值必须在一处定义、多处引用。这里守着它们一致。
+    """
+
+    @covers("M14.F8")
+    def test_bridge_and_scripts_agree(self):
+        """桥接的 DEFAULT_NODE_ID 与两个部署脚本的默认值必须相同。"""
+        import re
+
+        from examples.codebuddy_node import DEFAULT_NODE_ID
+
+        sh_text = (DEPLOY / "setup-work-node.sh").read_text(encoding="utf-8")
+        sh_match = re.search(r'NODE_ID="\$\{NXS_NODE_ID:-([^}]+)\}"', sh_text)
+        assert sh_match, "bash 脚本里找不到 NODE_ID 默认值"
+        assert sh_match.group(1) == DEFAULT_NODE_ID, (
+            f"bash 默认值 {sh_match.group(1)!r} != 桥接 {DEFAULT_NODE_ID!r}"
+        )
+
+        ps_text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        ps_match = re.search(r'else \{ "([a-z0-9-]+)" \}', ps_text)
+        assert ps_match, "ps1 脚本里找不到 NodeId 默认值"
+        assert ps_match.group(1) == DEFAULT_NODE_ID, (
+            f"ps1 默认值 {ps_match.group(1)!r} != 桥接 {DEFAULT_NODE_ID!r}"
+        )
+
+    @covers("M14.F8")
+    def test_node_id_is_valid_shape(self):
+        """★ 节点 ID 必须符合服务端的命名规则。
+
+        服务端把节点 ID 转成环境变量名时，规则是「大写，非字母数字转下划线」。
+        所以 ID 里的连字符会变成下划线：
+
+            work-desktop  →  NXS_SECRET_WORK_DESKTOP
+
+        这条转换必须能往返 —— 否则拿到的是空密钥，报的还是 AU-SIG-01。
+
+        另外 ID 不能含点、斜杠、空格：凭据文件名是 ``<node_id>.env``，
+        带这些字符会变成路径穿越或意外文件名。
+        """
+        import re
+
+        from examples.codebuddy_node import DEFAULT_NODE_ID
+        from nxs.mgmt.config import _node_env_var
+
+        assert re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", DEFAULT_NODE_ID), (
+            f"{DEFAULT_NODE_ID!r} 不符合节点 ID 规则"
+        )
+        assert not any(ch in DEFAULT_NODE_ID for ch in "./ \\"), (
+            "节点 ID 不能含路径字符 —— 它会被用作凭据文件名"
+        )
+        # 转换结果要可预期
+        assert _node_env_var(DEFAULT_NODE_ID) == (
+            "NXS_SECRET_" + DEFAULT_NODE_ID.upper().replace("-", "_")
+        )
+
+    @covers("M14.F8")
+    def test_scripts_are_named_by_role_not_machine(self):
+        """★ 部署脚本名不该带具体机器名。
+
+        原来是 ``setup-work-laptop.{sh,ps1}`` —— 而实际机器叫 work-desktop。
+        名字与身份不符会让后来的人以为「这是给笔记本用的」。
+
+        改成按**角色**命名：``setup-work-node``（公司内网执行者节点）。
+        机器名通过 ``--node-id`` / ``NXS_NODE_ID`` 给，不写进文件名。
+
+        ⚠ 但默认值仍要写具体名字 —— 全空默认会导致"悄悄用了错的身份"。
+        只是这个名字只出现在**一处常量**里，而不是散落在文件名中。
+        """
+        assert (DEPLOY / "setup-work-node.sh").exists()
+        assert (DEPLOY / "setup-work-node.ps1").exists()
+        assert not (DEPLOY / "setup-work-laptop.sh").exists(), (
+            "旧文件名还在 —— 两个文件会让用户不知道跑哪个"
+        )
+        assert not (DEPLOY / "setup-work-laptop.ps1").exists()
+
+    @covers("M14.F8")
+    def test_no_stale_reference_to_old_script_name(self):
+        """文档与代码里不能还有旧文件名的引用（会指向不存在的文件）。
+
+        ⚠ 排除本文件自己：它在上面两条里必须提到旧名字（才能断言
+        "旧文件不存在"）。其他任何文件提到旧名字都是真问题。
+        """
+        old_name = "setup-work-" + "laptop"      # 拼出来，避免被自己命中
+        stale = []
+        for pattern in ("*.md", "*.py", "*.sh", "*.ps1"):
+            for p in REPO_ROOT.rglob(pattern):
+                if ".venv" in str(p) or ".git" in str(p):
+                    continue
+                if p.name == "test_deploy_scripts.py":
+                    continue
+                try:
+                    text = p.read_bytes().decode("utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if old_name in text:
+                    stale.append(p.name)
+        assert not stale, f"这些文件还引用旧脚本名：{sorted(set(stale))}"

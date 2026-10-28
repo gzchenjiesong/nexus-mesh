@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  setup-work-laptop.sh —— 在公司电脑上装 Nexus Mesh 执行者节点
+#  setup-work-node.sh —— 在公司电脑上装 Nexus Mesh 执行者节点
 # ==============================================================================
 #
 #  这一步只做本机侧的准备工作：凭据、CA、skill 目录、环境变量。
 #  **不启动节点** —— 启动前应该先跑 --check-tools 确认 CodeBuddy 能用。
 #
 #  用法：
-#      bash deploy/setup-work-laptop.sh              # 装本机依赖
-#      bash deploy/setup-work-laptop.sh --check      # 只检查现状
+#      bash deploy/setup-work-node.sh              # 装本机依赖
+#      bash deploy/setup-work-node.sh --check      # 只检查现状
 #
 #  与云服务器的区别（都是踩过才知道的）：
 #    · macOS 没有 /etc/nexus-mesh 的写权限 → 凭据放 ~/.nexus-mesh
@@ -23,7 +23,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF_DIR="${NXS_ACTOR_DIR:-$HOME/.nexus-mesh}"
 AGENT_DIR="$CONF_DIR/agents"
 SERVER="${NXS_SERVER:-43.138.222.206:18800}"
-NODE_ID="${NXS_NODE_ID:-work-laptop}"
+NODE_ID="${NXS_NODE_ID:-work-desktop}"
 SERVER_URL="https://$SERVER/nxs"
 
 CHECK_ONLY=0

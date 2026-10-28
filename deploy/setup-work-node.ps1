@@ -1,5 +1,5 @@
 ﻿# ==============================================================================
-#  setup-work-laptop.ps1 —— 在 Windows 公司电脑上准备 Nexus Mesh 执行者节点
+#  setup-work-node.ps1 —— 在 Windows 公司电脑上准备 Nexus Mesh 执行者节点
 # ==============================================================================
 #
 #  与 macOS 版的差别（不是简单翻译，是平台性的）：
@@ -15,8 +15,8 @@
 #
 #  用法（PowerShell，建议以普通用户身份，不一定要管理员）：
 #
-#      powershell -ExecutionPolicy Bypass -File setup-work-laptop.ps1 -Check
-#      powershell -ExecutionPolicy Bypass -File setup-work-laptop.ps1
+#      powershell -ExecutionPolicy Bypass -File setup-work-node.ps1 -Check
+#      powershell -ExecutionPolicy Bypass -File setup-work-node.ps1
 #
 #  ⚠ 如果你的终端显示中文乱码，先执行：
 #      chcp 65001
@@ -27,7 +27,7 @@
 param(
     [switch]$Check,                 # 只检查，不改动
     [switch]$InstallTask,           # 顺便创建计划任务（常驻）
-    [string]$NodeId = $(if ($env:NXS_NODE_ID) { $env:NXS_NODE_ID } else { "work-laptop" }),
+    [string]$NodeId = $(if ($env:NXS_NODE_ID) { $env:NXS_NODE_ID } else { "work-desktop" }),
     [string]$Server = $(if ($env:NXS_SERVER) { $env:NXS_SERVER } else { "43.138.222.206:18800" })
 )
 

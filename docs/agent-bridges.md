@@ -658,14 +658,14 @@ Skill 是通用文档，用的是 `<你的节点ID>` 占位符。所以装完还
 | 文件 | 作用 |
 |---|---|
 | `examples/codebuddy_node.py` | 桥接（复用 `agent_bridge_common`） |
-| `deploy/setup-work-laptop.sh` | 本机准备：凭据 / CA / skill / PATH 提示 |
+| `deploy/setup-work-node.sh` | 本机准备：凭据 / CA / skill / PATH 提示 |
 | `tests/test_codebuddy_node.py` | 26 条，重点在边界而不是"能不能调通" |
 
 步骤：
 
 ```bash
 # ① 本机检查（网络 + CodeBuddy + 白名单）
-bash deploy/setup-work-laptop.sh --check
+bash deploy/setup-work-node.sh --check
 
 # ② 确认 CodeBuddy 能用（会消耗一点额度）
 python examples/codebuddy_node.py --check-tools
@@ -691,7 +691,7 @@ zone-work  → cloud       allow: ["work.*", "agent.ask"]
 
 ### 一个 shell 坑（中文脚本专属）
 
-`deploy/setup-work-laptop.sh` 里第一版有：
+`deploy/setup-work-node.sh` 里第一版有：
 
 ```bash
 ok "协调节点可达（HTTP $code）"     # ✗ 崩在 unbound variable
@@ -791,14 +791,14 @@ ok "协调节点可达（HTTP $code）"     # ✗ 崩在 unbound variable
 | 文件 | 作用 |
 |---|---|
 | `examples/codebuddy_node.py` | 桥接（复用 `agent_bridge_common`） |
-| `deploy/setup-work-laptop.sh` | 本机准备：凭据 / CA / skill / PATH 提示 |
+| `deploy/setup-work-node.sh` | 本机准备：凭据 / CA / skill / PATH 提示 |
 | `tests/test_codebuddy_node.py` | 26 条，重点在边界而不是"能不能调通" |
 
 步骤：
 
 ```bash
 # ① 本机检查（网络 + CodeBuddy + 白名单）
-bash deploy/setup-work-laptop.sh --check
+bash deploy/setup-work-node.sh --check
 
 # ② 确认 CodeBuddy 能用（会消耗一点额度）
 python examples/codebuddy_node.py --check-tools
@@ -824,7 +824,7 @@ zone-work  → cloud       allow: ["work.*", "agent.ask"]
 
 ### 一个 shell 坑（中文脚本专属）
 
-`deploy/setup-work-laptop.sh` 里第一版有：
+`deploy/setup-work-node.sh` 里第一版有：
 
 ```bash
 ok "协调节点可达（HTTP $code）"     # ✗ 崩在 unbound variable
@@ -898,7 +898,7 @@ if sys.platform == "win32" and cmd[0].lower().endswith((".cmd", ".bat")):
 
 ### ③ 常驻：计划任务，且要关掉 3 天上限
 
-macOS 用 launchd，Windows 用计划任务（`deploy/setup-work-laptop.ps1`）。
+macOS 用 launchd，Windows 用计划任务（`deploy/setup-work-node.ps1`）。
 
 两个必须做对的细节：
 
@@ -926,7 +926,7 @@ bash 里 `"$code）"` 会把全角括号算进变量名（报 `unbound variable`
 
 ### 无法验证的部分（诚实说明）
 
-**我没有在 Windows 上跑过 `setup-work-laptop.ps1`。**
+**我没有在 Windows 上跑过 `setup-work-node.ps1`。**
 沙箱里装不了 PowerShell（`sandbox_apply: Operation not permitted`）。
 
 所以做了静态检查：括号配对与嵌套顺序、`$var` 污染、关键逻辑存在性

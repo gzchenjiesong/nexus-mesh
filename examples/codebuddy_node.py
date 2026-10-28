@@ -90,6 +90,20 @@ from examples.agent_bridge_common import (
     scrub_secrets,
 )
 
+#: 默认节点 ID —— **与部署脚本的默认值必须一致**。
+#:
+#: ⚠ 这条不是形式要求。节点 ID 决定了三件事，任何一处对不上都会失败：
+#:
+#: 1. 凭据文件名（``<node_id>.env``）
+#: 2. 服务端环境变量名（``NXS_SECRET_<NODE_ID 大写>``）
+#: 3. 角色卡里的 ``node_id`` 字段
+#:
+#: 对不上的症状是 ``AU-SIG-01``（签名失败）—— 而那看起来像"密钥写错了"，
+#: 实际可能是"两边不是同一个名字"。
+#: 有测试守着这个常量与两个部署脚本的默认值一致。
+DEFAULT_NODE_ID = "work-desktop"
+
+
 def find_codebuddy() -> str:
     """找 ``codebuddy`` 可执行文件。**按平台找，并按后缀优劣排序。**
 
@@ -445,7 +459,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="把 CodeBuddy Code 接入 Nexus Mesh（公司内网执行者）")
     parser.add_argument("--node-id", default=os.environ.get(
-        "NXS_NODE_ID", "work-laptop"))
+        "NXS_NODE_ID", DEFAULT_NODE_ID))
     parser.add_argument("--domain", default=os.environ.get(
         "NXS_DOMAIN", "zone-work"))
     parser.add_argument("--url", default=os.environ.get("NXS_COORDINATOR_URL", ""))
