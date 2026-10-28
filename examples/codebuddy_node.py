@@ -284,7 +284,20 @@ def build_card(node_id: str, domain: str, *,
         "constraints": {
             # 摘要级 —— 与 SUMMARY_LIMIT 配合，构成双层限制
             "max_response_level": "summary",
-            "can_receive_from": [domain],
+            # ⚠ ``can_receive_from`` 是「**谁可以派任务给我**」，
+            #   不是「我自己属于哪个域」。
+            #
+            #   初版写成了 ``[domain]``（即 zone-work），于是云端
+            #   （cloud 域）派任务过来直接被拒：
+            #
+            #       PolicyDenied: denied[MX-RECEIVE-03]
+            #
+            #   而错误码看起来像"域不匹配 / 卡片不一致"，很难联想到
+            #   是这一项写错了方向。实际语义是"接收白名单"。
+            #
+            #   这个节点的用途就是**接受云端派来的查询任务**，
+            #   所以必须允许 cloud。自己的域也保留（同域调试用）。
+            "can_receive_from": sorted({domain, "cloud"}),
             "can_issue_types": ["agent.ask"],
             "can_delegate_to": [],
             "quota": {
@@ -379,29 +392,101 @@ def build_cmd(bin_path: str, prompt: str, *,
     return cmd
 
 
-def extract_answer(payload: dict) -> str:
-    """从 ``--output-format json`` 的信封里取回答。
+def extract_answer(payload) -> str:
+    """从 ``--output-format json`` 的输出里取出回答。
 
-    文档里说答案在 ``.result``。但**两份官方文档说法不一致**
-    （另一处写 ``{"response": ..., "metadata": ...}``），所以这里
-    两条路径都试，并在都失败时报出实际的键 —— 便于现场定位。
+    ## ⚠⚠ 真实结构与我最初的假设**完全不同**
 
-    ⚠ 取不到就抛异常。**不要返回空串** —— 那会让调用方以为
-    "它答了但没内容"，比失败难查。
+    我原来以为是一个信封对象，找 ``result`` / ``response`` 字段。
+    用真实 codebuddy 2.177.1 实测，它返回的是**事件数组**：
+
+        [
+          {"type": "message",  "role": "user",      "content": [...]},
+          {"type": "file-history-snapshot", ...},
+          {"type": "reasoning", "content": "[]"},
+          {"type": "message",  "role": "assistant", "content": [...]},
+          {"type": "result",   "subtype": "success", "is_error": false,
+           "result": "就绪",                    ← ★ 答案在这里
+           "session_id": "...", "duration_ms": 10867, "num_turns": 3,
+           "usage": {...}, "permission_denials": []}
+        ]
+
+    所以必须**先判断 type 再取字段**，而不是直接当 dict 找键。
+
+    ## 为什么要按 ``type == "result"`` 找而不是取最后一个
+
+    数组里 ``result`` 确实在末尾，但顺序不是契约。按 type 找更稳 ——
+    而且如果哪天插入了新事件类型，取最后一个会拿到错的东西。
+
+    ## 兼容旧形状
+
+    文档另一处说返回 ``{"response": ...}``。虽然实测不是，
+    但保留兜底：万一是对象形状，也能取出来。**能兼容就兼容，
+    但主要路径必须按实测来。**
     """
-    if payload.get("is_error"):
-        detail = payload.get("subtype") or payload.get("error") or "unknown"
-        raise RuntimeError(f"CodeBuddy 报告失败（{detail}）")
+    # ---- 形状一：事件数组（实测的形状）----
+    if isinstance(payload, list):
+        # 找 type == "result" 的最后一个（理论上只有一个）
+        results = [e for e in payload
+                   if isinstance(e, dict) and e.get("type") == "result"]
+        if results:
+            last = results[-1]
+            if last.get("is_error"):
+                detail = last.get("subtype") or last.get("error") or "unknown"
+                raise RuntimeError(f"CodeBuddy 报告失败（{detail}）")
+            text = last.get("result")
+            if isinstance(text, str) and text.strip():
+                return text
+            raise RuntimeError(
+                f"result 事件里没有可用文本（键：{sorted(last)}）"
+            )
+        # 没有 result 事件：可能全是 message，退而取 assistant 的最后一条
+        for e in reversed(payload):
+            if (isinstance(e, dict) and e.get("type") == "message"
+                    and e.get("role") == "assistant"):
+                text = _text_from_content(e.get("content"))
+                if text:
+                    return text
+        raise RuntimeError(
+            f"事件数组里既没有 type=result 也没有 assistant 消息"
+            f"（共 {len(payload)} 个事件，类型："
+            f"{sorted({e.get('type') for e in payload if isinstance(e, dict)})}）"
+        )
 
-    for key in ("result", "response"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value
+    # ---- 形状二：单个对象（文档提到的旧形状，兜底）----
+    if isinstance(payload, dict):
+        if payload.get("is_error"):
+            detail = payload.get("subtype") or payload.get("error") or "unknown"
+            raise RuntimeError(f"CodeBuddy 报告失败（{detail}）")
+        for key in ("result", "response"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        raise RuntimeError(
+            f"输出对象里找不到回答文本（现有键：{sorted(payload)}）"
+        )
 
-    # 把实际键名列出来 —— 这样文档写错时现场就能看出来
-    raise RuntimeError(
-        f"CodeBuddy 输出里找不到回答文本（现有键：{sorted(payload)}）"
-    )
+    raise RuntimeError(f"无法解析的 json 顶层类型：{type(payload).__name__}")
+
+
+def _text_from_content(content) -> str:
+    """从 message 的 content 里抽纯文本。
+
+    content 的形状是 ``[{"type": "output_text", "text": "..."}]``
+    —— 不是字符串。这是实测确认的。
+    """
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                # output_text / input_text / text 都算
+                t = block.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+        return "\n".join(p for p in parts if p).strip()
+    return ""
 
 
 def make_runner(cmd_builder, *, timeout: int, logger: logging.Logger,
@@ -435,19 +520,113 @@ def make_runner(cmd_builder, *, timeout: int, logger: logging.Logger,
     return runner
 
 
+#: 宿主应用（WorkBuddy / CodeBuddy 桌面版）注入的变量前缀，**必须剔除**。
+#:
+#: ⚠⚠ **这是实测挖出来的，而且它伪装成"未登录"。**
+#:
+#: 桥接通常运行在宿主应用的进程树里（比如 WorkBuddy 的 Bash 工具），
+#: 于是继承了宿主注入的一大堆运行时状态。实测：本机有 **210 个**
+#: 额外环境变量，其中 78 个 `CODEBUDDY_*`、30 个 `WORKBUDDY_*`。
+#:
+#: 后果：codebuddy CLI 会按这些变量去**宿主的服务端点**认证，
+#: 而不是用户登录时用的那个端点。于是：
+#:
+#:     完整环境      → Authentication required（1.6 秒快速失败）
+#:     env -i 干净   → 正常返回"好了"（7 秒，真的调了模型）
+#:
+#: 而用户明明在 CLI 里登录过 —— 所以这个报错**完全是假象**，
+#: 会让人往"没登录"方向排查，方向全错。
+#:
+#: 剔除这些前缀后实测恢复正常。二分定位过：单独注入任何一个都
+#: 不触发，但整批一起就会 —— 所以按前缀整批剔除，不做精细挑选。
+_HOST_INJECTED_PREFIXES = (
+    "WORKBUDDY_",       # 宿主的应用名/路径/版本/VLM token 等
+    "ACC_",             # ★ 宿主的**产品配置**（含 endpoint / authentication）
+    "CLIENT_INFO_",     # 宿主的客户端标识
+    "CLAUDE_",          # 宿主的 CLAUDE_* 兼容变量
+    "SANDBOX_",         # 宿主的沙箱 IPC
+    "WECOM_",           # 宿主的企微 CLI 配置
+    "TENCENT_",         # 宿主的目标标识
+    "GALILEO_",         # 宿主的遥测
+    "INSTALL_",         # 宿主的安装状态
+    "STAGING_", "BACKUP_APP_PATH", "NEW_APP_PATH", "CURRENT_APP_PATH",
+    "UPDATE_", "TARGET_",
+)
+
+#: `CODEBUDDY_*` 里**要保留**的那些 —— 它们是**用户配置的认证**，
+#: 剔除会让人没法认证。其余（宿主注入的运行时状态）一律剔除。
+_CODEBUDDY_KEEP = frozenset({
+    "CODEBUDDY_API_KEY",
+    "CODEBUDDY_AUTH_TOKEN",
+    "CODEBUDDY_INTERNET_ENVIRONMENT",
+    "CODEBUDDY_API_KEY_DISABLED",
+    "CODEBUDDY_CONFIG_DIR",
+    "CODEBUDDY_BIN",
+    "CODEBUDDY_ALLOWED_TOOLS",
+    "CODEBUDDY_WORKDIR",
+    "CODEBUDDY_EXTRA_DIRS",
+    "CODEBUDDY_DEBUG",
+})
+
+
+def _is_host_injected(key: str) -> bool:
+    """这个变量是不是宿主应用注入的（会干扰子进程）。"""
+    if key.startswith("CODEBUDDY_"):
+        return key not in _CODEBUDDY_KEEP
+    return key.startswith(_HOST_INJECTED_PREFIXES)
+
+
 def _actor_env(node_id: str) -> dict[str, str]:
-    """子进程环境：继承 + 加 ``NXS_ACTOR``，但**剔掉全部凭据**。
+    """子进程环境：继承 + 加 ``NXS_ACTOR``，但要做两层剔除。
 
-    为什么剔：本进程的 systemd/launchd 环境里可能有 mesh 密钥；
-    而 CodeBuddy 能 exec，所以它读得到。传给它就等于把密钥
-    放进了 LLM 的上下文。
+    ## 第一层：网格自己的密钥（``NXS_SECRET`` / ``NXS_OPS``）
 
-    为什么保留其余：CodeBuddy 要从 ``~/.codebuddy`` 读配置、
-    要能找 PATH 里的 CLI 工具。清空环境会让它什么都干不了。
+    CodeBuddy 能 exec，读得到自己的环境。传给它就等于把密钥
+    放进了 LLM 的上下文 —— 那之后它就不再是秘密。
+
+    ## 第二层：宿主应用注入的运行时状态（``_HOST_INJECTED_PREFIXES``）
+
+    ⚠ **这一层是实测踩出来的，而且极其隐蔽。**
+
+    宿主（WorkBuddy / CodeBuddy 桌面版）会往子进程环境里塞一堆
+    自己的状态，其中 ``ACC_PRODUCT_CONFIG_PATH`` 这类会改变
+    codebuddy CLI 的**产品配置**——包括它该去哪个端点认证。
+
+    带着这些变量，CLI 会去宿主的端点认证，于是报
+    ``Authentication required`` —— 而用户明明登录过。
+    这个假象会把人引向"没登录"的错误方向。
+
+    ## 为什么不干脆 env -i 清空
+
+    因为 CodeBuddy 需要 PATH 找 CLI 工具、需要 HOME 找
+    ``~/.codebuddy`` 配置、需要语言/编码设置。**清空它就跑不起来。**
+    所以是"精准剔除"而不是"清空"。
     """
     env = scrub_secrets(dict(os.environ))
+    removed = [k for k in env if _is_host_injected(k)]
+    for k in removed:
+        del env[k]
     env["NXS_ACTOR"] = node_id
     return env
+
+
+def _resolve_actor(node_id: str):
+    """加载凭据文件，返回 ``(Actor|None, 失败原因)``。
+
+    ⚠ **凭据文件里写了 url 和 ca_file，必须用上。**
+
+    初版只取了 ``secret``，同一份文件里的 ``NXS_COORDINATOR_URL``
+    和 ``NXS_CA_FILE`` 被丢掉了 —— 于是用户明明在凭据文件里配好了，
+    程序还要求他在环境变量里再设一遍。而 ``--check-credential``
+    能读到那些值 —— **自相矛盾，同一份配置不该要配两遍。**
+    """
+    from nxs.cli.actor import load_actor
+
+    try:
+        actor = load_actor(node_id)
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+    return actor, ""
 
 
 def _resolve_secret(node_id: str) -> tuple[str, str]:
@@ -728,7 +907,9 @@ def explain_failure(stderr: str) -> str:
 
 
 def _probe_once(bin_path: str, args: list[str], *, timeout: int,
-                 logger: logging.Logger, label: str) -> tuple[bool, str, str, int]:
+                 logger: logging.Logger, label: str,
+                 env: dict[str, str] | None = None
+                 ) -> tuple[bool, str, str, int]:
     """跑一次探活，返回 ``(成功, stdout, stderr, 退出码)``。
 
     ⚠ **一律把 stderr 拿出来。** 初版只看 stdout，于是输出为空时
@@ -740,7 +921,14 @@ def _probe_once(bin_path: str, args: list[str], *, timeout: int,
     logger.debug("执行：%s", " ".join(cmd))
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, stdin=subprocess.DEVNULL)
+                           timeout=timeout, stdin=subprocess.DEVNULL,
+                           # ⚠ **必须传清理过的环境。**
+                           #   不传就继承父进程的完整环境 —— 而桥接跑在
+                           #   宿主应用（WorkBuddy/桌面版）的进程树里，
+                           #   会继承它注入的产品配置，导致 CLI 去错误的
+                           #   端点认证，报出假的 "Authentication required"。
+                           #   （实测：完整环境必失败，清理后正常）
+                           env=env)
     except subprocess.TimeoutExpired:
         logger.error("  [%s] 超时 %d 秒", label, timeout)
         return False, "", "", -1
@@ -1010,9 +1198,14 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
         logger.error("  或：irm https://www.codebuddy.cn/cli/install.ps1 | iex")
         return 1
 
+    # 全程用**清理过的环境** —— 与真实任务执行走同一条路径。
+    # 否则 --check-tools 会在污染环境里得出"未登录"的假结论。
+    probe_env = _actor_env("__probe__")
+
     # ---- ① 版本 ----
     ok, out, err, rc = _probe_once(bin_path, ["--version"], timeout=60,
-                                   logger=logger, label="--version")
+                                   logger=logger, label="--version",
+                                   env=probe_env)
     if ok:
         logger.info("版本：%s", out.splitlines()[0])
     else:
@@ -1101,7 +1294,7 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
         bin_path,
         ["-p", "回复两个字：就绪", "--permission-mode", "dontAsk",
          "--port", str(DEFAULT_PORT)],
-        timeout=180, logger=logger, label="text 模式")
+        timeout=180, logger=logger, label="text 模式", env=probe_env)
     _report_probe("text 模式（-p + dontAsk）", ok_t, out_t, err_t, rc_t, logger)
 
     if not ok_t:
@@ -1120,7 +1313,7 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
         bin_path,
         ["-p", "回复两个字：就绪", "--output-format", "json",
          "--permission-mode", "dontAsk", "--port", str(DEFAULT_PORT)],
-        timeout=180, logger=logger, label="json 模式")
+        timeout=180, logger=logger, label="json 模式", env=probe_env)
     _report_probe("json 模式（--output-format json）", ok_j, out_j, err_j, rc_j, logger)
 
     if not ok_j:
@@ -1140,7 +1333,14 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
             logger.error("      | %s", line[:200])
         return 1
 
-    logger.info("  ✓ 信封的键：%s", sorted(payload))
+    # ⚠ payload 是**事件数组**，不是对象 —— 不能 sorted(payload)
+    #   （那会试图比较 dict，报 TypeError）。只统计类型。
+    if isinstance(payload, list):
+        kinds = [e.get("type") for e in payload if isinstance(e, dict)]
+        logger.info("  ✓ 事件数组：%d 个，类型 %s",
+                    len(payload), sorted(set(map(str, kinds))))
+    else:
+        logger.info("  ✓ 输出对象：键 %s", sorted(payload))
     try:
         answer = extract_answer(payload)
     except RuntimeError as exc:
@@ -1220,7 +1420,15 @@ def main() -> int:
     #   用户实际踩过：先报"缺 --url"，设好再跑，又报"缺凭据"，
     #   再设好，又报"缺白名单" —— 三次往返。
     #   而且只说"缺 X"没说"该怎么给"，等于把排查成本推给用户。
-    secret, secret_error = _resolve_secret(args.node_id)
+    # ★ 先加载凭据文件 —— 它可能已经带了 url 和 ca_file
+    actor, secret_error = _resolve_actor(args.node_id)
+    secret = actor.secret.decode("utf-8") if actor else ""
+
+    # 优先级：命令行 > 环境变量 > 凭据文件（文件兜底，免得配两遍）
+    if not args.url and actor and actor.url:
+        args.url = actor.url
+    if not args.ca_file and actor and actor.ca_file:
+        args.ca_file = actor.ca_file
 
     missing: list[tuple[str, str]] = []
     if not args.url:

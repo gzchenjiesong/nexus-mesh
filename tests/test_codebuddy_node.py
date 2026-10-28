@@ -65,7 +65,15 @@ class TestRoleCard:
         assert card.roles.executor is True
         assert card.roles.issuer is True
         assert card.constraints.can_issue_types == ("agent.ask",)
-        assert card.constraints.can_receive_from == ("zone-work",)
+        # ⚠ can_receive_from 是「**谁可以派任务给我**」，不是「我属于哪个域」。
+        #   初版写成 ("zone-work",)，于是云端（cloud）派任务直接被拒
+        #   MX-RECEIVE-03 —— 而那个错误码看起来像域不匹配，很难联想到方向。
+        assert "cloud" in card.constraints.can_receive_from, (
+            "没允许 cloud 派任务 —— 云端派发会被拒（MX-RECEIVE-03）"
+        )
+        assert "zone-work" in card.constraints.can_receive_from, (
+            "没允许同域调试"
+        )
 
     @covers("M5.F7")
     def test_byte_quota_matches_summary_limit(self):
@@ -1329,3 +1337,102 @@ class TestNonInteractivePath:
         )
         assert "ln -sf" in src, "没给软链接的修法"
         assert "zshrc" in src, "没点明 .zshrc 只对交互式 shell 生效"
+
+
+class TestHostEnvPollution:
+    """★★★ 宿主应用注入的环境变量会污染 codebuddy，伪装成"未登录"。
+
+    ⚠⚠ **这是本项目最隐蔽的一个 bug，代价是好几轮错误排查。**
+
+    桥接跑在宿主应用（WorkBuddy / CodeBuddy 桌面版）的进程树里，
+    继承了它注入的 **210 个** 环境变量。实测后果：
+
+    ==========================  ==========  ==================
+    环境                          stdout      耗时
+    ==========================  ==========  ==================
+    完整环境（210 个变量）          0 字节      1.6 秒（失败）
+    env -i 干净                    "好了"      7 秒（真的调了模型）
+    ==========================  ==========  ==================
+
+    完整环境下报 ``Authentication required`` —— 而用户**明明登录过**。
+    这个假象会把排查方向引向"没登录"，而真正原因是宿主的产品配置
+    变量让 CLI 去**宿主的端点**认证，不是用户登录的那个端点。
+
+    ## 二分定位的结果
+
+    单独注入任何一个变量都不触发，整批一起才触发 → 组合效应。
+    所以按前缀**整批剔除**，不做精细挑选。
+    """
+
+    @covers("M14.F9")
+    def test_actor_env_removes_host_vars(self, monkeypatch):
+        """★ 宿主的 ACC_* / WORKBUDDY_* 等必须被剔除。"""
+        from examples.codebuddy_node import _actor_env
+
+        monkeypatch.setenv("ACC_PRODUCT_CONFIG_PATH", "/tmp/x.json")
+        monkeypatch.setenv("WORKBUDDY_VLM_AUTH_TOKEN", "secret")
+        monkeypatch.setenv("CODEBUDDY_HOST", "workbuddy-desktop")
+        monkeypatch.setenv("CODEBUDDY_SERVICE_PROXY_URL", "http://127.0.0.1:52098/x")
+
+        env = _actor_env("test-node")
+
+        for k in ("ACC_PRODUCT_CONFIG_PATH", "WORKBUDDY_VLM_AUTH_TOKEN",
+                  "CODEBUDDY_HOST", "CODEBUDDY_SERVICE_PROXY_URL"):
+            assert k not in env, f"{k} 没被剔除 —— 会让 CLI 去宿主端点认证"
+
+    @covers("M14.F9")
+    def test_actor_env_keeps_auth_vars(self, monkeypatch):
+        """★ 但用户配置的**认证变量必须保留**。
+
+        剔除 ``CODEBUDDY_*`` 不能一刀切：
+        ``CODEBUDDY_API_KEY`` / ``CODEBUDDY_INTERNET_ENVIRONMENT``
+        是用户认证用的，剔了就没法认证。
+        """
+        from examples.codebuddy_node import _actor_env
+
+        monkeypatch.setenv("CODEBUDDY_API_KEY", "key-123")
+        monkeypatch.setenv("CODEBUDDY_INTERNET_ENVIRONMENT", "internal")
+        monkeypatch.setenv("CODEBUDDY_AUTH_TOKEN", "tok-456")
+
+        env = _actor_env("test-node")
+        assert env.get("CODEBUDDY_API_KEY") == "key-123"
+        assert env.get("CODEBUDDY_INTERNET_ENVIRONMENT") == "internal"
+        assert env.get("CODEBUDDY_AUTH_TOKEN") == "tok-456"
+
+    @covers("M14.F9")
+    def test_actor_env_keeps_system_vars(self, monkeypatch):
+        """PATH / HOME 等系统变量必须保留 —— 否则 CLI 找不到配置和工具。"""
+        import os as _os
+        from examples.codebuddy_node import _actor_env
+
+        env = _actor_env("test-node")
+        assert "PATH" in env
+        if "HOME" in _os.environ:
+            assert "HOME" in env
+
+    @covers("M14.F9")
+    def test_check_tools_uses_cleaned_env(self):
+        """★ check_tools 必须用清理过的环境。
+
+        初版 check_tools 直接继承父进程环境 → 在宿主进程树里跑
+        ``--check-tools`` 会得到**假的**"未登录"，而真实任务执行
+        却可能是正常的。**检查工具本身给出错误结论，最误导人。**
+        """
+        import inspect
+        from examples.codebuddy_node import check_tools
+
+        src = inspect.getsource(check_tools)
+        assert "_actor_env" in src, (
+            "check_tools 没用清理过的环境 —— 会得出假的未登录结论"
+        )
+
+    @covers("M14.F9")
+    def test_probe_once_accepts_env(self):
+        """★ _probe_once 必须支持传 env（否则调用方无法清理）。"""
+        import inspect
+        from examples.codebuddy_node import _probe_once
+
+        src = inspect.getsource(_probe_once)
+        assert "env" in src, "_probe_once 不支持 env 参数"
+        # 必须真的传给 subprocess
+        assert "env=env" in src, "env 参数没传给 subprocess.run"
