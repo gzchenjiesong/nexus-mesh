@@ -542,6 +542,9 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M14.F8", "部署自检（nxs doctor：持久化／权限／TLS／运维通道）",
             "nxs/__main__.py:cmd_doctor",
             ("G3",), "P1"),
+    Feature("M14.F9", "TLS 证书生成脚本化（CA 扩展完整、文件权限正确）",
+            "deploy/gen-tls.sh",
+            ("G3",), "P1"),
 
     # ---- M15 观察窗 WebUI -------------------------------------------
     Feature("M15.F1", "只读 UI 进程（只听 127.0.0.1，拒绝公网绑定）",

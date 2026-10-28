@@ -165,90 +165,135 @@ if (-not $Py) {
 
 # ------------------------------------------------------------------ 网络
 Say ""
-Say "-> 网络（公司网络可能拦出站）"
+Say "-> 网络与证书"
 
-# ⚠ **必须把「网络不通」和「证书不认」分开报。** 两者修法完全不同，
-#   混成一句"不可达"会让人去查防火墙，而实际是 CA 文件的锅。
+# ⚠⚠ **健康检查必须用 Python，不能用 curl.exe**
 #
-#   实测踩过：首次检查 HTTP 200，用户建了 ca.pem 之后再跑变 FAIL ——
-#   网络一直好好的，只是 curl 因为证书校验失败而不返回 200。
-#   脚本却报"协调节点不可达"，方向就带偏了。
+#   Windows 上 curl.exe 用的是**系统 TLS 栈（schannel）**，而桥接（Python）
+#   用的是**内置 OpenSSL**。两者对同一张证书的判断可能不同：
 #
-#   判断方式：先不带 CA 测一次（-k），再带 CA 测一次。
-#     -k 成功 + 带 CA 失败  → **证书问题**（60）
-#     -k 也失败             → 网络问题（按 curl 退出码细分）
-$curlKOut  = & curl.exe -sS -k --max-time 10 -o NUL -w "%{http_code}" `
-                "$ServerUrl/health" 2>&1
-$curlKCode = $LASTEXITCODE
-$insecureOk = ($curlKCode -eq 0 -and "$curlKOut" -eq "200")
+#     schannel  → 会做吊销检查（CRL/OCSP）。自签 CA 没发布吊销信息，
+#                 于是报「the revocation status is unknown」并拒绝。
+#     OpenSSL   → 默认不查吊销；但 3.13+ 默认开 VERIFY_X509_STRICT，
+#                 会要求 CA 有 keyUsage 扩展。
+#
+#   实测：同一个 CA，macOS 的 curl 通过，Windows 的 curl 失败，
+#   而这跟桥接能不能连**毫无关系**。用 curl 做判据只会制造噪音。
+#
+#   所以这里跑一段 Python，用与 HttpTransport._ssl_context 完全相同的方式
+#   建上下文 —— 测的就是生产代码实际会做的事。
 
-$hasCa = Test-Path $CaFile
-$caOk = $false
-$caCode = -1
-$caOut = ""
-if ($hasCa) {
-    $caOut  = & curl.exe -sS --cacert $CaFile --max-time 10 -o NUL `
-                  -w "%{http_code}" "$ServerUrl/health" 2>&1
-    $caCode = $LASTEXITCODE
-    $caOk = ($caCode -eq 0 -and "$caOut" -eq "200")
-}
-
-if ($caOk) {
-    Ok "协调节点可达（HTTP 200，CA 校验通过）"
-} elseif ($insecureOk -and $hasCa -and -not $caOk) {
-    # ★ 网络好的，证书不认 —— 这是最容易误判的一类
-    Bad "网络通，但**证书校验失败**（curl 退出码 ${caCode}）"
-    Say ""
-    Say "   → 这与防火墙无关。CA 文件有问题，按顺序查："
-    Say ""
-    if ($caCode -eq 60) {
-        Say "     curl 60 = CA 能加载，但验不过服务端证书（可能拿错了 CA）"
-    } elseif ($caCode -eq 77) {
-        Say "     curl 77 = **CA 文件本身加载不了** —— 文件坏了，不是拿错"
-        Say "        实测过的两种：UTF-8 BOM、内容被截断。"
-        Say "        最快的修法：删掉它，让脚本从 deploy\ca.pem 重新复制。"
+$pyForCheck = $Py
+if (-not $pyForCheck) {
+    # Python 都没装时退回 curl（带 --ssl-no-revoke 规避 schannel 吊销检查）
+    Warn "没有 Python，退回 curl 检查（结果仅供参考）"
+    $curlOut = & curl.exe -sS -k --ssl-no-revoke --max-time 10 -o NUL `
+                   -w "%{http_code}" "$ServerUrl/health" 2>&1
+    if ($LASTEXITCODE -eq 0 -and "$curlOut" -eq "200") {
+        Ok "协调节点可达（HTTP 200，未验证书）"
+    } else {
+        Bad "协调节点不可达（curl 退出码 ${LASTEXITCODE}）"
+        if ($Check) { exit 1 }
     }
-    Say "     a) 文件被记事本存成了 UTF-8 BOM 或 ca.pem.txt"
-    Say "        （记事本「另存为」时编码选 ANSI/UTF-8，文件名加引号）"
-    Say "     b) 粘贴时首行 BEGIN 或末行 END 缺失、多了空格"
-    Say "     c) 内容被截断 —— 正常应是 20 行、约 1200 字节"
-    Say ""
-    if ($hasCa) {
-        $sz = (Get-Item $CaFile).Length
-        Say "     当前文件：${CaFile}（$sz 字节）"
-        $firstLine = ([System.IO.File]::ReadAllLines($CaFile))[0]
-        if ($firstLine.TrimStart([char]0xFEFF) -ne "-----BEGIN CERTIFICATE-----") {
-            Say "     ✗ 首行不是 BEGIN 行，实际是：[$firstLine]"
-        }
-        if ($sz -lt 800) {
-            Say "     ✗ 文件明显偏小，可能粘贴不完整"
-        }
-    }
-    Say ""
-    Say "   详细诊断：powershell -ExecutionPolicy Bypass -File deploy\diag-net.ps1"
-    if ($Check) { exit 1 }
-} elseif ($insecureOk) {
-    # 网络通，只是没配 CA（首次检查的正常状态）
-    Ok "协调节点可达（HTTP 200）"
-    Warn "尚未配置 CA 文件 —— 注册前需要它，否则桥接连不上"
-    Say "       放到：$CaFile"
 } else {
-    Bad "协调节点不可达（curl 退出码 ${curlKCode}）"
-    Say ""
-    switch ($curlKCode) {
-        6  { Say "   → 域名解析失败" }
-        7  { Say "   → TCP 连不上：公司防火墙拦出站？云安全组没放行？" }
-        28 { Say "   → 超时：网络慢、丢包，或有代理在中间" }
-        35 { Say "   → TLS 握手失败：可能有企业中间人代理" }
-        default { Say "   → 未预期错误，输出：$curlKOut" }
+    # 把检查逻辑写成临时 .py —— 不用内联 -c，避免引号/括号转义问题
+    $chkFile = Join-Path $env:TEMP "nxs_health_check.py"
+    $chkOut  = Join-Path $env:TEMP "nxs_health_out.txt"
+    $chkErr  = Join-Path $env:TEMP "nxs_health_err.txt"
+
+    $chkCode = @'
+import json, ssl, sys, urllib.error, urllib.request
+url, ca = sys.argv[1], sys.argv[2]
+out = {"ok": False}
+try:
+    ctx = None
+    if ca:
+        ctx = ssl.create_default_context(cafile=ca)
+    out["strict"] = bool(ctx.verify_flags & ssl.VERIFY_X509_STRICT) if ctx else None
+    with urllib.request.urlopen(url, context=ctx, timeout=10) as r:
+        out["ok"] = (r.status == 200)
+        out["status"] = r.status
+except ssl.SSLCertVerificationError as e:
+    out["err"] = "cert: " + str(e)
+    out["verify_code"] = getattr(e, "verify_code", None)
+except urllib.error.URLError as e:
+    out["err"] = "url: " + str(e.reason)
+except Exception as e:
+    out["err"] = type(e).__name__ + ": " + str(e)
+print(json.dumps(out))
+'@
+    Set-Content -Path $chkFile -Value $chkCode -Encoding UTF8
+
+    $chkCa = if ($hasCa) { $CaFile } else { "" }
+    $pyOut = $null
+    $pyProc = $null
+    try {
+        $pyProc = Start-Process -FilePath $pyForCheck `
+            -ArgumentList @($chkFile, "$ServerUrl/health", $chkCa) `
+            -NoNewWindow -PassThru `
+            -RedirectStandardOutput $chkOut -RedirectStandardError $chkErr
+        if (-not $pyProc.WaitForExit(25000)) {
+            try { $pyProc.Kill() } catch { }
+            Bad "健康检查超时 25 秒"
+            if ($Check) { exit 1 }
+        } else {
+            if (Test-Path $chkOut) { $pyOut = (Get-Content $chkOut -Raw) }
+        }
+    } catch {
+        Bad "跑 Python 检查失败：$($_.Exception.Message)"
+        if ($Check) { exit 1 }
+    } finally {
+        foreach ($f in @($chkFile, $chkOut, $chkErr)) {
+            try { if (Test-Path $f) { Remove-Item $f -Force } } catch { }
+        }
     }
-    Say ""
-    Say "   排查："
-    Say "     Test-NetConnection $($Server.Split(':')[0]) -Port $($Server.Split(':')[1])"
-    Say "     echo `$env:HTTPS_PROXY      ← 有代理时试试设 NO_PROXY"
-    Say ""
-    Say "   详细诊断：powershell -ExecutionPolicy Bypass -File deploy\diag-net.ps1"
-    if ($Check) { exit 1 }
+
+    $res = $null
+    if ($pyOut) {
+        try { $res = $pyOut | ConvertFrom-Json } catch { }
+    }
+
+    if ($res -and $res.ok) {
+        $strictNote = if ($res.strict) { "，严格模式" } else { "" }
+        Ok "协调节点可达（HTTP 200${strictNote}）"
+    } elseif ($res -and $res.err) {
+        $errText = [string]$res.err
+        if ($errText.StartsWith("cert:")) {
+            # ★ 证书问题 —— 与网络无关
+            Bad "网络通，但**证书校验失败**"
+            Say ""
+            Say "   $errText"
+            Say ""
+            if ($errText -match "key usage") {
+                Say "   → CA 证书**缺少 Key Usage 扩展**。这不是你的文件坏了，"
+                Say "     是服务端那张 CA 本身不合规 —— 生成时漏了扩展。"
+                Say ""
+                Say "     受影响的客户端："
+                Say "       · Python 3.13+（默认 VERIFY_X509_STRICT）"
+                Say "       · Windows 的 curl（schannel 会报 revocation unknown）"
+                Say ""
+                Say "     修法：服务端重新生成 CA（deploy/gen-tls.sh），"
+                Say "           然后把新的 ca.pem 同步到本机。"
+            } else {
+                Say "   → 按顺序查："
+                Say "     a) CA 文件与服务器上的是否同一份（比对 SHA256 指纹）"
+                Say "     b) 文件是否被记事本改成 UTF-8 BOM 或 .pem.txt"
+                Say "     c) 内容是否被截断（正常约 1200 字节）"
+            }
+        } else {
+            Bad "协调节点不可达"
+            Say ""
+            Say "   $errText"
+            Say ""
+            Say "   → 这是网络层问题，按顺序查："
+            Say "     1. Test-NetConnection $($Server.Split(':')[0]) -Port $($Server.Split(':')[1])"
+            Say "     2. echo `$env:HTTPS_PROXY      ← 有代理试试设 NO_PROXY"
+            Say "     3. 云服务器安全组是否放行"
+        }
+        if ($Check) { exit 1 }
+    } else {
+        Warn "健康检查没拿到结果 —— 继续做后续检查"
+    }
 }
 
 # ------------------------------------------------------------------ codebuddy

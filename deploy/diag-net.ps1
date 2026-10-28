@@ -59,7 +59,7 @@ if ($tcp) {
 # ------------------------------------------------------------------ ② 不验证书
 Line
 Write-Host "② 跳过证书校验（-k）—— 验证 TLS 之上的 HTTP 是否正常" -ForegroundColor Cyan
-$outK = & curl.exe -sS -k --max-time 10 -o NUL -w "%{http_code}" $healthUrl 2>&1
+$outK = & curl.exe -sS -k --ssl-no-revoke --max-time 10 -o NUL -w "%{http_code}" $healthUrl 2>&1
 $codeK = $LASTEXITCODE
 if ($codeK -eq 0 -and $outK -eq "200") {
     Write-Host "  OK   HTTP 200（-k）" -ForegroundColor Green
@@ -104,24 +104,42 @@ if (-not (Test-Path $CaFile)) {
         Write-Host "  ⚠ 文件只有 $size 字节，正常的 CA 证书约 1200 字节 —— 可能粘贴不完整" -ForegroundColor Yellow
     }
 
-    $outCa = & curl.exe -sS --cacert $CaFile --max-time 10 -o NUL -w "%{http_code}" $healthUrl 2>&1
+    $outCa = & curl.exe -sS --cacert $CaFile --ssl-no-revoke --max-time 10 -o NUL -w "%{http_code}" $healthUrl 2>&1
     $codeCa = $LASTEXITCODE
     if ($codeCa -eq 0 -and $outCa -eq "200") {
         Write-Host "  OK   HTTP 200（用 CA 校验）" -ForegroundColor Green
     } else {
         Write-Host "  FAIL curl 退出码 $codeCa" -ForegroundColor Red
         Write-Host "       输出：$outCa"
-        if ($codeCa -eq 60) {
+        if ($codeCa -eq 77) {
             Write-Host ""
-            Write-Host "  → 退出码 60 = **证书校验失败**。这不是网络问题。" -ForegroundColor Yellow
-            Write-Host "     常见原因（按概率）：" -ForegroundColor Yellow
-            Write-Host "       a) CA 文件被记事本存成了 UTF-8 BOM 或 .pem.txt"
-            Write-Host "       b) 粘贴时首尾行缺失/多了空格"
-            Write-Host "       c) 用的是服务器的另一份 CA（本项目只有一份，指纹应为："
-            Write-Host "          26:45:31:A6:A9:AA:CC:3C:C3:F4:68:E6:C1:F4:60:17:"
-            Write-Host "          BB:DD:59:01:F6:F7:7E:65:B2:06:8B:33:0B:A7:29:62)"
+            Write-Host "  → 退出码 77 = **CA 文件本身加载不了**（文件坏了）" -ForegroundColor Yellow
+            Write-Host "     实测过的两种：UTF-8 BOM、内容被截断。"
+            Write-Host "     最快的修法：删掉它，让部署脚本从 deploy\ca.pem 重新复制。"
+        } elseif ($codeCa -eq 60) {
             Write-Host ""
-            Write-Host "     最快的验证：② 里 -k 是 200，这里 60 —— 那一定是 CA 的锅。"
+            Write-Host "  → 退出码 60 = CA 能加载，但**验不过服务端证书**" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "     先看输出里的具体措辞，两种含义完全不同：" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "     A) 'schannel: the revocation status is unknown'"
+            Write-Host "        → Windows curl 特有的问题：schannel 要查吊销状态，"
+            Write-Host "          而自签 CA 不发布 CRL/OCSP。加 --ssl-no-revoke 即可。"
+            Write-Host "          **注意**：这只影响 curl，不影响桥接（桥接用 Python）。"
+            Write-Host ""
+            Write-Host "     B) 'certificate verify failed' 或 'key usage'"
+            Write-Host "        → 证书内容不合规。若提到 key usage，说明"
+            Write-Host "          服务端那张 CA 生成时漏了扩展，本机怎么改都没用，"
+            Write-Host "          需要在服务端跑 deploy/gen-tls.sh 重新生成。"
+            Write-Host ""
+            Write-Host "     C) 都没提"
+            Write-Host "        → 拿错了 CA。比对指纹："
+            Write-Host "           openssl x509 -in `"$CaFile`" -noout -fingerprint -sha256"
+            Write-Host "         或看部署脚本输出的第一行。"
+            Write-Host ""
+            Write-Host "     ⚠ 重要：③ 用 curl 测，而**桥接用 Python**。两者 TLS 栈不同，"
+            Write-Host "       所以 ③ 失败不必然代表桥接连不上。跑部署脚本的健康检查"
+            Write-Host "       （它用 Python）才是准确判据。"
         }
     }
 }

@@ -182,7 +182,7 @@ nxs ops approve node-a --url https://coordinator.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.21.0）
+### 已实现（v0.22.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -225,8 +225,8 @@ make test        # 跑全部测试
 make demo        # 九步验收
 ```
 
-`traceability/MATRIX.md` 是可执行的追溯表 —— 由测试生成，覆盖 136 个
-编号项（113 功能点 + 23 模块需求），零缺口。
+`traceability/MATRIX.md` 是可执行的追溯表 —— 由测试生成，覆盖 137 个
+编号项（114 功能点 + 23 模块需求），零缺口。
 
 ### 许可证
 

@@ -829,26 +829,92 @@ class TestCurlErrorCodes:
     """
 
     @covers("M14.F8")
-    def test_deploy_script_separates_network_from_cert(self):
-        """脚本必须能区分「网络不通」与「证书不认」。"""
+    def test_health_check_uses_python_not_curl(self):
+        """★★ 健康检查必须用 **Python**，不能用 curl.exe。
+
+        ⚠ 这是实测踩到的坑，而且方向完全错了：
+
+        用户 Windows 上 curl 报 ``(60) schannel: the revocation status is
+        unknown``，而我以为"CA 文件坏了"，让人去查 BOM、查截断、比对指纹。
+        全都不是。
+
+        真实情况是 **两个 TLS 栈的判断标准不同**：
+
+        ==========  ==========================  ============================
+        工具        后端                        对自签 CA 的态度
+        ==========  ==========================  ============================
+        curl.exe    Windows schannel            查吊销状态 → 自签 CA 没发布
+                                                CRL → "unknown" → 拒绝
+        Python      OpenSSL（Python 内置）      不查吊销；但 3.13+ 开
+                                                VERIFY_X509_STRICT，
+                                                要求 CA 有 keyUsage
+        ==========  ==========================  ============================
+
+        而**桥接用的是 Python**。所以拿 curl 的结论判断"桥接能不能连"
+        毫无意义 —— 它在测另一个程序。
+
+        现在用一段 Python 脚本做检查，建上下文的方式与
+        ``HttpTransport._ssl_context`` 完全一致 —— 测的就是生产路径。
+        """
         text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
-        # 要有两次探测：一次 -k（跳过校验），一次 --cacert
-        assert "-k" in text, "没有跳过证书的对照探测，无法区分两类失败"
-        assert "--cacert" in text
-        # 要检查 curl 退出码，而不是只看 HTTP 状态
-        assert "$LASTEXITCODE" in text, (
-            "没读 curl 退出码 —— 只看 HTTP 状态无法区分 77 与 60"
+        # 必须有一段内嵌的 Python 检查代码
+        assert "create_default_context" in text, (
+            "健康检查没用 Python 的 ssl —— 那是桥接实际用的方式"
+        )
+        assert "VERIFY_X509_STRICT" in text, (
+            "没检测严格模式 —— 那正是 CA 缺 keyUsage 时失败的原因"
         )
 
     @covers("M14.F8")
-    def test_explains_77_and_60_differently(self):
-        """77 与 60 要给出不同的原因说明。"""
+    def test_curl_fallback_disables_revocation(self):
+        """没有 Python 时退回 curl，但必须带 `--ssl-no-revoke`。
+
+        schannel 会对自签 CA 做吊销检查，而自签 CA 不发布 CRL/OCSP，
+        于是永远报 "revocation status is unknown"。
+        `--ssl-no-revoke` 关掉这项检查，否则兜底路径根本走不通。
+        """
         text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
-        assert "77" in text, "没提退出码 77（CA 文件损坏）"
-        assert "60" in text, "没提退出码 60（CA 验不过）"
-        # 两者的解释要能区分
-        assert "加载不了" in text or "文件本身" in text
-        assert "验不过" in text or "拿错" in text
+        if "curl.exe" in text:
+            assert "--ssl-no-revoke" in text, (
+                "curl 兜底路径没加 --ssl-no-revoke —— schannel 会因"
+                "自签 CA 无吊销信息而拒绝"
+            )
+
+    @covers("M14.F8")
+    def test_diagnoses_missing_key_usage(self):
+        """★ 要能识别「CA 缺 keyUsage」这个具体原因。
+
+        实测这个错误的原文是：
+
+            CA cert does not include key usage extension
+
+        它不是"文件坏了"，而是**服务端那张 CA 生成时漏了扩展**。
+        用户在自己机器上无论怎么重做 CA 文件都修不好 ——
+        必须服务端重新生成。所以提示语必须指出这一点。
+
+        （另一个症状是 Windows schannel 的 "revocation status unknown"，
+         同一个根因的另一种表现。）
+        """
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        assert "key usage" in text.lower() or "keyUsage" in text, (
+            "没处理「CA 缺 keyUsage」这种情况"
+        )
+        assert "gen-tls" in text, (
+            "没指向修复脚本 —— 这个错误用户自己修不了"
+        )
+
+    @covers("M14.F8")
+    def test_diag_script_keeps_curl_codes(self):
+        """诊断脚本仍要解释 curl 的 77 与 60 —— 那是分开排查时要用的。
+
+        主脚本改用 Python 了，但 diag-net.ps1 用 curl 做四层分离测试，
+        那里 77/60 的区分依然有价值：
+          77 = CA 文件加载不了（BOM / 截断）
+          60 = CA 能加载但验不过
+        """
+        text = (DEPLOY / "diag-net.ps1").read_bytes().decode("utf-8-sig")
+        assert "77" in text, "diag 没解释退出码 77"
+        assert "60" in text, "diag 没解释退出码 60"
 
 
 class TestCaBundledInRepo:
@@ -940,3 +1006,156 @@ class TestBashHelperFunctions:
                     f"用了 {helper} 但没有定义 {helper}() —— "
                     f"set -u 下会直接退出"
                 )
+
+
+class TestCaCertificateCompliance:
+    """★★ CA 证书必须符合 X.509 的基本要求。
+
+    ⚠ 这套证书最初是我手工跑 openssl 生成的，**漏了 keyUsage 扩展**。
+    后果是两个不同验证器用两种措辞拒绝它：
+
+    ===========  ============================================================
+    验证器        报错
+    ===========  ============================================================
+    Python 3.13   ``CA cert does not include key usage extension``
+    Windows curl  ``schannel: the revocation status is unknown``
+                 （schannel 查吊销状态，自签 CA 没发布 CRL/OCSP）
+    ===========  ============================================================
+
+    而 Python 3.11/3.12 因为默认没开 VERIFY_X509_STRICT，反而正常 ——
+    这意味着**缺陷会潜伏到有人升级 Python 才爆**。最坏的那种 bug。
+
+    所以证书生成必须脚本化（``deploy/gen-tls.sh``），不能手敲。
+    """
+
+    ca = DEPLOY / "ca.pem"
+
+    @staticmethod
+    def _text(path) -> str:
+        import subprocess
+        r = subprocess.run(["openssl", "x509", "-in", str(path), "-noout", "-text"],
+                           capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, f"openssl 解析失败：{r.stderr}"
+        return r.stdout
+
+    @covers("M14.F9")
+    def test_ca_has_key_usage(self):
+        """★ CA 必须有 keyUsage，且含 keyCertSign。
+
+        没有 keyCertSign 的 CA 不能签下级证书 —— 严格验证器会直接拒绝，
+        而 OpenSSL 默认生成时**不会**加这条（RFC 5280 里它算 RECOMMENDED
+        而非 MUST），所以手敲命令很容易漏。
+        """
+        text = self._text(self.ca)
+        assert "X509v3 Key Usage" in text, (
+            "CA 缺 keyUsage —— Python 3.13+ 与 Windows schannel 都会拒绝"
+        )
+        assert "Certificate Sign" in text, "keyUsage 里没有 keyCertSign"
+
+    @covers("M14.F9")
+    def test_ca_has_basic_constraints(self):
+        """CA 必须声明 CA:TRUE —— 否则它只是个普通证书，不能签别人。"""
+        text = self._text(self.ca)
+        assert "Basic Constraints" in text and "CA:TRUE" in text
+
+    @covers("M14.F9")
+    def test_ca_key_usage_is_critical(self):
+        """★ keyUsage 应标 critical。
+
+        不标 critical 时，不认识这条扩展的验证器会**忽略**它 ——
+        那就等于没写。标了 critical 才会"要么理解，要么拒绝"。
+        """
+        text = self._text(self.ca)
+        # 找 keyUsage 那一行，确认带 critical
+        for line in text.splitlines():
+            if "X509v3 Key Usage" in line:
+                assert "critical" in line, f"keyUsage 未标 critical：{line.strip()}"
+                return
+        raise AssertionError("没找到 keyUsage")
+
+    @covers("M14.F9")
+    def test_gen_script_exists(self):
+        """★ 证书生成必须脚本化 —— 这是本缺陷的根源。
+
+        手工命令生成的东西无法复现、无法 review，漏一行扩展也没人发现。
+        """
+        gen = DEPLOY / "gen-tls.sh"
+        assert gen.is_file(), "缺 deploy/gen-tls.sh"
+
+    @covers("M14.F9")
+    def test_gen_script_sets_key_usage(self):
+        """生成脚本里必须显式写 keyUsage 配置。"""
+        text = (DEPLOY / "gen-tls.sh").read_text(encoding="utf-8")
+        assert "keyUsage" in text
+        assert "keyCertSign" in text
+        assert "critical" in text
+
+    @covers("M14.F9")
+    def test_gen_script_checks_existing_ca(self):
+        """脚本要能检查现有 CA 是否合规（--check 模式）。"""
+        text = (DEPLOY / "gen-tls.sh").read_text(encoding="utf-8")
+        assert "--check" in text
+        # 检查逻辑要真的去找 keyUsage
+        assert "X509v3 Key Usage" in text
+
+
+class TestTlsFilePermissions:
+    """★ 证书文件权限错了服务就起不来。
+
+    ⚠ 实测踩过：gen-tls.sh 初版把目录设成 700、server.key 设成 600。
+    重启后协调节点直接起不来：
+
+        FAIL 网关启动失败：TLS 证书加载失败: [Errno 13] Permission denied
+
+    而这句话**不说是哪个文件、什么权限**。排查靠猜。
+
+    真实约束：服务以 ``User=root`` / ``Group=nxs`` 运行，
+    靠**组权限**读文件。所以：
+
+    ==========  =====  ============================
+    文件         权限    原因
+    ==========  =====  ============================
+    目录         755    服务要能 traverse 进去
+    ca.pem       644    公开，服务与节点都读
+    server.pem   644    公开
+    server.key   **640** 服务进程要读 → 组必须可读
+    ca.key       600    签名用，服务不需要
+    ==========  =====  ============================
+    """
+
+    @covers("M14.F9")
+    def test_dir_is_755_not_700(self):
+        """目录必须 755 —— 700 时服务用户进不去。"""
+        text = (DEPLOY / "gen-tls.sh").read_text(encoding="utf-8")
+        assert "chmod 755" in text, "目录权限不是 755"
+        # 不能把 $DIR 设成 700
+        assert 'chmod 700 "$DIR"' not in text, (
+            "目录仍被设成 700 —— 服务用户无法进入，会报 Permission denied"
+        )
+
+    @covers("M14.F9")
+    def test_server_key_is_640(self):
+        """server.key 必须 640（组可读），不是 600。
+
+        600 = 只有 root 能读。而服务虽然 User=root，但它加载证书时
+        受限于文件的实际权限位 —— 640 才能让 root:nxs 的组合正常工作。
+        """
+        text = (DEPLOY / "gen-tls.sh").read_text(encoding="utf-8")
+        assert "chmod 640" in text, "没有把 server.key 设成 640"
+
+    @covers("M14.F9")
+    def test_ca_key_stays_600(self):
+        """★ CA 私钥必须 600，且**不能给服务组**。
+
+        它是签发所有节点证书的根 —— 泄露等于所有人都能伪造身份。
+        服务运行期不需要它（只在签证书时用），所以不给组权限是对的。
+        """
+        text = (DEPLOY / "gen-tls.sh").read_text(encoding="utf-8")
+        assert "chmod 600" in text, "CA 私钥没设成 600"
+
+    @covers("M14.F9")
+    def test_script_sets_group(self):
+        """脚本要能把证书属组设成服务运行的组。"""
+        text = (DEPLOY / "gen-tls.sh").read_text(encoding="utf-8")
+        assert "SERVICE_GROUP" in text
+        assert "chown" in text
