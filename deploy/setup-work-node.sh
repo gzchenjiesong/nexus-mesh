@@ -40,6 +40,12 @@ ok()  { printf '  ✓ %s\n' "$*"; }
 bad() { printf '  ✗ %s\n' "$*"; }
 warn() { printf '  ⚠ %s\n' "$*"; }
 
+# CA 落盘位置。**必须在被引用之前定义** —— 脚本开头是 set -u，
+# 未定义变量一引用就退出（不是当空串）。
+# 这个错误我把 CA 段落前移时犯过一次：原来的定义在被替换掉的那段里，
+# 移走后就没有了。
+CA_CANDIDATE="$CONF_DIR/ca.pem"
+
 # ------------------------------------------------------------------ 前置检查
 say "→ 环境检查"
 say "  节点 ID    : $NODE_ID"
@@ -53,85 +59,11 @@ for cand in "$REPO_DIR/.venv/bin/python" "$(command -v python3)"; do
 done
 if [ -n "$PY" ]; then ok "Python: $PY"; else bad "找不到 Python"; exit 1; fi
 
-# 2. 服务器通吗 —— **这是最先要验的**，公司网络可能拦出站
-say ""
-say "→ 网络（这一步最容易卡住）"
-CA_CANDIDATE="$CONF_DIR/ca.pem"
-if [ -f "$CA_CANDIDATE" ]; then
-  code=$(curl -sS --cacert "$CA_CANDIDATE" --max-time 10 \
-    -o /dev/null -w "%{http_code}" "$SERVER_URL/health" 2>/dev/null || echo "000")
-else
-  code=$(curl -sS -k --max-time 10 \
-    -o /dev/null -w "%{http_code}" "$SERVER_URL/health" 2>/dev/null || echo "000")
-fi
-if [ "$code" = "200" ]; then
-  ok "协调节点可达（HTTP ${code}）"
-else
-  bad "协调节点不可达（HTTP ${code}）"
-  say ""
-  say "  排查顺序："
-  say "    1. 公司网络是否拦了出站 18800：telnet $SERVER 18800"
-  say "    2. 是否有 HTTP 代理：echo \$HTTPS_PROXY"
-  say "    3. 自签 CA 是否被代理拦截（企业 TLS 中间人会换证书）"
-  exit 1
-fi
-
-# 3. codebuddy 在吗 —— 执行者节点的核心依赖
-say ""
-say "→ CodeBuddy CLI（执行者靠它）"
-CB=""
-for cand in "${CODEBUDDY_BIN:-}" "$HOME/.local/bin/codebuddy" \
-            "$(command -v codebuddy 2>/dev/null)"; do
-  if [ -n "$cand" ] && [ -x "$cand" ]; then CB="$cand"; break; fi
-done
-if [ -n "$CB" ]; then
-  ok "codebuddy: $CB"
-  "$CB" --version 2>/dev/null | sed 's/^/      /' || true
-else
-  bad "没装 codebuddy"
-  say ""
-  say "  二选一："
-  say "    npm install -g @tencent-ai/codebuddy-code"
-  say "    curl -fsSL https://www.codebuddy.cn/cli/install.sh | bash"
-  say ""
-  say "  装完先跑一次交互式 \`codebuddy\` 完成登录，再回来。"
-  if [ "$CHECK_ONLY" = "1" ]; then exit 1; fi
-  say ""
-  say "  （继续做其余准备工作，但节点无法启动）"
-fi
-
-# 4. 工具白名单 —— 没有它节点会拒绝启动（故意的）
-say ""
-say "→ 工具白名单（决定这个节点能做什么）"
-if [ -n "${CODEBUDDY_ALLOWED_TOOLS:-}" ]; then
-  ok "已配置: $CODEBUDDY_ALLOWED_TOOLS"
-else
-  bad "未配置 CODEBUDDY_ALLOWED_TOOLS"
-  say ""
-  say "  这一步**必须你自己填** —— 我不知道你公司内网的 CLI 叫什么。"
-  say "  形如（尖括号里的换成真实的）："
-  say ""
-  say "    export CODEBUDDY_ALLOWED_TOOLS='Bash(projectctl:*),Bash(meetingctl:*),Read,Grep'"
-  say ""
-  say "  含义：只能调这两个 CLI + 读文件 + 搜文件。"
-  say "  **不能执行任意命令、不能写文件。**"
-  say ""
-  say "  为什么必须给：不给白名单意味着 CodeBuddy 能用全部工具（含任意 Bash），"
-  say "  那这个节点就等于把公司电脑的 shell 挂到了任务总线上。"
-fi
-
-if [ "$CHECK_ONLY" = "1" ]; then
-  say ""
-  say "检查完毕（--check 模式，未做改动）"
-  exit 0
-fi
-
-# ------------------------------------------------------------------ 建目录
-say ""
-say "→ 准备本机文件"
-mkdir -p "$AGENT_DIR"
-chmod 700 "$CONF_DIR" "$AGENT_DIR"
-ok "凭据目录: $AGENT_DIR"
+# ⚠ 先建目录 —— CA 块要往 $CONF_DIR 里写文件。
+#   这个顺序同样是踩过的：CA 段落前移后，建目录还在原处（后面），
+#   于是复制时报 ENOENT。**移一个块，要检查它依赖的前提是否也移了。**
+mkdir -p "$CONF_DIR" "$AGENT_DIR"
+chmod 700 "$CONF_DIR" "$AGENT_DIR" 2>/dev/null || true
 
 # CA —— 优先从仓库复制（与 Windows 版同一策略）
 #
@@ -194,6 +126,154 @@ else
   say "  ⚠ 不在这里生成新密钥 —— 两边不一致的话症状是 AU-SIG-01，"
   say "    而那看起来像「密钥写错」，实际是「两边不是同一把」。"
 fi
+
+# 2. 网络与证书 —— **必须在 CA 准备好之后**
+#
+# ⚠⚠ 两点都是实测踩出来的：
+#
+#   ① 顺序：初版网络检查在前、CA 复制在后。于是检查时本地没有 CA，
+#      只能退回系统 CA 库 —— 自签证书必然验不过。
+#      **这项检查在修好之前永远失败**，无论环境多正确。
+#
+#   ② 工具：**用 Python，不用 curl**。桥接用的是 Python 的 ssl 模块。
+#      curl 是另一个程序、另一套判断：
+#        · macOS/Linux 的 curl 默认不开 VERIFY_X509_STRICT
+#        · Python 3.13+ 默认开，要求 CA 有 keyUsage
+#      拿 curl 的结论判断"桥接能不能连"没有意义。
+say ""
+say "→ 网络与证书"
+
+PY_HEALTH=$(mktemp 2>/dev/null || echo "/tmp/nxs-health-script.$$")
+cat > "$PY_HEALTH" <<'PYHEALTH_EOF'
+import json, os, ssl, urllib.error, urllib.request
+url = os.environ.get("NXS_CHK_URL", "")
+ca = os.environ.get("NXS_CHK_CA", "")
+out = {"ok": False, "url": url}
+try:
+    ctx = ssl.create_default_context(cafile=ca) if ca else None
+    if ctx:
+        out["strict"] = bool(ctx.verify_flags & ssl.VERIFY_X509_STRICT)
+    with urllib.request.urlopen(url, context=ctx, timeout=10) as r:
+        out["ok"] = (r.status == 200)
+        out["status"] = r.status
+except urllib.error.URLError as e:
+    reason = e.reason
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        out["err"] = "cert: " + str(reason)
+        out["verify_code"] = getattr(reason, "verify_code", None)
+    else:
+        out["err"] = "net: " + str(reason)
+except ssl.SSLCertVerificationError as e:
+    out["err"] = "cert: " + str(e)
+    out["verify_code"] = getattr(e, "verify_code", None)
+except Exception as e:
+    out["err"] = type(e).__name__ + ": " + str(e)
+print(json.dumps(out))
+PYHEALTH_EOF
+
+NXS_CHK_URL="https://${SERVER}/nxs/health"
+if [ -f "$CA_CANDIDATE" ]; then NXS_CHK_CA="$CA_CANDIDATE"; else NXS_CHK_CA=""; fi
+export NXS_CHK_URL NXS_CHK_CA
+health=$("$PY" "$PY_HEALTH" 2>/dev/null)
+unset NXS_CHK_URL NXS_CHK_CA
+rm -f "$PY_HEALTH"
+
+case "$health" in
+  *'"ok": true'*)
+    if echo "$health" | grep -q '"strict": true'; then
+      ok "协调节点可达（HTTP 200，CA 校验通过，严格模式）"
+    else
+      ok "协调节点可达（HTTP 200，CA 校验通过）"
+    fi
+    ;;
+  *'"err": "cert:'*)
+    bad "网络通，但**证书校验失败**"
+    say ""
+    say "   $health"
+    say ""
+    if echo "$health" | grep -q "key usage"; then
+      say "   → CA 证书**缺少 Key Usage 扩展**。这不是你的文件坏了，"
+      say "     是服务端那张 CA 不合规 —— 服务端要跑 deploy/gen-tls.sh 重新生成。"
+    else
+      say "   → 按顺序查："
+      say "     a) 与服务器是否同一份 CA（比对 SHA256 指纹）"
+      say "     b) 文件是否被改坏（BOM / 截断）"
+      say "     c) 服务器是否换过证书"
+    fi
+    if [ "$CHECK_ONLY" = "1" ]; then exit 1; fi
+    ;;
+  *'"err": "net:'*)
+    bad "协调节点不可达"
+    say ""
+    say "   $health"
+    say ""
+    say "   → 网络层问题："
+    say "     1. 防火墙是否拦出站"
+    say "     2. 是否有代理：echo \$HTTPS_PROXY"
+    if [ "$CHECK_ONLY" = "1" ]; then exit 1; fi
+    ;;
+  "")
+    warn "健康检查没拿到结果 —— 继续做后续检查"
+    ;;
+  *)
+    warn "健康检查异常输出：$health"
+    ;;
+esac
+
+say "→ CodeBuddy CLI（执行者靠它）"
+CB=""
+for cand in "${CODEBUDDY_BIN:-}" "$HOME/.local/bin/codebuddy" \
+            "$(command -v codebuddy 2>/dev/null)"; do
+  if [ -n "$cand" ] && [ -x "$cand" ]; then CB="$cand"; break; fi
+done
+if [ -n "$CB" ]; then
+  ok "codebuddy: $CB"
+  "$CB" --version 2>/dev/null | sed 's/^/      /' || true
+else
+  bad "没装 codebuddy"
+  say ""
+  say "  二选一："
+  say "    npm install -g @tencent-ai/codebuddy-code"
+  say "    curl -fsSL https://www.codebuddy.cn/cli/install.sh | bash"
+  say ""
+  say "  装完先跑一次交互式 \`codebuddy\` 完成登录，再回来。"
+  if [ "$CHECK_ONLY" = "1" ]; then exit 1; fi
+  say ""
+  say "  （继续做其余准备工作，但节点无法启动）"
+fi
+
+# 4. 工具白名单 —— 没有它节点会拒绝启动（故意的）
+say ""
+say "→ 工具白名单（决定这个节点能做什么）"
+if [ -n "${CODEBUDDY_ALLOWED_TOOLS:-}" ]; then
+  ok "已配置: $CODEBUDDY_ALLOWED_TOOLS"
+else
+  bad "未配置 CODEBUDDY_ALLOWED_TOOLS"
+  say ""
+  say "  这一步**必须你自己填** —— 我不知道你公司内网的 CLI 叫什么。"
+  say "  形如（尖括号里的换成真实的）："
+  say ""
+  say "    export CODEBUDDY_ALLOWED_TOOLS='Bash(projectctl:*),Bash(meetingctl:*),Read,Grep'"
+  say ""
+  say "  含义：只能调这两个 CLI + 读文件 + 搜文件。"
+  say "  **不能执行任意命令、不能写文件。**"
+  say ""
+  say "  为什么必须给：不给白名单意味着 CodeBuddy 能用全部工具（含任意 Bash），"
+  say "  那这个节点就等于把公司电脑的 shell 挂到了任务总线上。"
+fi
+
+if [ "$CHECK_ONLY" = "1" ]; then
+  say ""
+  say "检查完毕（--check 模式，未做改动）"
+  exit 0
+fi
+
+# ------------------------------------------------------------------ 建目录
+say ""
+say "→ 准备本机文件"
+mkdir -p "$AGENT_DIR"
+chmod 700 "$CONF_DIR" "$AGENT_DIR"
+ok "凭据目录: $AGENT_DIR"
 
 # skill —— 用统一的安装脚本，避免两份内容腐化
 say ""

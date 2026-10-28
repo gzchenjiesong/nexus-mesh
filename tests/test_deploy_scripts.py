@@ -1651,3 +1651,84 @@ class TestCaIsCommittedToGit:
             assert r.returncode == 0, (
                 f"{path} 竟不被 .gitignore 忽略 —— 安全网被拆了？"
             )
+
+
+class TestBashScriptOrdering:
+    """★ bash 版的段落顺序也要对 —— 与 ps1 是同一类 bug。
+
+    ⚠ 我在修 ps1 的顺序问题时，**只修了 ps1**，bash 版还留着同样两处错：
+    CA 在网络检查之后、且用 curl 而非 Python 检查。
+
+    这说明一件事：**同一个设计错误在多个实现里出现时，不能只修一个。**
+    两个脚本是独立维护的，改了 A 不代表 B 也对。
+    """
+
+    path = DEPLOY / "setup-work-node.sh"
+
+    def _lines(self):
+        return self.path.read_text(encoding="utf-8").splitlines()
+
+    def _index_of(self, needle: str) -> int:
+        for i, l in enumerate(self._lines()):
+            if needle in l:
+                return i
+        return -1
+
+    @covers("M14.F9")
+    def test_ca_before_network(self):
+        """CA 准备必须在网络检查之前（否则检查时没有 CA 可用）。"""
+        i_ca = self._index_of("优先从仓库复制")
+        i_net = self._index_of('say "→ 网络与证书"')
+        assert i_ca > 0 and i_net > 0
+        assert i_ca < i_net, "bash 版：CA 准备在网络检查之后，检查必然失败"
+
+    @covers("M14.F9")
+    def test_creates_dir_before_ca(self):
+        """★ 建目录必须早于 CA 复制。
+
+        这是"移动一个块，忘了它依赖的前提"的典型：
+        把 CA 段落前移后，`mkdir -p "$CONF_DIR"` 还留在原来的位置（后面），
+        于是复制时报 `ENOENT: no such file or directory`。
+        """
+        i_mkdir = self._index_of('mkdir -p "$CONF_DIR"')
+        i_ca = self._index_of("优先从仓库复制")
+        assert i_mkdir > 0, "找不到 mkdir"
+        assert i_mkdir < i_ca, "bash 版：建目录在 CA 复制之后 —— 会 ENOENT"
+
+    @covers("M14.F9")
+    def test_ca_candidate_defined_before_use(self):
+        """★ `$CA_CANDIDATE` 必须在第一次使用之前定义。
+
+        脚本开头是 `set -u`，未定义变量一引用就退出（不是当空串）。
+        这个错我在把 CA 段落前移时犯过 —— 原来的定义在被替换掉的那段里。
+        """
+        import re
+
+        lines = self._lines()
+        use_idx = None
+        for i, l in enumerate(lines):
+            # 跳过注释
+            if l.lstrip().startswith("#"):
+                continue
+            if "$CA_CANDIDATE" in l:
+                use_idx = i
+                break
+        assert use_idx is not None, "脚本里没用 CA_CANDIDATE？"
+        def_idx = next((i for i, l in enumerate(lines)
+                        if re.match(r'\s*CA_CANDIDATE="', l)), None)
+        assert def_idx is not None, "CA_CANDIDATE 没有定义行"
+        assert def_idx < use_idx, (
+            f"CA_CANDIDATE 在第 {def_idx+1} 行定义，但第 {use_idx+1} 行就用了"
+            f" —— set -u 下会直接退出"
+        )
+
+    @covers("M14.F9")
+    def test_health_check_uses_python(self):
+        """bash 版也用 Python 检查，不用 curl。
+
+        理由同 ps1：桥接是 Python 的 ssl 模块，curl 是另一个程序的判断标准。
+        """
+        text = self.path.read_text(encoding="utf-8")
+        assert "create_default_context" in text, (
+            "bash 版没用 Python 的 ssl 做检查"
+        )

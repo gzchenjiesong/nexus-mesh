@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nexus-mesh"
-version = "0.22.2"
+version = "0.22.3"
 description = "A self-hosted coordination network for heterogeneous AI agents — each agent joins with its own identity, role, and trust domain; the mesh handles discovery, structured task delegation, lifecycle, and scoped results."
 readme = "README.md"
 requires-python = ">=3.11"
