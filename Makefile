@@ -39,6 +39,8 @@ demo-net:  ## 同一套 7 步验收，走真实 HTTP（验证传输层）
 demo-clean:  ## 清理 demo 产生的运行时数据
 	rm -rf .nxs/
 
-clean:  ## 清理构建产物与缓存
+clean:  ## 清理构建产物与缓存（含测试临时目录）
 	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
+	@# 测试的 workdir 退化路径刻意不做清理（避开批量删除配额），此处兜住
+	@rm -rf .nxs/test-tmp

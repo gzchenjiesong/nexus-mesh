@@ -4,10 +4,14 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-190%20passing-brightgreen.svg)](#开发)
+[![tests](https://github.com/gzchenjiesong/nexus-mesh/actions/workflows/tests.yml/badge.svg)](https://github.com/gzchenjiesong/nexus-mesh/actions/workflows/tests.yml)
 [![Runtime deps](https://img.shields.io/badge/runtime%20deps-1-brightgreen.svg)](pyproject.toml)
 
-> 徽章为静态自述（本项目未接 CI），数字取自本地测试与 `pyproject.toml`。
+> `tests` 徽章是**真实 CI 状态**（GitHub Actions，Python 3.11/3.12/3.13 矩阵
+> + 部署脚本解析 + 脚本行为）。其余徽章为静态值，取自 `pyproject.toml`。
+>
+> 在 v1.0.0 之前本项目**没有 CI**，徽章数字靠手工维护 ——
+> 曾经长期写着 `190 passing` 而实际是 778。接 CI 就是为了让这种漂移不可能发生。
 
 **[中文说明](#中文说明) · [English](#english)**
 
@@ -182,7 +186,7 @@ nxs ops approve node-a --url https://coordinator.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v0.30.0）
+### 已实现（v1.0.0）
 
 | 模块 | 状态 |
 |---|---|
@@ -206,7 +210,14 @@ nxs ops approve node-a --url https://coordinator.example.com/nxs
 | **远程运维**（批准 / 吊销 / 释放租约，走 HTTP + 审计） | ✅ |
 | **部署物**（systemd unit · 生产配置模板 · 部署自检 · 指南） | ✅ |
 | **观察窗**（`nxs ui` 只读网页看板 · token 鉴权 · 只听 127.0.0.1） | ✅ |
+| **Agent 桥接**（Hermes / OpenClaw / CodeBuddy 三种异构 Agent 实机接入） | ✅ |
+| **Agent 自主派任务**（`nxs-cli`，凭据按身份解析，密钥不进 Agent 上下文） | ✅ |
+| **跨平台**（Linux 部署 · macOS / Windows 桥接，均实机验证） | ✅ |
 | CLI | verify · **doctor** · demo · serve · **ops** · **candidates** · **metrics** · status · **ui** |
+
+桥接的具体形态见 [`docs/agent-bridges.md`](docs/agent-bridges.md)。
+三个桥接共享同一套安全逻辑（`examples/agent_bridge_common.py`）：
+密钥剔除、摘要截断、超时、子进程环境清理。
 
 ### 尚未实现
 
@@ -215,7 +226,7 @@ nxs ops approve node-a --url https://coordinator.example.com/nxs
 | **会话任务图与依赖跟踪** | 目前只记录 `session_id` 用于审计聚合（M8 部分实现） |
 | **产物的带外通道** | `kind=reference` 可传坐标（10 MB 文件只占 96 字节），但**一次性令牌与 ArtifactStore 未做** —— 跨网络时对方能否取到坐标取决于你的存储约定。见 [`docs/artifact-size.md`](docs/artifact-size.md) |
 | **mTLS** | 目前用共享密钥 HMAC；接口不变，Core 不感知认证方式 |
-| **外部协议适配（A2A 等）** | M2 未建 |
+| **标准 A2A 协议适配** | 未做。⚠ 注意术语：本项目内部说的「A2A 通了」指**Agent 之间能互相派任务**（走 Nexus Mesh 自己的协议），**不是** Google 的 A2A 协议。后者未实现 |
 
 ### 开发
 

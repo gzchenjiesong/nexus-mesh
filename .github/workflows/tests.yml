@@ -1,0 +1,117 @@
+name: tests
+
+# 触发条件：推送到 main、任何 PR、以及手动触发。
+# 刻意不加 paths 过滤 —— 文档改动也想跑一遍，成本可接受（约 2 分钟）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的旧运行自动取消，避免排队堆积。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest · py${{ matrix.python }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 是 pyproject 声明的最低版本；3.13 是最新稳定。
+        # 只跑 Linux —— 单元测试是纯逻辑 + sqlite，跨平台差异集中在
+        # 部署脚本与桥接子进程，那些由下面的 powershell job 覆盖。
+        python: ["3.11", "3.12", "3.13"]
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: 安装（仅 PyYAML 一个运行时依赖）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest
+
+      - name: 跑测试
+        # -p no:randomly：固定顺序，失败可复现。
+        # 本项目没装 pytest-randomly，但显式声明意图 —— 若将来加了也不会
+        # 出现"上次过了这次不过"的顺序依赖问题。
+        run: python -m pytest -p no:randomly
+
+      - name: 环境自检
+        # verify 会校验发布的生产模板本身合法 —— 它能独立失败，
+        # 值得单独一步（v0.11.1 就是模板自相矛盾却没被发现）。
+        run: python -m nxs verify
+
+  powershell:
+    name: 部署脚本语法 · pwsh
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 用真实解析器检查所有 .ps1
+        # ubuntu-latest 预装 pwsh。
+        # ⚠ 这一步的价值：静态检查（引号配对、括号计数）抓不到真正的语法
+        # 错误 —— 实测漏过「param 块漏一个逗号」「here-string 跨行」
+        # 「单引号里的 \\b 不是单词边界」。只有解析器能抓到。
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path deploy -Filter *.ps1 -File
+          if (-not $files) { Write-Host "deploy/ 下没有 .ps1"; exit 0 }
+          $fail = 0
+          foreach ($f in $files) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $f.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -eq 0) {
+              Write-Host "  OK   $($f.Name)  ($($tokens.Count) tokens)"
+            } else {
+              $fail++
+              Write-Host "  FAIL $($f.Name)  ($($errors.Count) 个错误)"
+              foreach ($e in $errors) {
+                Write-Host "       行 $($e.Extent.StartLineNumber) 列 $($e.Extent.StartColumnNumber): $($e.Message)"
+              }
+            }
+          }
+          if ($fail -gt 0) { exit 1 }
+
+      - name: 部署脚本 shell 语法检查
+        run: |
+          for f in deploy/*.sh; do
+            [ -e "$f" ] || continue
+            bash -n "$f" && echo "  OK   $f"
+          done
+
+  deploy-scripts:
+    name: 部署脚本行为
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+
+      - name: 部署脚本相关测试
+        # 这些测试检查脚本里的结构与约定（环境变量名、参数齐全、
+        # 路径拼接方式），不需要真的部署。
+        run: python -m pytest tests/test_deploy.py tests/test_deploy_scripts.py -p no:randomly
