@@ -207,10 +207,21 @@ if (Test-Path $CaFile) {
     Copy-Item $repoCa $CaFile -Force
     Ok "CA 已从仓库复制: $CaFile"
 } else {
-    Bad "找不到 ca.pem"
-    Say "     应在仓库里：deploy\ca.pem"
-    Say "     也可从服务器取："
-    Say "       scp root@$($Server.Split(':')[0]):/etc/nexus-mesh/tls/ca.pem `"$CaFile`""
+    Bad "找不到 CA 证书"
+    Say ""
+    Say "   期望位置：$(Join-Path $PSScriptRoot 'ca.pem')"
+    Say "   也检查过：$CaFile"
+    Say ""
+    Say "   ⚠ 如果仓库里应该有一份但你没有，最常见的原因是被 .gitignore 拦了。"
+    Say "     .gitignore 里有一条 *.pem（防私钥泄露，是对的），"
+    Say "     而 deploy/ca.pem 需要一条 !deploy/ca.pem 例外。"
+    Say ""
+    Say "     验证：git ls-files deploy/ca.pem"
+    Say "       有输出 → 文件在仓库里，可能是 clone 不完整"
+    Say "       无输出 → 文件没入库，需要 git add -f deploy/ca.pem 或修 .gitignore"
+    Say ""
+    Say "   或者从服务器取："
+    Say "     scp root@$($Server.Split(':')[0]):/etc/nexus-mesh/tls/ca.pem `"$CaFile`""
 }
 
 # ------------------------------------------------------------------ 网络

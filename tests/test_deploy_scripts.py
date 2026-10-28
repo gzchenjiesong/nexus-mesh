@@ -1540,3 +1540,114 @@ class TestHealthCheckLogic:
         assert res.get("err", "").startswith("net:"), (
             f"连接失败被归成了非 net：{res}"
         )
+
+
+class TestCaIsCommittedToGit:
+    """★★ CA 必须真的在 git 里，不能只是"本地磁盘上有"。
+
+    ⚠ **这个坑很典型：测试全绿，但文件根本没进仓库。**
+
+    ``deploy/ca.pem`` 是我创建的，本地测试也都通过 —— 因为
+    ``test_ca_exists_in_repo`` 查的是 ``DEPLOY / "ca.pem"`` **是否存在**。
+    本地确实存在，所以绿灯。
+
+    但 ``.gitignore`` 里有一行 ``*.pem``，它从没被 ``git add`` 过。
+    于是：
+
+      * 本地跑测试 → 全绿
+      * 别人 clone 下来 → 文件不存在，部署脚本找不到 CA
+      * 而用户看到的报错是"找不到 ca.pem"，会以为自己漏了什么
+
+    这就是"works on my machine"的典型形态。**测试必须查 git，
+    不能只查文件系统。**
+
+    ## 为什么 *.pem 那条规则不能删
+
+    它是防私钥泄露的安全网，默认拒绝一切 PEM 是对的。
+    正确做法是**给公开证书开一个精确例外**（``!deploy/ca.pem``），
+    而不是拆掉整张网 —— 因为 ``*.key`` 也要靠同一节规则拦着。
+    """
+
+    @covers("M14.F9")
+    def test_ca_pem_is_tracked(self):
+        """deploy/ca.pem 必须在 git 索引里。"""
+        import subprocess
+
+        r = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "deploy/ca.pem"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, (
+            "deploy/ca.pem **没有被 git 跟踪** —— 本地有文件不代表仓库里有。\n"
+            "  检查 .gitignore 是否拦住了它（*.pem），"
+            "并确认有 !deploy/ca.pem 例外。\n"
+            f"  git 输出：{r.stderr.strip()}"
+        )
+
+    @covers("M14.F9")
+    def test_ca_pem_not_ignored(self):
+        """deploy/ca.pem 不能被 .gitignore 忽略。
+
+        ``git check-ignore -q`` 的退出码：0 = 被忽略，1 = 不被忽略。
+        """
+        import subprocess
+
+        r = subprocess.run(["git", "check-ignore", "-q", "deploy/ca.pem"],
+                           cwd=REPO_ROOT, capture_output=True, text=True,
+                           timeout=30)
+        assert r.returncode != 0, (
+            "deploy/ca.pem 被 .gitignore 忽略了 —— 需要在 .gitignore 里加 "
+            "!deploy/ca.pem 例外"
+        )
+
+    @covers("M14.F9")
+    def test_no_private_key_tracked(self):
+        """★★ 仓库里不能有任何私钥被跟踪。
+
+        这是安全红线。CA 私钥泄露 = 任何人都能签发节点证书；
+        服务端私钥泄露 = 可以直接冒充服务端。
+        """
+        import subprocess
+
+        r = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
+                           capture_output=True, text=True, timeout=30)
+        tracked = r.stdout.splitlines()
+        bad = [f for f in tracked
+               if f.lower().endswith((".key", ".p12", ".pfx"))]
+        assert not bad, f"这些私钥被 git 跟踪了，必须立刻移除：{bad}"
+
+    @covers("M14.F9")
+    def test_server_pem_not_tracked(self):
+        """★ server.pem 也不该入库。
+
+        它虽然是公开证书，但只对**当前这台服务器**有意义 ——
+        别人 clone 下来拿到一份过期的服务端证书没有用处，
+        反而会误导（以为是本项目通用的）。
+        客户端只需要 CA。
+        """
+        import subprocess
+
+        r = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
+                           capture_output=True, text=True, timeout=30)
+        bad = [f for f in r.stdout.splitlines()
+               if f.lower().endswith("server.pem")]
+        assert not bad, f"server.pem 不该入库：{bad}"
+
+    @covers("M14.F9")
+    def test_gitignore_still_blocks_generic_pem(self):
+        """★ 例外必须**只针对 deploy/ca.pem**，不能放宽到所有 PEM。
+
+        这条测试守的是"别为了修一个问题把安全网拆了"。
+        如果哪天有人把 ``*.pem`` 改成 ``!*.pem`` 或直接删掉，
+        这条会红。
+        """
+        import subprocess
+
+        for path in ("deploy/ca.key", "deploy/server.key",
+                     "deploy/server.pem", "some/other.pem",
+                     "random.key", ".env"):
+            r = subprocess.run(["git", "check-ignore", "-q", path],
+                               cwd=REPO_ROOT, capture_output=True, text=True,
+                               timeout=30)
+            assert r.returncode == 0, (
+                f"{path} 竟不被 .gitignore 忽略 —— 安全网被拆了？"
+            )

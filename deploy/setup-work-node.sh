@@ -156,7 +156,17 @@ elif [ -f "$REPO_CA" ]; then
   chmod 644 "$CA_CANDIDATE"
   ok "CA 已从仓库复制: $CA_CANDIDATE"
 else
-  bad "找不到 ca.pem（应在仓库 deploy/ca.pem）"
+  bad "找不到 CA 证书"
+  say "     期望位置：$REPO_CA"
+  say ""
+  say "   ⚠ 仓库里应该有但你没有？最常见原因是 .gitignore 拦了它。"
+  say "     .gitignore 有 *.pem（防私钥泄露，是对的），"
+  say "     deploy/ca.pem 需要 !deploy/ca.pem 例外。"
+  say ""
+  say "     验证：git ls-files deploy/ca.pem"
+  say "       有输出 → 在仓库里，可能 clone 不完整"
+  say "       无输出 → 没入库"
+  say ""
   say "     或从服务器取：scp root@${SERVER}:/etc/nexus-mesh/tls/ca.pem $CA_CANDIDATE"
 fi
 
