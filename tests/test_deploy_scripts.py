@@ -1732,3 +1732,120 @@ class TestBashScriptOrdering:
         assert "create_default_context" in text, (
             "bash 版没用 Python 的 ssl 做检查"
         )
+
+
+class TestToolWhitelistValidation:
+    """★★ 白名单里的 CLI 必须真的存在，否则任务永远失败。
+
+    ⚠ **我最初连这个校验都没有，而我以为有。**
+
+    我做了三次字符串搜索（``"Bash(" in text``、``"Get-Command" in text``、
+    ``"不存在" in text``）都返回 True，于是判断"已校验"。实际代码里
+    一行校验都没有 —— 全是别处的巧合匹配：
+
+      * ``Bash(`` 出现在**示例字符串**里
+      * ``Get-Command`` 出现在**Python 探测**段
+      * ``不存在`` 出现在**CA 缺失**提示里
+
+    **用 grep 判断"功能是否存在"是不可靠的。**
+
+    ## 为什么这个校验重要
+
+    白名单只告诉 CodeBuddy "允许调什么"，协议层**不检查程序存不存在**。
+    所以名字拼错时：
+
+      * 注册成功 ✓（角色卡和能力都合法）
+      * 任务能派进来 ✓
+      * Agent 执行时报"我做不到" ✗ ← 看起来像能力不足
+
+    用户会去怀疑模型能力、怀疑权限、怀疑网络 —— 而实际只是一个字母打错。
+    """
+
+    @covers("M14.F9")
+    def test_ps1_validates_existence(self):
+        """ps1 必须解析白名单并用 Get-Command 逐个检查。
+
+        ⚠ 这里用 ``_ps_strip_comments``（剥注释、**留字符串**）而不是
+        ``_ps_code_only``：正则模式 ``'Bash\\(...'`` 是**字符串字面量**，
+        剥掉字符串就看不到它了 —— 那会误判成"没解析"。
+        """
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        code = _ps_strip_comments(text)
+        # 必须真的解析 Bash(...) 里的名字（正则模式本身在字符串里）
+        assert "Matches" in code, "ps1 没用正则解析白名单"
+        assert "Bash" in code, "ps1 没解析白名单里的 CLI 名字"
+        # 必须真的用 Get-Command 查，**且在同一个分支里**（解析之后）
+        #
+        # ⚠ 只在全文找 Get-Command 会误判：Python 探测段也有一个，
+        #   位置在解析之前。必须限定在白名单段内部比较。
+        i_parse = code.find("[regex]::Matches")
+        assert i_parse > 0, "找不到解析白名单的代码"
+        tail = code[i_parse:]
+        i_check = tail.find("Get-Command")
+        assert i_check > 0, (
+            "解析白名单之后没有用 Get-Command 检查存在性 —— "
+            "名字拼错时任务会永远失败而看不出原因"
+        )
+        # 结论里要给出具体缺了哪个名字
+        assert "missing" in tail, "没把缺失的工具名收集起来报告"
+
+    @covers("M14.F9")
+    def test_ps1_fails_when_none_found(self):
+        """一个都找不到时必须判失败，不是仅警告。
+
+        全部缺失 = 配置肯定错了（拼错或工具本身不在这台机器上）。
+        仅警告的话用户会忽略，然后所有任务莫名其妙失败。
+        """
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        # 该分支里应当有 exit 1（在 -Check 模式下）
+        seg = text[text.find("一个都找不到"):][:600]
+        assert "exit 1" in seg, (
+            "全部工具缺失时没有判失败 —— 只是警告会被忽略"
+        )
+
+    @covers("M14.F9")
+    def test_bash_validates_existence(self):
+        """bash 版同样要校验（不能只修 ps1）。"""
+        text = (DEPLOY / "setup-work-node.sh").read_text(encoding="utf-8")
+        assert "Bash\\(" in text or "Bash(" in text
+        assert "command -v" in text, "bash 版没检查工具是否存在"
+        # 解析 + 检查都要有
+        assert "grep -oE" in text, "bash 版没解析白名单"
+
+    @covers("M14.F9")
+    def test_bash_parsing_works(self):
+        """★ bash 的解析逻辑要真的能跑（用 bash，不是 zsh）。
+
+        ⚠ 这个测试差点写成假通过：我第一次是在**交互式 zsh** 里手工验的，
+        而 zsh **不对未加引号的变量做单词分割**，于是
+        ``for t in $tools`` 把整个多行字符串当成一个值，
+        `git`、`npm` 全被报成"找不到"。
+
+        脚本有 ``#!/usr/bin/env bash``，实际运行时是对的 ——
+        **但验证时必须用 bash 跑**，否则测的是另一个 shell 的行为。
+
+        这个坑对写 shell 测试的人普遍适用。
+        """
+        import shutil
+        import subprocess
+
+        bash = shutil.which("bash")
+        assert bash, "找不到 bash"
+
+        # 从脚本里抽出解析表达式，单独跑一遍
+        text = (DEPLOY / "setup-work-node.sh").read_text(encoding="utf-8")
+        assert "grep -oE" in text
+
+        script = (
+            'CODEBUDDY_ALLOWED_TOOLS="Bash(git:*),Bash(npm:*),Read"\n'
+            "tools=$(printf '%s' \"$CODEBUDDY_ALLOWED_TOOLS\" \\\n"
+            "        | grep -oE 'Bash\\([[:space:]]*[A-Za-z0-9_.-]+' \\\n"
+            "        | sed 's/^Bash([[:space:]]*//' | sort -u)\n"
+            'printf "%s\\n" $tools\n'
+        )
+        r = subprocess.run([bash, "-c", script], capture_output=True,
+                           text=True, timeout=30)
+        parsed = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+        assert parsed == ["git", "npm"], (
+            f"解析结果不对：{parsed} —— 期望 ['git','npm']"
+        )

@@ -247,6 +247,47 @@ say ""
 say "→ 工具白名单（决定这个节点能做什么）"
 if [ -n "${CODEBUDDY_ALLOWED_TOOLS:-}" ]; then
   ok "已配置: $CODEBUDDY_ALLOWED_TOOLS"
+
+  # ⚠ **必须校验里面的 CLI 真的存在。**
+  #
+  #   白名单写错（拼错、或工具不在 PATH）时注册照样成功 ——
+  #   白名单只是"允许 CodeBuddy 调什么"，协议层不检查程序存不存在。
+  #   于是任务能派进来，但 Agent 执行时报"我做不到"——
+  #   那看起来像能力不足，很难联想到是名字拼错了。
+  tools=$(printf '%s' "$CODEBUDDY_ALLOWED_TOOLS" \
+          | grep -oE 'Bash\([[:space:]]*[A-Za-z0-9_.-]+' \
+          | sed 's/^Bash([[:space:]]*//' | sort -u)
+  missing=""
+  found_n=0
+  for t in $tools; do
+    if command -v "$t" >/dev/null 2>&1; then
+      say "       ✓ $t -> $(command -v "$t")"
+      found_n=$((found_n + 1))
+    else
+      missing="$missing $t"
+    fi
+  done
+
+  if [ -n "$missing" ]; then
+    total=$(printf '%s\n' $tools | wc -l | tr -d ' ')
+    say ""
+    if [ "$found_n" -eq 0 ]; then
+      bad "白名单里的 CLI **一个都找不到**:$missing"
+      say ""
+      say "   → 这不是警告，是配置错误。注册会成功，但任务必然失败。"
+      say "     确认：command -v$(echo "$missing" | cut -d' ' -f2)"
+      if [ "$CHECK_ONLY" = "1" ]; then exit 1; fi
+    else
+      warn "这些 CLI 找不到:$missing"
+      say "       注册不受影响，但需要它们的任务会失败。"
+    fi
+  elif [ -n "$tools" ]; then
+    say "       （全部可在 PATH 中找到）"
+  fi
+
+  if ! printf '%s' "$CODEBUDDY_ALLOWED_TOOLS" | grep -qE '(Read|Grep|Glob|Write)'; then
+    warn "白名单里没有 Read/Grep —— Agent 可能读不了文件"
+  fi
 else
   bad "未配置 CODEBUDDY_ALLOWED_TOOLS"
   say ""

@@ -469,6 +469,57 @@ Say ""
 Say "-> 工具白名单（决定这个节点能做什么）"
 if ($env:CODEBUDDY_ALLOWED_TOOLS) {
     Ok "已配置: $($env:CODEBUDDY_ALLOWED_TOOLS)"
+
+    # ⚠ **必须校验里面的 CLI 真的存在。**
+    #
+    #   白名单写错（拼错、或工具不在 PATH）时，注册照样成功 ——
+    #   因为白名单只是"允许 CodeBuddy 调什么"，协议层不检查那些程序存不存在。
+    #
+    #   于是症状是：任务能派进来，但 Agent 执行时报告"我做不到"。
+    #   那个反馈看起来像能力不足，很难联想到白名单里一个名字拼错了。
+    #
+    #   实测背景：我最初连这个校验都没有 —— 三个偶然的字符串匹配
+    #   让静态检查以为"已校验"，实际代码里一行都没有。
+    $toolNames = @()
+    foreach ($m in [regex]::Matches($env:CODEBUDDY_ALLOWED_TOOLS, 'Bash\(\s*([A-Za-z0-9_.\-]+)')) {
+        $n = $m.Groups[1].Value
+        if ($n -and $toolNames -notcontains $n) { $toolNames += $n }
+    }
+
+    if ($toolNames.Count -gt 0) {
+        $missing = @()
+        foreach ($n in $toolNames) {
+            $cmd = Get-Command $n -ErrorAction SilentlyContinue
+            if ($cmd) {
+                Say "       ✓ $n -> $($cmd.Source)"
+            } else {
+                $missing += $n
+            }
+        }
+        if ($missing.Count -gt 0) {
+            Say ""
+            if ($missing.Count -eq $toolNames.Count) {
+                Bad "白名单里的 CLI **一个都找不到**：$($missing -join ', ')"
+                Say ""
+                Say "   → 这不是警告，是配置错误。注册会成功，但任务必然失败。"
+                Say "     确认：Get-Command $($missing[0])"
+                Say "     或者你自己的工具不叫这个名字，改成实际的。"
+                if ($Check) { exit 1 }
+            } else {
+                Warn "这些 CLI 找不到：$($missing -join ', ')"
+                Say "       注册不受影响，但需要它们的任务会失败。"
+                Say "       确认：Get-Command $($missing[0])"
+            }
+        } else {
+            Say "       （全部可在 PATH 中找到）"
+        }
+    }
+
+    # 只读工具（Read/Grep 等）不需要在 PATH 里 —— 它们是 CodeBuddy 内置的
+    if ($env:CODEBUDDY_ALLOWED_TOOLS -notmatch '\\b(Read|Grep|Glob|Write)\\b') {
+        Warn "白名单里没有 Read/Grep —— Agent 可能读不了文件"
+        Say "       如果你只打算让它调命令行工具，可以忽略这条。"
+    }
 } else {
     Bad "未配置 CODEBUDDY_ALLOWED_TOOLS"
     Say ""
