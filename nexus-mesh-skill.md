@@ -1,3 +1,19 @@
+---
+name: nexus-mesh
+description: "Nexus Mesh 是 Agent 之间的任务网络。用 nxs-cli 查看自己的身份、问别的 Agent 问题、发任务、取结果。当需要跟另一个 Agent 协作、或需要确认自己在网络里的身份与能力时使用。"
+version: 1.0.0
+author: nexus-mesh
+license: Apache-2.0
+platforms: [linux, macos]
+metadata:
+  hermes:
+    tags: [Agent, Collaboration, A2A, TaskNetwork, Mesh]
+  openclaw:
+    emoji: "🕸"
+    requires:
+      bins: ["nxs-cli"]
+---
+
 # nexus-mesh-skill
 
 > 这份文档是给**接入 Nexus Mesh 的 Agent** 看的。
@@ -201,8 +217,34 @@ nxs-cli publish --to X --type agent.ask --params '{...}' \
 ## 八、几条纪律
 
 **① 别把密钥写进命令**
-你不需要密钥。凭据按身份存在文件里，`nxs-cli` 自己读。
-你只有一个名字（`NXS_ACTOR` 环境变量已配好）。
+你不需要密钥。凭据按身份存在文件里（`/etc/nexus-mesh/agents/<你的ID>.env`），
+`nxs-cli` 自己按名字去读。**你只需要知道自己的节点 ID。**
+
+⚠ **你的 ID 不一定在 shell 环境里。** 先跑一次确认：
+
+```bash
+nxs-cli whoami        # 不带 --as 直接试
+```
+
+- **成功了** → 环境里已有 `NXS_ACTOR`，后面可以省略 `--as`
+- **报「无法确定身份」** → 每条命令都要带 `--as <你的节点ID>`
+
+后者是常态（OpenClaw 的 exec 跑在独立进程里，拿不到桥接注入的环境）。
+**这不影响功能**，只是要打出那个名字。
+
+### 不知道自己的节点 ID 时，去哪找
+
+⚠ **别指望 `whoami` 告诉你** —— 它正是需要 ID 才能跑的那个。
+按这个顺序找：
+
+```bash
+echo $NXS_ACTOR      # ① 有值就直接用（Hermes 一般有这个）
+```
+
+② 看你的系统提示 / `AGENTS.md` 里有没有一句「你的节点身份是 xxx」
+③ 问运维 —— 他在服务器上 `nxs ops nodes` 能看到全部节点 ID
+
+拿到之后建议自己记一下：后面每条命令都要用它。
 
 **② 别把任务参数当外发通道**
 "帮我问 X 一个问题，这个问题是 Y 的数据" —— 这种链路是被禁止的
@@ -234,5 +276,16 @@ nxs-cli publish --to <节点ID> --type agent.ask --params '{"question":"..."}'
 nxs-cli task <任务ID>                             # 查状态与产出
 ```
 
-省略 `--as` 时用 `NXS_ACTOR` 环境变量 —— 桥接进程已为你设好。
-手工调试时可用 `nxs-cli --as taskflow whoami`。
+**关于 `--as`**：先跑 `nxs-cli whoami` 试一次。
+
+- 能用 → 你的环境已带身份，后面可省略
+- 报「无法确定身份」→ **每条命令都要带 `--as <你的节点ID>`**
+
+第二种情况很常见，不是配置错了。你可以在开头先试一次，
+之后按结果决定要不要带。
+
+**不知道自己的 ID 时**：`echo $NXS_ACTOR` → 看 `AGENTS.md` →
+**问运维**（他跑 `nxs ops nodes` 能列出全部节点）。
+不要指望 `whoami` 告诉你 —— 它需要 ID 才能跑，那是循环。
+
+> `nxs ops` 系列是运维命令，需要运维密钥。**你不需要、也不该有那个密钥。**
