@@ -864,3 +864,109 @@ class TestCheckToolsLayered:
             assert "可以往下走注册" in "\n".join(records)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestRealCodebuddyFindings:
+    """★★ 用**真实 codebuddy 2.177.1** 实测出来的两个陷阱。
+
+    ⚠ 这些不是推测 —— 我在 macOS 上装了 codebuddy 2.177.1
+    （与用户的版本完全一致），跑出来的现象：
+
+    ==========================  ========  ========  =====================
+    命令                          退出码     stdout    stderr
+    ==========================  ========  ========  =====================
+    -p ... （不加 --port）           1      0 字节    EADDRINUSE:52098
+    -p ... --port 0                0      0 字节    Authentication required
+    ==========================  ========  ========  =====================
+
+    **两行的 stdout 都是 0 字节。** 而用户报的现象正是
+    「输出不是 JSON：」后面一片空白 —— 因为旧代码只打印 stdout。
+
+    所以两个陷阱都会造成同一个症状，而修法完全不同：
+      · 端口冲突 → 加 --port 0
+      · 未登录   → 交互式登录
+    """
+
+    @covers("M14.F8")
+    def test_build_cmd_passes_port(self):
+        """★ build_cmd 必须显式传 --port。
+
+        不传时 codebuddy 会去抢它记住的"stable port"
+        （默认 auto-assign 只对 --serve 生效，交互模式会复用固定端口）。
+        而 WorkBuddy / CodeBuddy IDE 是同一引擎的桌面版，也监听那个端口。
+
+        实测：不加 --port 时必现
+            Error: listen EADDRINUSE: address already in use 127.0.0.1:52098
+        """
+        from examples.codebuddy_node import build_cmd
+
+        cmd = build_cmd("/x/cb", "q", allowed_tools=("Read",))
+        assert "--port" in cmd, (
+            "build_cmd 没传 --port —— 会与 WorkBuddy/CodeBuddy IDE 抢端口"
+        )
+        assert cmd[cmd.index("--port") + 1] == "0", (
+            "--port 应该是 0（自动分配），而不是某个固定值"
+        )
+
+    @covers("M14.F8")
+    def test_port_is_configurable(self):
+        """端口要能显式指定（排查时有用）。"""
+        from examples.codebuddy_node import build_cmd
+
+        cmd = build_cmd("/x/cb", "q", allowed_tools=("Read",), port=45789)
+        assert cmd[cmd.index("--port") + 1] == "45789"
+
+    @covers("M14.F8")
+    def test_explains_eaddrinuse(self):
+        """端口冲突要给出明确解释，不只是把 stderr 打出来。"""
+        from examples.codebuddy_node import explain_failure
+
+        advice = explain_failure(
+            "Error: listen EADDRINUSE: address already in use 127.0.0.1:52098")
+        assert advice, "没认出 EADDRINUSE"
+        assert "端口" in advice
+        # 要提到是谁在抢
+        assert "WorkBuddy" in advice or "CodeBuddy IDE" in advice, (
+            "没说清是谁在抢端口 —— 用户不知道要关掉什么"
+        )
+
+    @covers("M14.F8")
+    def test_explains_not_logged_in(self):
+        """未登录要给出明确的登录步骤。
+
+        真实原文：
+            Authentication required. Please use /login command to sign in
+        """
+        from examples.codebuddy_node import explain_failure
+
+        advice = explain_failure(
+            "Authentication required. Please use /login command to sign in "
+            "to your account")
+        assert advice, "没认出未登录"
+        assert "未登录" in advice
+        assert "/login" in advice, "没告诉用户怎么登录"
+
+    @covers("M14.F8")
+    def test_unknown_error_returns_empty(self):
+        """不认识的错误不要乱给建议 —— 空串，让原始 stderr 说话。"""
+        from examples.codebuddy_node import explain_failure
+
+        assert explain_failure("something completely unknown") == ""
+
+    @covers("M14.F8")
+    def test_probe_checks_stdout_not_only_returncode(self):
+        """★ 不能只看退出码 —— 未登录时退出码是 0。
+
+        实测：未登录 → 退出码 **0**、stdout 空、stderr 有内容。
+        所以 `if rc != 0: 报错` 这种写法会漏掉它，
+        直接走到 json.loads("") 失败，报出"输出不是 JSON"。
+        """
+        import inspect
+        from examples.codebuddy_node import _probe_once
+
+        src = inspect.getsource(_probe_once)
+        assert "returncode == 0 and bool(out)" in src or \
+               ("returncode" in src and "bool(out)" in src), (
+            "探活判定只看 returncode，没检查 stdout 是否为空 —— "
+            "未登录时 returncode 是 0，会被误判为成功"
+        )

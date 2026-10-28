@@ -109,6 +109,18 @@ DEFAULT_NODE_ID = "work-desktop"
 #:   找文件 → 读内容 → 跑命令 → 看输出 → 再查一次 → 汇总
 #: 8 轮会半路截断，而症状是「回答不完整」，看起来像模型能力问题。
 #: 30 轮给足余量；超了说明这个任务本来就该拆开。
+#: codebuddy 监听的本地端口。``0`` = 让系统自动分配空闲端口。
+#:
+#: ⚠ **不要用默认值（不加 --port）。** codebuddy 会复用它记住的那个
+#: "stable port"，而 WorkBuddy / CodeBuddy IDE 是同一引擎的桌面版，
+#: 也监听那个端口 —— 两者同时跑时 CLI 直接起不来：
+#:
+#:   Error: listen EADDRINUSE: address already in use 127.0.0.1:52098
+#:
+#: 而这个错误的特征是 **stdout 空 / stderr 有内容 / 退出码 0**，
+#: 只看 stdout 的话完全查不出来。
+DEFAULT_PORT = 0
+
 DEFAULT_MAX_TURNS = 30
 
 
@@ -295,7 +307,8 @@ def build_cmd(bin_path: str, prompt: str, *,
               allowed_tools: tuple[str, ...],
               permission_mode: str = "dontAsk",
               max_turns: int = DEFAULT_MAX_TURNS,
-              extra_dirs: tuple[str, ...] = ()) -> list[str]:
+              extra_dirs: tuple[str, ...] = (),
+              port: int = DEFAULT_PORT) -> list[str]:
     """拼出调用命令。
 
     ## 这个节点的定位：**派任务给它，而不是指挥它**
@@ -349,6 +362,18 @@ def build_cmd(bin_path: str, prompt: str, *,
         cmd.extend(allowed_tools)
     for d in extra_dirs:
         cmd.extend(["--add-dir", d])
+    # ⚠ --port 0 = 让系统自动分配一个空闲端口。
+    #
+    #   不加这个参数时，codebuddy 会去抢它记着的那个「stable port」。
+    #   而 WorkBuddy / CodeBuddy IDE 是同一个引擎的桌面版，**也监听那个端口**。
+    #   于是 CLI 启动时直接失败：
+    #
+    #     Error: listen EADDRINUSE: address already in use 127.0.0.1:52098
+    #
+    #   最恶劣的是这个错误的表现：**stdout 空、stderr 有内容、退出码 0**。
+    #   只看 stdout 的代码会以为"它什么都没说"，而真正原因在 stderr 里。
+    #   （实测：macOS 上 codebuddy 2.177.1 + WorkBuddy 同时在跑时必现）
+    cmd.extend(["--port", str(port)])
     # 单次模式不支持后台任务，显式关掉以免产生跨轮事件
     cmd.extend(["--max-turns", str(max_turns)])
     return cmd
@@ -629,6 +654,40 @@ def check_credential(node_id: str, logger: logging.Logger) -> int:
     return 1
 
 
+#: 已知的失败特征 → 明确的处理建议。
+#:
+#: ⚠ 这两条都是**实测出来的**（macOS + codebuddy 2.177.1），
+#: 而且它们的表现都是「stdout 空、退出码 0」——
+#: 只看 stdout 和退出码完全查不出来，必须读 stderr。
+_KNOWN_FAILURES: tuple[tuple[str, str], ...] = (
+    (
+        "EADDRINUSE",
+        "端口被占用：codebuddy 想复用它记住的本地端口，"
+        "而 WorkBuddy / CodeBuddy IDE（同一引擎的桌面版）正在监听那个端口。\n"
+        "        → 本脚本已默认传 --port 0（自动分配），若仍报这个，"
+        "说明有别的东西在抢端口"
+    ),
+    (
+        "Authentication required",
+        "**未登录**。codebuddy 需要先登录才能跑无头调用。\n"
+        "        → 在终端里运行一次交互式 `codebuddy`，输入 /login 完成登录\n"
+        "        → 登录后 ~/.codebuddy 下会有凭据，再回来跑本命令"
+    ),
+    (
+        "not logged in",
+        "**未登录**。→ 交互式跑一次 `codebuddy` 完成 /login",
+    ),
+)
+
+
+def explain_failure(stderr: str) -> str:
+    """从 stderr 里认出已知失败模式，返回该怎么做。空串表示没匹配上。"""
+    for needle, advice in _KNOWN_FAILURES:
+        if needle in stderr:
+            return advice
+    return ""
+
+
 def _probe_once(bin_path: str, args: list[str], *, timeout: int,
                  logger: logging.Logger, label: str) -> tuple[bool, str, str, int]:
     """跑一次探活，返回 ``(成功, stdout, stderr, 退出码)``。
@@ -674,6 +733,11 @@ def _report_probe(label: str, ok: bool, out: str, err: str, rc: int,
     if err:
         for line in err.splitlines()[:10]:
             logger.error("        ! %s", line[:200])
+        # ★ 认出已知模式，直接说该怎么做
+        advice = explain_failure(err)
+        if advice:
+            logger.error("")
+            logger.error("      → %s", advice)
     else:
         logger.error("        （没有 stderr —— 说明它自己认为成功了，"
                      "但没往 stdout 写东西）")
@@ -724,7 +788,8 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
     #   如果它也失败，说明问题在 -p / 权限模式 / 登录，与 JSON 无关。
     ok_t, out_t, err_t, rc_t = _probe_once(
         bin_path,
-        ["-p", "回复两个字：就绪", "--permission-mode", "dontAsk"],
+        ["-p", "回复两个字：就绪", "--permission-mode", "dontAsk",
+         "--port", str(DEFAULT_PORT)],
         timeout=180, logger=logger, label="text 模式")
     _report_probe("text 模式（-p + dontAsk）", ok_t, out_t, err_t, rc_t, logger)
 
@@ -743,7 +808,7 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
     ok_j, out_j, err_j, rc_j = _probe_once(
         bin_path,
         ["-p", "回复两个字：就绪", "--output-format", "json",
-         "--permission-mode", "dontAsk"],
+         "--permission-mode", "dontAsk", "--port", str(DEFAULT_PORT)],
         timeout=180, logger=logger, label="json 模式")
     _report_probe("json 模式（--output-format json）", ok_j, out_j, err_j, rc_j, logger)
 
@@ -797,6 +862,10 @@ def main() -> int:
                         metavar="SPEC",
                         help="允许的工具（可重复），如 'Read' 'Bash' 'WebFetch'。 "
                              "省略时从环境变量 CODEBUDDY_ALLOWED_TOOLS 读（逗号分隔）")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help=f"codebuddy 监听的本地端口（默认 {DEFAULT_PORT} = 自动分配）。"
+                             "遇到 EADDRINUSE 就该留默认值 —— 那是与 "
+                             "WorkBuddy/CodeBuddy IDE 抢端口")
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS,
                         help=f"单次任务最大回合数（默认 {DEFAULT_MAX_TURNS}）。"
                              "太小会半路截断，症状是「回答不完整」")
@@ -953,6 +1022,7 @@ def main() -> int:
                         allowed_tools=allowed_tools,
                         max_turns=args.max_turns,
                         extra_dirs=extra_dirs,
+                        port=args.port,
                     ),
                     timeout=args.timeout, logger=log, node_id=args.node_id,
                     workdir=args.workdir or None,
