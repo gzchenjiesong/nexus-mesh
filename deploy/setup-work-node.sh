@@ -38,6 +38,7 @@ done
 say() { printf '%s\n' "$*"; }
 ok()  { printf '  ✓ %s\n' "$*"; }
 bad() { printf '  ✗ %s\n' "$*"; }
+warn() { printf '  ⚠ %s\n' "$*"; }
 
 # ------------------------------------------------------------------ 前置检查
 say "→ 环境检查"
@@ -132,18 +133,31 @@ mkdir -p "$AGENT_DIR"
 chmod 700 "$CONF_DIR" "$AGENT_DIR"
 ok "凭据目录: $AGENT_DIR"
 
-# CA（从仓库复制；本机已有就不覆盖）
-if [ ! -f "$CA_CANDIDATE" ]; then
-  if [ -f "$HOME/nexus-mesh-deploy/ca.pem" ]; then
-    cp "$HOME/nexus-mesh-deploy/ca.pem" "$CA_CANDIDATE"
-    chmod 644 "$CA_CANDIDATE"
-    ok "CA 已复制（来自 ~/nexus-mesh-deploy）"
-  else
-    bad "找不到 ca.pem"
-    say "     从服务器取：scp root@$SERVER:/etc/nexus-mesh/tls/ca.pem $CA_CANDIDATE"
-  fi
-else
+# CA —— 优先从仓库复制（与 Windows 版同一策略）
+#
+# 手工粘贴 PEM 很容易坏：记事本存成 UTF-8 BOM 或内容被截断，
+# curl 都只报 (77) error setting certificate verify locations ——
+# 而那句话里看不出"编码问题"，常被误判成网络故障。
+# CA 是公开证书，本来就该随代码走。
+REPO_CA="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ca.pem"
+if [ -f "$CA_CANDIDATE" ]; then
   ok "CA 已存在: $CA_CANDIDATE"
+  # 坏文件自动修复：太小 或 有 BOM
+  size=$(wc -c < "$CA_CANDIDATE" | tr -d ' ')
+  if [ "$size" -lt 800 ]; then
+    warn "但只有 ${size} 字节（正常约 1200），可能粘贴不完整"
+    [ -f "$REPO_CA" ] && cp "$REPO_CA" "$CA_CANDIDATE" && ok "已用仓库版本覆盖"
+  elif [ "$(head -c 3 "$CA_CANDIDATE" | od -An -tx1 | tr -d ' ')" = "efbbbf" ]; then
+    warn "检测到 UTF-8 BOM —— curl 会报 (77)"
+    [ -f "$REPO_CA" ] && cp "$REPO_CA" "$CA_CANDIDATE" && ok "已用仓库版本覆盖（去掉 BOM）"
+  fi
+elif [ -f "$REPO_CA" ]; then
+  cp "$REPO_CA" "$CA_CANDIDATE"
+  chmod 644 "$CA_CANDIDATE"
+  ok "CA 已从仓库复制: $CA_CANDIDATE"
+else
+  bad "找不到 ca.pem（应在仓库 deploy/ca.pem）"
+  say "     或从服务器取：scp root@${SERVER}:/etc/nexus-mesh/tls/ca.pem $CA_CANDIDATE"
 fi
 
 # 凭据文件 —— 密钥必须**从服务器取**，不能在这里生成

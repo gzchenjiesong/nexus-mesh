@@ -796,3 +796,147 @@ class TestNodeIdConsistency:
                 if old_name in text:
                     stale.append(p.name)
         assert not stale, f"这些文件还引用旧脚本名：{sorted(set(stale))}"
+
+
+class TestCurlErrorCodes:
+    """★★ curl 的退出码要分开报，因为修法完全不同。
+
+    ⚠ **实测发现的关键事实**（不是推测，是跑出来的）：
+
+    ======  ==================================================
+    退出码   含义与常见原因
+    ======  ==================================================
+    6       域名解析失败
+    7       TCP 连不上（防火墙 / 安全组）
+    28      超时
+    77      **CA 文件本身加载不了** —— BOM 或内容截断
+    60      CA 能加载，但验不过服务端证书（拿错了 CA）
+    ======  ==================================================
+
+    77 和 60 的区别很要紧：
+      77 = 文件坏了（本地问题，一分钟能修）
+      60 = 拿错了 CA（要去找正确的证书）
+
+    而 curl 对这两种情况的输出都是
+    ``error setting certificate verify locations`` / ``SSL certificate problem``，
+    字面里看不出区别 —— 只能靠退出码。
+
+    ## 为什么这条对用户体验至关重要
+
+    最初的脚本把「非 200」一律报成"协调节点不可达"，
+    于是用户看到 FAIL 会去查防火墙，而实际只是 CA 文件多个 BOM。
+    方向一带偏，可能白查半天。
+    """
+
+    @covers("M14.F8")
+    def test_deploy_script_separates_network_from_cert(self):
+        """脚本必须能区分「网络不通」与「证书不认」。"""
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        # 要有两次探测：一次 -k（跳过校验），一次 --cacert
+        assert "-k" in text, "没有跳过证书的对照探测，无法区分两类失败"
+        assert "--cacert" in text
+        # 要检查 curl 退出码，而不是只看 HTTP 状态
+        assert "$LASTEXITCODE" in text, (
+            "没读 curl 退出码 —— 只看 HTTP 状态无法区分 77 与 60"
+        )
+
+    @covers("M14.F8")
+    def test_explains_77_and_60_differently(self):
+        """77 与 60 要给出不同的原因说明。"""
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        assert "77" in text, "没提退出码 77（CA 文件损坏）"
+        assert "60" in text, "没提退出码 60（CA 验不过）"
+        # 两者的解释要能区分
+        assert "加载不了" in text or "文件本身" in text
+        assert "验不过" in text or "拿错" in text
+
+
+class TestCaBundledInRepo:
+    """★ CA 证书随仓库分发，不靠手工粘贴。
+
+    ⚠ 手工粘贴 PEM 实测有两种坏法：
+      · 记事本存成 UTF-8 BOM  → curl 77
+      · 粘贴时内容被截断      → curl 77
+
+    而 CA 是**公开证书**（不含私钥），本来就该随代码走。
+    放 ``deploy/ca.pem``，脚本直接复制 —— 一次都不用粘。
+    """
+
+    @covers("M14.F8")
+    def test_ca_exists_in_repo(self):
+        ca = DEPLOY / "ca.pem"
+        assert ca.is_file(), "deploy/ca.pem 不存在"
+        content = ca.read_text(encoding="utf-8")
+        assert content.startswith("-----BEGIN CERTIFICATE-----")
+        assert content.rstrip().endswith("-----END CERTIFICATE-----")
+
+    @covers("M14.F8")
+    def test_ca_has_no_bom(self):
+        """★ CA 文件不能有 BOM。
+
+        有 BOM 时 OpenSSL 认不出 BEGIN 行，curl 直接报
+        ``(77) error setting certificate verify locations``。
+        而这句话里完全看不出是编码问题。
+        """
+        raw = (DEPLOY / "ca.pem").read_bytes()
+        assert not raw.startswith(b"\xef\xbb\xbf"), (
+            "deploy/ca.pem 带 BOM —— curl 会报退出码 77，"
+            "而提示语里看不出是编码问题"
+        )
+
+    @covers("M14.F8")
+    def test_ca_size_reasonable(self):
+        """正常 CA 证书约 1200 字节；太小说明被截断。"""
+        size = (DEPLOY / "ca.pem").stat().st_size
+        assert 800 < size < 4000, f"ca.pem 大小异常：{size} 字节"
+
+    @covers("M14.F8")
+    def test_scripts_copy_from_repo(self):
+        """两个部署脚本都要能从仓库复制 CA。"""
+        ps = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        assert "PSScriptRoot" in ps and "ca.pem" in ps, (
+            "ps1 没从脚本所在目录复制 CA"
+        )
+
+        sh = (DEPLOY / "setup-work-node.sh").read_text(encoding="utf-8")
+        assert "REPO_CA" in sh, "bash 没定义仓库 CA 路径"
+
+    @covers("M14.F8")
+    def test_scripts_repair_broken_ca(self):
+        """已有的坏 CA 要能自动修复（大小异常 / 有 BOM）。
+
+        用户可能已经手工粘过一个坏文件。脚本不该只是警告，
+        而应该用仓库里的正确版本覆盖它 —— 那是能自己解决的问题。
+        """
+        ps = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        assert "0xEF" in ps or "0xef" in ps.lower(), "ps1 没检查 BOM"
+        assert "< 800" in ps or "-lt 800" in ps, "ps1 没检查文件过小"
+
+        sh = (DEPLOY / "setup-work-node.sh").read_text(encoding="utf-8")
+        assert "efbbbf" in sh, "bash 没检查 BOM"
+        assert "-lt 800" in sh or "< 800" in sh, "bash 没检查文件过小"
+
+
+class TestBashHelperFunctions:
+    """★ bash 脚本里用到的每个 helper 都必须有定义。
+
+    ⚠ 这是我自己犯的错：在 CA 段写了 ``warn "检测到 BOM"``，
+    但从来没定义过 ``warn()``。而脚本开头是 ``set -euo pipefail``，
+    ``-u`` 下调用未定义命令会直接退出 ——
+    用户会在 CA 那一步看到一个莫名其妙的 "command not found"，
+    前面的检查结果全白做了。
+    """
+
+    @covers("M14.F8")
+    def test_all_helpers_defined(self):
+        import re
+
+        text = (DEPLOY / "setup-work-node.sh").read_text(encoding="utf-8")
+        defined = set(re.findall(r"^(\w+)\(\)", text, re.M))
+        # 脚本里自定义的 helper（排除外部命令与 shell 关键字）
+        for helper in ("say", "ok", "bad", "warn"):
+            if re.search(rf"^\s*{helper}\s", text, re.M):
+                assert helper in defined, (
+                    f"用了 {helper} 但没有定义 {helper}() —— "
+                    f"set -u 下会直接退出"
+                )

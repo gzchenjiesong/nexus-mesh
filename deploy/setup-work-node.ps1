@@ -166,28 +166,88 @@ if (-not $Py) {
 # ------------------------------------------------------------------ 网络
 Say ""
 Say "-> 网络（公司网络可能拦出站）"
-$healthOk = $false
-try {
-    if (Test-Path $CaFile) {
-        # PowerShell 5.1 的 Invoke-WebRequest 不能直接用自签 CA，走 curl.exe
-        $code = & curl.exe -sS --cacert $CaFile --max-time 10 `
-            -o NUL -w "%{http_code}" "$ServerUrl/health" 2>$null
-    } else {
-        $code = & curl.exe -sS -k --max-time 10 `
-            -o NUL -w "%{http_code}" "$ServerUrl/health" 2>$null
-    }
-    $healthOk = ($code -eq "200")
-} catch { $healthOk = $false }
 
-if ($healthOk) {
-    Ok "协调节点可达（HTTP 200）"
-} else {
-    Bad "协调节点不可达"
+# ⚠ **必须把「网络不通」和「证书不认」分开报。** 两者修法完全不同，
+#   混成一句"不可达"会让人去查防火墙，而实际是 CA 文件的锅。
+#
+#   实测踩过：首次检查 HTTP 200，用户建了 ca.pem 之后再跑变 FAIL ——
+#   网络一直好好的，只是 curl 因为证书校验失败而不返回 200。
+#   脚本却报"协调节点不可达"，方向就带偏了。
+#
+#   判断方式：先不带 CA 测一次（-k），再带 CA 测一次。
+#     -k 成功 + 带 CA 失败  → **证书问题**（60）
+#     -k 也失败             → 网络问题（按 curl 退出码细分）
+$curlKOut  = & curl.exe -sS -k --max-time 10 -o NUL -w "%{http_code}" `
+                "$ServerUrl/health" 2>&1
+$curlKCode = $LASTEXITCODE
+$insecureOk = ($curlKCode -eq 0 -and "$curlKOut" -eq "200")
+
+$hasCa = Test-Path $CaFile
+$caOk = $false
+$caCode = -1
+$caOut = ""
+if ($hasCa) {
+    $caOut  = & curl.exe -sS --cacert $CaFile --max-time 10 -o NUL `
+                  -w "%{http_code}" "$ServerUrl/health" 2>&1
+    $caCode = $LASTEXITCODE
+    $caOk = ($caCode -eq 0 -and "$caOut" -eq "200")
+}
+
+if ($caOk) {
+    Ok "协调节点可达（HTTP 200，CA 校验通过）"
+} elseif ($insecureOk -and $hasCa -and -not $caOk) {
+    # ★ 网络好的，证书不认 —— 这是最容易误判的一类
+    Bad "网络通，但**证书校验失败**（curl 退出码 ${caCode}）"
     Say ""
-    Say "   排查顺序："
-    Say "     1. Test-NetConnection $($Server.Split(':')[0]) -Port $($Server.Split(':')[1])"
-    Say "     2. 公司是否有 HTTP 代理：echo `$env:HTTPS_PROXY"
-    Say "     3. 企业 TLS 中间人会换证书 —— 那自签 CA 一定验不过，见文档"
+    Say "   → 这与防火墙无关。CA 文件有问题，按顺序查："
+    Say ""
+    if ($caCode -eq 60) {
+        Say "     curl 60 = CA 能加载，但验不过服务端证书（可能拿错了 CA）"
+    } elseif ($caCode -eq 77) {
+        Say "     curl 77 = **CA 文件本身加载不了** —— 文件坏了，不是拿错"
+        Say "        实测过的两种：UTF-8 BOM、内容被截断。"
+        Say "        最快的修法：删掉它，让脚本从 deploy\ca.pem 重新复制。"
+    }
+    Say "     a) 文件被记事本存成了 UTF-8 BOM 或 ca.pem.txt"
+    Say "        （记事本「另存为」时编码选 ANSI/UTF-8，文件名加引号）"
+    Say "     b) 粘贴时首行 BEGIN 或末行 END 缺失、多了空格"
+    Say "     c) 内容被截断 —— 正常应是 20 行、约 1200 字节"
+    Say ""
+    if ($hasCa) {
+        $sz = (Get-Item $CaFile).Length
+        Say "     当前文件：${CaFile}（$sz 字节）"
+        $firstLine = ([System.IO.File]::ReadAllLines($CaFile))[0]
+        if ($firstLine.TrimStart([char]0xFEFF) -ne "-----BEGIN CERTIFICATE-----") {
+            Say "     ✗ 首行不是 BEGIN 行，实际是：[$firstLine]"
+        }
+        if ($sz -lt 800) {
+            Say "     ✗ 文件明显偏小，可能粘贴不完整"
+        }
+    }
+    Say ""
+    Say "   详细诊断：powershell -ExecutionPolicy Bypass -File deploy\diag-net.ps1"
+    if ($Check) { exit 1 }
+} elseif ($insecureOk) {
+    # 网络通，只是没配 CA（首次检查的正常状态）
+    Ok "协调节点可达（HTTP 200）"
+    Warn "尚未配置 CA 文件 —— 注册前需要它，否则桥接连不上"
+    Say "       放到：$CaFile"
+} else {
+    Bad "协调节点不可达（curl 退出码 ${curlKCode}）"
+    Say ""
+    switch ($curlKCode) {
+        6  { Say "   → 域名解析失败" }
+        7  { Say "   → TCP 连不上：公司防火墙拦出站？云安全组没放行？" }
+        28 { Say "   → 超时：网络慢、丢包，或有代理在中间" }
+        35 { Say "   → TLS 握手失败：可能有企业中间人代理" }
+        default { Say "   → 未预期错误，输出：$curlKOut" }
+    }
+    Say ""
+    Say "   排查："
+    Say "     Test-NetConnection $($Server.Split(':')[0]) -Port $($Server.Split(':')[1])"
+    Say "     echo `$env:HTTPS_PROXY      ← 有代理时试试设 NO_PROXY"
+    Say ""
+    Say "   详细诊断：powershell -ExecutionPolicy Bypass -File deploy\diag-net.ps1"
     if ($Check) { exit 1 }
 }
 
@@ -297,19 +357,44 @@ try {
     Warn "设置目录权限失败，请手工确认 $AgentDir 不是共享/同步目录"
 }
 
-# CA
-if (-not (Test-Path $CaFile)) {
-    $localCa = Join-Path $HOME "nexus-mesh-deploy\ca.pem"
-    if (Test-Path $localCa) {
-        Copy-Item $localCa $CaFile
-        Ok "CA 已复制（来自 ~\nexus-mesh-deploy）"
-    } else {
-        Bad "找不到 ca.pem"
-        Say "     从服务器取："
-        Say "       scp root@$($Server.Split(':')[0]):/etc/nexus-mesh/tls/ca.pem `"$CaFile`""
-    }
-} else {
+# CA —— **优先从仓库复制，不要求手工粘贴**
+#
+# ⚠ 手工粘贴 PEM 是个可靠的出错方式，实测过两种：
+#   · 记事本存成 UTF-8 BOM → curl 退出码 77（"CA 文件加载不了"）
+#   · 粘贴被截断          → 同样 77
+#   而 77 的提示语里看不出是编码问题，很容易被误判成网络故障。
+#
+# CA 是**公开证书**（不含私钥），本来就该随代码走 —— 放仓库里
+# deploy/ca.pem，脚本直接复制，一次都不用粘。
+$repoCa = Join-Path $PSScriptRoot "ca.pem"
+if (Test-Path $CaFile) {
     Ok "CA 已存在: $CaFile"
+    $sz = (Get-Item $CaFile).Length
+    if ($sz -lt 800) {
+        Warn "但文件只有 $sz 字节（正常约 1200）—— 可能粘贴不完整"
+        if (Test-Path $repoCa) {
+            Copy-Item $repoCa $CaFile -Force
+            Ok "已用仓库里的版本覆盖（$((Get-Item $CaFile).Length) 字节）"
+        }
+    } else {
+        # 检查有没有 BOM —— 有的话 curl 会直接报 77
+        $bytes = [System.IO.File]::ReadAllBytes($CaFile)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            Warn "检测到 UTF-8 BOM —— curl 会因此加载失败（退出码 77）"
+            if (Test-Path $repoCa) {
+                Copy-Item $repoCa $CaFile -Force
+                Ok "已用仓库里的版本覆盖（去掉了 BOM）"
+            }
+        }
+    }
+} elseif (Test-Path $repoCa) {
+    Copy-Item $repoCa $CaFile -Force
+    Ok "CA 已从仓库复制: $CaFile"
+} else {
+    Bad "找不到 ca.pem"
+    Say "     应在仓库里：deploy\ca.pem"
+    Say "     也可从服务器取："
+    Say "       scp root@$($Server.Split(':')[0]):/etc/nexus-mesh/tls/ca.pem `"$CaFile`""
 }
 
 # 凭据
