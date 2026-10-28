@@ -570,6 +570,272 @@ Skill 是通用文档，用的是 `<你的节点ID>` 占位符。所以装完还
 
 技能文档可以共用，**身份不能共用**。
 
+
+---
+
+## 十三、公司电脑作为内网执行者（v0.19）
+
+### 为什么是「执行者」而不是「云上拿 token 去查」
+
+用户的原话点破了核心：
+
+> 这样的方式能够使得不用把公司内部系统的 token 与鉴权信息暴露给云服务器上的
+> Agent，减少了数据泄露风险。
+
+这个论证比"云上存 token 不安全"更准确。真正的区别是：
+
+| 做法 | 云上拥有什么 |
+|---|---|
+| 云上存 token，自己查 | **查询本身的能力** —— 它能查任意东西，只在 token 权限范围内 |
+| 公司电脑当执行者 | 只有**请求查询的能力** —— 它只能说"帮我查 X"，查不查、查多少由内网决定 |
+
+差别不在"token 藏得好不好"，而在**能力边界**。前者的边界是 token 的权限，
+后者的边界是"内网那个 CLI 愿意做什么"。
+
+### 但凭证隔离只解决一半：结果要过云
+
+```
+云上 Agent ──"查 XX 项目本周进度"──> work-laptop 节点
+                                          │ 调公司 CLI（本机凭证）
+云上 Agent <──── 摘要（≤1500 字节）───────┘
+```
+
+凭证没出内网 ✅，但**回传内容会写进云服务器的 `/var/lib/nexus-mesh/queue.db`** ❌。
+
+所以还有第二道闸门。
+
+### ⚠⚠ 「只回传摘要」必须由代码执行，不能靠 prompt
+
+这是 v0.19 最重要的设计判断。在 prompt 里写"只要摘要"是不够的：
+
+* 被提示注入的 Agent 照样会回传原文
+* 而且它自己认为在**配合** —— 不会有任何报错
+
+所以分两层落地：
+
+| 层 | 手段 | 强度 |
+|---|---|---|
+| 行为引导 | `prompt_note` 里写"只要摘要、不要原文" | 弱（可能被绕过） |
+| **硬边界** | `SUMMARY_LIMIT = 1500` 字节，桥接进程截断 | **强** |
+
+截断时末尾留标记（`…（已截断）`），让调用方知道"还有内容没给我"——
+而不是以为那就是全部。
+
+有两条测试守着这个：
+
+* 截断后**总长**（含标记字节）不超上限 —— off-by-N 很容易算错，
+  标记看着 6 个字符，实际 18 字节
+* `SUMMARY_LIMIT` 必须**严格小于** `MAX_ANSWER_BYTES`。
+  两者相等的话，这道闸门就形同不存在
+
+### 工具白名单：这里比云端两个 Agent 更干净
+
+云端 `taskflow` 的 allow 列表含 `exec`/`process`/`write`（未收窄，
+靠矩阵和配额兜）。公司电脑这个节点不同 —— CodeBuddy 支持细粒度白名单：
+
+```bash
+--allowedTools "Bash(projectctl:*)" "Bash(meetingctl:*)" "Read" "Grep"
+```
+
+含义：只能调这两个 CLI、读文件、搜文件。**不能执行任意命令、不能写文件。**
+
+**不给 `--dangerously-skip-permissions`。** 那个参数放开几乎全部权限
+（连 HIGH/CRITICAL 命令都只"可能"拦）。既然能用白名单精确表达，
+就不该用粗放的开关 —— 有测试守着这条（`test_never_skips_permissions`）。
+
+**没有白名单时拒绝启动**，不静默降级。静默降级是最糟的处理：
+节点启动了、能收任务了，但实际拥有全部工具，而运维只看得到"启动成功"。
+
+### `--permission-mode dontAsk`：为什么不是默认
+
+`-p` 是单次执行，没有人会去点权限确认框。默认模式下需要授权的操作会
+**挂起**，直到任务租约过期 —— 那比失败更糟（失败至少能重试）。
+
+`dontAsk` 让它**被拒**，快速失败。
+
+### 实现与部署
+
+| 文件 | 作用 |
+|---|---|
+| `examples/codebuddy_node.py` | 桥接（复用 `agent_bridge_common`） |
+| `deploy/setup-work-laptop.sh` | 本机准备：凭据 / CA / skill / PATH 提示 |
+| `tests/test_codebuddy_node.py` | 26 条，重点在边界而不是"能不能调通" |
+
+步骤：
+
+```bash
+# ① 本机检查（网络 + CodeBuddy + 白名单）
+bash deploy/setup-work-laptop.sh --check
+
+# ② 确认 CodeBuddy 能用（会消耗一点额度）
+python examples/codebuddy_node.py --check-tools
+
+# ③ 注册（会等批准）
+python examples/codebuddy_node.py --dry-run
+
+# ④ 服务器上批准
+nxs ops approve work-laptop --url ... --ca-file ...
+
+# ⑤ 常驻（launchd）
+```
+
+### 矩阵改动（v0.19）
+
+```yaml
+cloud      → zone-work   allow: [..., "work.query", "work.*"]
+zone-work  → cloud       allow: ["work.*", "agent.ask"]
+```
+
+第二条是新加的：原先只放行 `work.*`，意味着公司电脑**不能主动问云端**
+（会被 `MX-DOMAIN-02` 拒）—— 那是单向的。现在双向。
+
+### 一个 shell 坑（中文脚本专属）
+
+`deploy/setup-work-laptop.sh` 里第一版有：
+
+```bash
+ok "协调节点可达（HTTP $code）"     # ✗ 崩在 unbound variable
+```
+
+**shell 把全角括号 `）` 当成了变量名的一部分** → 变量名变成 `code）`，
+未定义，`set -u` 下直接报错。
+
+修法：`${code}`。中文为主的脚本里这个问题很普遍 —— `$var` 后面紧跟
+任何非 ASCII 字符都会犯。写这类脚本时**变量一律加花括号**最省事。
+
+
+---
+
+## 十三、公司电脑作为内网执行者（v0.19）
+
+### 为什么是「执行者」而不是「云上拿 token 去查」
+
+用户的原话点破了核心：
+
+> 这样的方式能够使得不用把公司内部系统的 token 与鉴权信息暴露给云服务器上的
+> Agent，减少了数据泄露风险。
+
+这个论证比"云上存 token 不安全"更准确。真正的区别是：
+
+| 做法 | 云上拥有什么 |
+|---|---|
+| 云上存 token，自己查 | **查询本身的能力** —— 它能查任意东西，只在 token 权限范围内 |
+| 公司电脑当执行者 | 只有**请求查询的能力** —— 它只能说"帮我查 X"，查不查、查多少由内网决定 |
+
+差别不在"token 藏得好不好"，而在**能力边界**。前者的边界是 token 的权限，
+后者的边界是"内网那个 CLI 愿意做什么"。
+
+### 但凭证隔离只解决一半：结果要过云
+
+```
+云上 Agent ──"查 XX 项目本周进度"──> work-laptop 节点
+                                          │ 调公司 CLI（本机凭证）
+云上 Agent <──── 摘要（≤1500 字节）───────┘
+```
+
+凭证没出内网 ✅，但**回传内容会写进云服务器的 `/var/lib/nexus-mesh/queue.db`** ❌。
+
+所以还有第二道闸门。
+
+### ⚠⚠ 「只回传摘要」必须由代码执行，不能靠 prompt
+
+这是 v0.19 最重要的设计判断。在 prompt 里写"只要摘要"是不够的：
+
+* 被提示注入的 Agent 照样会回传原文
+* 而且它自己认为在**配合** —— 不会有任何报错
+
+所以分两层落地：
+
+| 层 | 手段 | 强度 |
+|---|---|---|
+| 行为引导 | `prompt_note` 里写"只要摘要、不要原文" | 弱（可能被绕过） |
+| **硬边界** | `SUMMARY_LIMIT = 1500` 字节，桥接进程截断 | **强** |
+
+截断时末尾留标记（`…（已截断）`），让调用方知道"还有内容没给我"——
+而不是以为那就是全部。
+
+有两条测试守着这个：
+
+* 截断后**总长**（含标记字节）不超上限 —— off-by-N 很容易算错，
+  标记看着 6 个字符，实际 18 字节
+* `SUMMARY_LIMIT` 必须**严格小于** `MAX_ANSWER_BYTES`。
+  两者相等的话，这道闸门就形同不存在
+
+### 工具白名单：这里比云端两个 Agent 更干净
+
+云端 `taskflow` 的 allow 列表含 `exec`/`process`/`write`（未收窄，
+靠矩阵和配额兜）。公司电脑这个节点不同 —— CodeBuddy 支持细粒度白名单：
+
+```bash
+--allowedTools "Bash(projectctl:*)" "Bash(meetingctl:*)" "Read" "Grep"
+```
+
+含义：只能调这两个 CLI、读文件、搜文件。**不能执行任意命令、不能写文件。**
+
+**不给 `--dangerously-skip-permissions`。** 那个参数放开几乎全部权限
+（连 HIGH/CRITICAL 命令都只"可能"拦）。既然能用白名单精确表达，
+就不该用粗放的开关 —— 有测试守着这条（`test_never_skips_permissions`）。
+
+**没有白名单时拒绝启动**，不静默降级。静默降级是最糟的处理：
+节点启动了、能收任务了，但实际拥有全部工具，而运维只看得到"启动成功"。
+
+### `--permission-mode dontAsk`：为什么不是默认
+
+`-p` 是单次执行，没有人会去点权限确认框。默认模式下需要授权的操作会
+**挂起**，直到任务租约过期 —— 那比失败更糟（失败至少能重试）。
+
+`dontAsk` 让它**被拒**，快速失败。
+
+### 实现与部署
+
+| 文件 | 作用 |
+|---|---|
+| `examples/codebuddy_node.py` | 桥接（复用 `agent_bridge_common`） |
+| `deploy/setup-work-laptop.sh` | 本机准备：凭据 / CA / skill / PATH 提示 |
+| `tests/test_codebuddy_node.py` | 26 条，重点在边界而不是"能不能调通" |
+
+步骤：
+
+```bash
+# ① 本机检查（网络 + CodeBuddy + 白名单）
+bash deploy/setup-work-laptop.sh --check
+
+# ② 确认 CodeBuddy 能用（会消耗一点额度）
+python examples/codebuddy_node.py --check-tools
+
+# ③ 注册（会等批准）
+python examples/codebuddy_node.py --dry-run
+
+# ④ 服务器上批准
+nxs ops approve work-laptop --url ... --ca-file ...
+
+# ⑤ 常驻（launchd）
+```
+
+### 矩阵改动（v0.19）
+
+```yaml
+cloud      → zone-work   allow: [..., "work.query", "work.*"]
+zone-work  → cloud       allow: ["work.*", "agent.ask"]
+```
+
+第二条是新加的：原先只放行 `work.*`，意味着公司电脑**不能主动问云端**
+（会被 `MX-DOMAIN-02` 拒）—— 那是单向的。现在双向。
+
+### 一个 shell 坑（中文脚本专属）
+
+`deploy/setup-work-laptop.sh` 里第一版有：
+
+```bash
+ok "协调节点可达（HTTP $code）"     # ✗ 崩在 unbound variable
+```
+
+**shell 把全角括号 `）` 当成了变量名的一部分** → 变量名变成 `code）`，
+未定义，`set -u` 下直接报错。
+
+修法：`${code}`。中文为主的脚本里这个问题很普遍 —— `$var` 后面紧跟
+任何非 ASCII 字符都会犯。写这类脚本时**变量一律加花括号**最省事。
+
 ## 八、同机调试能验什么、不能验什么
 
 **能验**：协议正确性、策略矩阵、边界过滤、失败语义、配额、观察窗数据。
