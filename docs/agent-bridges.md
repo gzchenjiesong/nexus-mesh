@@ -364,6 +364,212 @@ nxs-cli --as hermes-working whoami    # 批准：是
 > 它跑在测试进程里，那个环境本来就没有这些变量，断言永远成立。
 > **测试绿着，漏洞开着。** 现在改成先真的注入再断言。
 
+
+---
+
+## 十二、Skill：让 Agent 知道怎么用 mesh
+
+### 装在哪（两个 Agent 位置不同）
+
+| Agent | 位置 | 加载方式 |
+|---|---|---|
+| Hermes | `/root/.hermes/profiles/<profile>/skills/<分类>/<名>/SKILL.md` | 扫目录 |
+| OpenClaw | `/root/.openclaw/workspace-<agent>/skills/<名>/SKILL.md` | 自己的 `skills install` |
+
+**同一份源文件**（仓库里的 `nexus-mesh-skill.md`），只是复制到不同位置。
+别各维护一份 —— 那会腐化。
+
+```bash
+bash deploy/install-skill.sh            # 装到全部已配置的 Agent
+bash deploy/install-skill.sh --verify   # 只检查，不改动
+```
+
+> ⚠ OpenClaw 的 `skills install` 覆盖已存在的 skill **必须加 `--force`**。
+> 不加时它只打印"已存在"然后退出 —— 脚本看起来成功了，内容还是旧的。
+
+### frontmatter 要两个命名空间
+
+```yaml
+metadata:
+  hermes:
+    tags: [Agent, Collaboration, A2A]
+  openclaw:
+    emoji: "🕸"
+    requires:
+      bins: ["nxs-cli"]     # OpenClaw 会据此检查二进制在不在
+```
+
+漏掉某一个不会报错，只是那一侧的元信息缺失。OpenClaw 那侧的
+`requires.bins` 有用 —— `skills info` 会显示 `Binaries: ✓ nxs-cli`。
+
+### ⚠ skill 是**渐进披露**的，不是全文注入
+
+这是最容易误解的一点。装完不等于 Agent 就"会了"：
+
+1. 系统提示里只有 **name + description**
+2. 全文（那个 SKILL.md）要 Agent **自己主动 read**
+3. 所以 **description 必须写清"什么时候该用它"**
+
+只写"这是 Agent 之间的任务网络"不够 —— Agent 不知道该在何时想起来。
+现在的写法是：
+
+> Nexus Mesh 是 Agent 之间的任务网络。用 nxs-cli 查看自己的身份、
+> 问别的 Agent 问题、发任务、取结果。**当需要跟另一个 Agent 协作、
+> 或需要确认自己在网络里的身份与能力时使用。**
+
+### ⚠ 改完 skill 文件，Agent 不一定立刻用新内容
+
+OpenClaw 的文档明说：`the node host does not watch the skills directory`。
+加上渐进披露的机制，实际表现是：
+
+- 装好之后 Agent "知道有这么个 skill"
+- 但那一次回答可能凭上下文里的旧印象，而不是重读文件
+- **明确要求它读文件**时，它会读到最新版
+
+实测过：同一天先后问两次，第一次引用了旧内容（"问运维 / 看角色卡"），
+第二次明确说"先读 /opt/nexus-mesh/nexus-mesh-skill.md 的全文"之后，
+准确列出了新版的三条途径（含刚加的"别指望 whoami"）。
+
+**结论**：文档写得对不对，比装得对不对更容易出问题。
+所以有 `tests/test_skill_doc.py` 守着。
+
+### 文档里踩过的两个坑（都实测暴露）
+
+**① 断言"桥接已为你设好身份" —— 对 OpenClaw 是假的**
+
+原话："省略 `--as` 时用 `NXS_ACTOR` 环境变量 —— 桥接进程已为你设好。"
+但 OpenClaw 的 exec 跑在常驻 gateway 里，拿不到桥接注入的环境。
+照这段话做会直接失败。
+
+现在改成：先跑 `nxs-cli whoami` 试一次，失败就每条都带 `--as`。
+
+**② 循环依赖 —— 教 Agent 用需要 ID 的命令去查 ID**
+
+原话："若报「无法确定身份」…（先跑 `nxs-cli whoami` 确认自己的节点 ID）"
+
+而 `whoami` **正是因为没 ID 才报错的**。实测 taskflow 复述了这个循环，
+说明它真被误导了。
+
+现在给出 whoami 之外的三种途径：
+
+```bash
+echo $NXS_ACTOR      # ① 有值就直接用（Hermes 一般有）
+```
+② 看 `AGENTS.md` / 系统提示里有没有「你的节点身份是 xxx」
+③ 问运维（他跑 `nxs ops nodes` 能看到全部）
+
+### 还有一件 skill 做不到的事：告诉每个 Agent **它自己的 ID**
+
+Skill 是通用文档，用的是 `<你的节点ID>` 占位符。所以装完还要：
+
+- **Hermes**：`NXS_ACTOR` 环境变量已注入（桥接的子进程），它能自己 `echo`
+- **OpenClaw**：拿不到，要写进它的 `AGENTS.md`（见第九节）
+
+技能文档可以共用，**身份不能共用**。
+
+
+---
+
+## 十二、Skill：让 Agent 知道怎么用 mesh
+
+### 装在哪（两个 Agent 位置不同）
+
+| Agent | 位置 | 加载方式 |
+|---|---|---|
+| Hermes | `/root/.hermes/profiles/<profile>/skills/<分类>/<名>/SKILL.md` | 扫目录 |
+| OpenClaw | `/root/.openclaw/workspace-<agent>/skills/<名>/SKILL.md` | 自己的 `skills install` |
+
+**同一份源文件**（仓库里的 `nexus-mesh-skill.md`），只是复制到不同位置。
+别各维护一份 —— 那会腐化。
+
+```bash
+bash deploy/install-skill.sh            # 装到全部已配置的 Agent
+bash deploy/install-skill.sh --verify   # 只检查，不改动
+```
+
+> ⚠ OpenClaw 的 `skills install` 覆盖已存在的 skill **必须加 `--force`**。
+> 不加时它只打印"已存在"然后退出 —— 脚本看起来成功了，内容还是旧的。
+
+### frontmatter 要两个命名空间
+
+```yaml
+metadata:
+  hermes:
+    tags: [Agent, Collaboration, A2A]
+  openclaw:
+    emoji: "🕸"
+    requires:
+      bins: ["nxs-cli"]     # OpenClaw 会据此检查二进制在不在
+```
+
+漏掉某一个不会报错，只是那一侧的元信息缺失。OpenClaw 那侧的
+`requires.bins` 有用 —— `skills info` 会显示 `Binaries: ✓ nxs-cli`。
+
+### ⚠ skill 是**渐进披露**的，不是全文注入
+
+这是最容易误解的一点。装完不等于 Agent 就"会了"：
+
+1. 系统提示里只有 **name + description**
+2. 全文（那个 SKILL.md）要 Agent **自己主动 read**
+3. 所以 **description 必须写清"什么时候该用它"**
+
+只写"这是 Agent 之间的任务网络"不够 —— Agent 不知道该在何时想起来。
+现在的写法是：
+
+> Nexus Mesh 是 Agent 之间的任务网络。用 nxs-cli 查看自己的身份、
+> 问别的 Agent 问题、发任务、取结果。**当需要跟另一个 Agent 协作、
+> 或需要确认自己在网络里的身份与能力时使用。**
+
+### ⚠ 改完 skill 文件，Agent 不一定立刻用新内容
+
+OpenClaw 的文档明说：`the node host does not watch the skills directory`。
+加上渐进披露的机制，实际表现是：
+
+- 装好之后 Agent "知道有这么个 skill"
+- 但那一次回答可能凭上下文里的旧印象，而不是重读文件
+- **明确要求它读文件**时，它会读到最新版
+
+实测过：同一天先后问两次，第一次引用了旧内容（"问运维 / 看角色卡"），
+第二次明确说"先读 /opt/nexus-mesh/nexus-mesh-skill.md 的全文"之后，
+准确列出了新版的三条途径（含刚加的"别指望 whoami"）。
+
+**结论**：文档写得对不对，比装得对不对更容易出问题。
+所以有 `tests/test_skill_doc.py` 守着。
+
+### 文档里踩过的两个坑（都实测暴露）
+
+**① 断言"桥接已为你设好身份" —— 对 OpenClaw 是假的**
+
+原话："省略 `--as` 时用 `NXS_ACTOR` 环境变量 —— 桥接进程已为你设好。"
+但 OpenClaw 的 exec 跑在常驻 gateway 里，拿不到桥接注入的环境。
+照这段话做会直接失败。
+
+现在改成：先跑 `nxs-cli whoami` 试一次，失败就每条都带 `--as`。
+
+**② 循环依赖 —— 教 Agent 用需要 ID 的命令去查 ID**
+
+原话："若报「无法确定身份」…（先跑 `nxs-cli whoami` 确认自己的节点 ID）"
+
+而 `whoami` **正是因为没 ID 才报错的**。实测 taskflow 复述了这个循环，
+说明它真被误导了。
+
+现在给出 whoami 之外的三种途径：
+
+```bash
+echo $NXS_ACTOR      # ① 有值就直接用（Hermes 一般有）
+```
+② 看 `AGENTS.md` / 系统提示里有没有「你的节点身份是 xxx」
+③ 问运维（他跑 `nxs ops nodes` 能看到全部）
+
+### 还有一件 skill 做不到的事：告诉每个 Agent **它自己的 ID**
+
+Skill 是通用文档，用的是 `<你的节点ID>` 占位符。所以装完还要：
+
+- **Hermes**：`NXS_ACTOR` 环境变量已注入（桥接的子进程），它能自己 `echo`
+- **OpenClaw**：拿不到，要写进它的 `AGENTS.md`（见第九节）
+
+技能文档可以共用，**身份不能共用**。
+
 ## 八、同机调试能验什么、不能验什么
 
 **能验**：协议正确性、策略矩阵、边界过滤、失败语义、配额、观察窗数据。
