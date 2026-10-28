@@ -19,6 +19,9 @@ import pytest
 
 from conftest import REPO_ROOT, covers
 
+#: deploy 目录（本文件里几个测试要检查部署脚本）
+DEPLOY = REPO_ROOT / "deploy"
+
 sys.path.insert(0, str(REPO_ROOT))
 
 from examples.agent_bridge_common import (  # noqa: E402
@@ -516,3 +519,183 @@ class TestWindowsCompat:
         assert "codebuddy.cmd" in src
         # PATH 优先
         assert "shutil.which" in src
+
+
+class TestCredentialResolution:
+    """★★ 凭据读取：三个真实踩过的坑。
+
+    ⚠ 用户报「我已经取了 64 位值，但提示缺节点密钥」——
+    背后其实是三个 bug 叠在一起，每个都会造成同一个症状。
+    """
+
+    @staticmethod
+    def _mk(tmp, lines, *, bom=False, name="work-desktop.env"):
+        from pathlib import Path
+        p = Path(tmp) / name
+        body = "\n".join(lines) + "\n"
+        data = body.encode("utf-8")
+        if bom:
+            data = b"\xef\xbb\xbf" + data
+        p.write_bytes(data)
+        return p
+
+    @covers("M14.F9")
+    def test_bom_file_is_readable(self):
+        """★ UTF-8 BOM 的凭据文件必须能读。
+
+        **这是最可能的现场原因。**
+
+        Windows PowerShell 5.1 的 ``Set-Content -Encoding UTF8``
+        **会写 BOM**。用纯 ``utf-8`` 读时，BOM 留在第一个键名前面：
+
+            '\\ufeffNXS_NODE_ID' → 而代码找的是 'NXS_NODE_ID'
+
+        于是 ``NXS_NODE_ID`` 取不到，文件"明明存在、内容也对"却读不到。
+
+        修法：``read_text(encoding="utf-8-sig")`` —— 自动剥 BOM，
+        对没有 BOM 的文件行为完全一致，是安全的兼容写法。
+        """
+        import shutil
+        import tempfile
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from nxs.cli.actor import _parse_env_file
+
+        tmp = Path(tempfile.mkdtemp(prefix="nxs-bom-"))
+        try:
+            p = self._mk(tmp, [
+                "NXS_NODE_ID=work-desktop",
+                "NXS_SECRET=" + "x" * 64,
+            ], bom=True)
+            vals = _parse_env_file(p)
+            assert "NXS_NODE_ID" in vals, (
+                f"BOM 没剥掉，键名是 {list(vals)} —— "
+                f"PowerShell 的 -Encoding UTF8 就会写出这种文件"
+            )
+            assert vals["NXS_NODE_ID"] == "work-desktop"
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @covers("M14.F9")
+    def test_resolve_reports_reason_not_just_empty(self):
+        """★ 取不到密钥时必须给出**原因**，不能只返回空串。
+
+        `except Exception: return ""` 会把 ``load_actor`` 那几条
+        很有信息量的诊断（文件不存在 / 缺键 / 列出目录下现有身份）
+        全部吞掉，用户只看到「缺节点密钥」—— 而实际原因可能是
+        四种完全不同的问题。
+        """
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        from examples.codebuddy_node import _resolve_secret
+
+        tmp = Path(tempfile.mkdtemp(prefix="nxs-nocred-"))
+        old = __import__("os").environ.get("NXS_ACTOR_DIR")
+        __import__("os").environ["NXS_ACTOR_DIR"] = str(tmp)
+        __import__("os").environ.pop("NXS_SECRET_WORK_DESKTOP", None)
+        try:
+            secret, reason = _resolve_secret("work-desktop")
+            assert not secret
+            assert reason, "没给失败原因"
+            # 原因里应该提到找不到 / 路径
+            assert "work-desktop" in reason or "凭据" in reason
+        finally:
+            if old is None:
+                __import__("os").environ.pop("NXS_ACTOR_DIR", None)
+            else:
+                __import__("os").environ["NXS_ACTOR_DIR"] = old
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @covers("M14.F9")
+    def test_credential_hint_matches_load_actor(self):
+        """★ 提示里的路径必须与实际查找逻辑一致。
+
+        ⚠ 这里原来手写了个 ``~/.nexus-mesh/agents``，而 ``load_actor``
+        用 ``NXS_ACTOR_DIR or /etc/nexus-mesh/agents``。两者在没设
+        环境变量时**指向完全不同的地方** —— 于是提示让人把文件放到 A，
+        代码去 B 里找，永远对不上。
+
+        **提示不能另写一份路径逻辑，必须复用实际查找的那套。**
+        """
+        import re
+
+        from examples.codebuddy_node import _credential_hint
+
+        hint = _credential_hint("work-desktop")
+        assert hint.endswith("work-desktop.env"), f"提示路径不对：{hint}"
+
+        # 实际查找逻辑里的默认目录必须出现在提示中
+        src = (REPO_ROOT / "examples" / "codebuddy_node.py").read_text(encoding="utf-8")
+        m = re.search(r"def _credential_hint.*?return", src, re.S)
+        assert m and "DEFAULT_ACTOR_DIR" in m.group(0), (
+            "提示没有复用 load_actor 的默认目录 —— 会与真实查找逻辑分叉"
+        )
+
+
+class TestActorDirIsAgentDir:
+    """★★ ``NXS_ACTOR_DIR`` 指的是「装 .env 的那个目录」。
+
+    ⚠ 部署脚本初版把它设成了 ``~/.nexus-mesh``（上一级），
+    而凭据文件按提示放在 ``~/.nexus-mesh/agents/work-desktop.env``。
+
+    于是 ``load_actor`` 去找：
+
+        ~/.nexus-mesh/work-desktop.env      ← 差一层，永远不存在
+
+    而用户看到的现象是"文件明明在那儿，就是读不到"。
+
+    ## 约定从哪来
+
+    服务器上 ``NXS_ACTOR_DIR`` 未设，代码用默认值
+    ``/etc/nexus-mesh/agents``，而凭据就在 ``/etc/nexus-mesh/agents/*.env``。
+    也就是说这个变量名里的 "DIR" 指的是**装凭据文件的目录本身**。
+    """
+
+    @covers("M14.F9")
+    def test_ps1_sets_actor_dir_to_agent_dir(self):
+        """ps1 必须把 NXS_ACTOR_DIR 设成 $AgentDir，不是 $ConfDir。"""
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        # 找 envPairs 里那一行
+        line = next((l for l in text.splitlines()
+                     if '"NXS_ACTOR_DIR"' in l and "=" in l), "")
+        assert line, "找不到 NXS_ACTOR_DIR 的设置"
+        assert "$AgentDir" in line, (
+            f"NXS_ACTOR_DIR 没有指向 $AgentDir：{line.strip()}\n"
+            f"  它必须指向装 .env 的目录，不是它的上一级"
+        )
+        assert "$ConfDir" not in line, (
+            f"NXS_ACTOR_DIR 指向了 $ConfDir（上一级）—— 差一层目录：{line.strip()}"
+        )
+
+    @covers("M14.F9")
+    def test_bash_sets_actor_dir_to_agent_dir(self):
+        """bash 版同样。"""
+        text = (DEPLOY / "setup-work-node.sh").read_text(encoding="utf-8")
+        # 提示里 export 的那行
+        hits = [l for l in text.splitlines()
+                if "NXS_ACTOR_DIR" in l and "AGENT_DIR" in l]
+        assert hits, "bash 版没有把 NXS_ACTOR_DIR 指向 AGENT_DIR"
+
+    @covers("M14.F9")
+    def test_conf_dir_not_read_from_actor_dir(self):
+        """★ 配置根目录不能从 NXS_ACTOR_DIR 读 —— 那是 agents 目录。
+
+        初版 ``CONF_DIR="${NXS_ACTOR_DIR:-$HOME/.nexus-mesh}"`` 把两者
+        混成一个变量。如果用户已经正确设了 NXS_ACTOR_DIR（指向 agents），
+        再跑脚本就会得到 ``agents/agents``。
+        """
+        sh = (DEPLOY / "setup-work-node.sh").read_text(encoding="utf-8")
+        assert 'CONF_DIR="${NXS_CONF_DIR' in sh, (
+            "CONF_DIR 应该读 NXS_CONF_DIR，而不是 NXS_ACTOR_DIR"
+        )
+
+        ps = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        conf_line = next((l for l in ps.splitlines()
+                          if l.strip().startswith("$ConfDir") and "=" in l), "")
+        assert "NXS_CONF_DIR" in conf_line, (
+            f"$ConfDir 应该读 NXS_CONF_DIR：{conf_line.strip()}"
+        )

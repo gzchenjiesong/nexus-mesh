@@ -95,9 +95,24 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     """
     out: dict[str, str] = {}
     try:
-        raw = path.read_text(encoding="utf-8")
+        # ⚠ 必须用 ``utf-8-sig``，不能只用 ``utf-8``。
+        #
+        #   Windows PowerShell 5.1 的 ``Set-Content -Encoding UTF8``
+        #   **会写 BOM**（EF BB BF）。用纯 utf-8 读时，BOM 会留在第一个
+        #   键名前面 —— 于是 ``NXS_NODE_ID`` 变成 ``\ufeffNXS_NODE_ID``，
+        #   键名永远匹配不上。
+        #
+        #   而症状是"文件明明存在、内容也对，就是读不到" ——
+        #   排查时几乎不会想到编码。``utf-8-sig`` 会自动剥掉 BOM，
+        #   对没有 BOM 的文件行为完全一致（是安全的兼容写法）。
+        raw = path.read_text(encoding="utf-8-sig")
     except OSError as exc:
         raise ConfigError(f"读不到凭据文件 {path}：{exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(
+            f"凭据文件 {path} 不是 UTF-8 编码：{exc}\n"
+            f"  用记事本另存为 UTF-8，或改用 Set-Content -Encoding ASCII"
+        ) from exc
 
     for lineno, line in enumerate(raw.splitlines(), 1):
         stripped = line.strip()

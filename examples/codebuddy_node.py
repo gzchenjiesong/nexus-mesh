@@ -425,20 +425,209 @@ def _actor_env(node_id: str) -> dict[str, str]:
     return env
 
 
-def _secret_for(node_id: str) -> str:
-    """取本节点的网格凭据（优先凭据文件，环境变量兜底）。"""
-    try:
-        from nxs.cli.actor import load_actor
+def _resolve_secret(node_id: str) -> tuple[str, str]:
+    """取本节点的网格凭据，返回 ``(密钥, 失败原因)``。
 
-        return load_actor(node_id).secret.decode("utf-8")
-    except Exception:  # noqa: BLE001
-        return os.environ.get(
-            "NXS_SECRET_" + node_id.upper().replace("-", "_"), "")
+    ⚠ **不要用 ``except Exception: return ""`` 吞掉错误。**
+
+    这里原来就是那么写的，后果是：用户明明建了凭据文件，脚本只报
+    「缺节点密钥」—— 而真正的原因可能是
+
+      · 文件建在了别的目录（默认目录是 ``/etc/nexus-mesh/agents``，
+        Windows 上会变成 ``C:/etc/nexus-mesh/agents``）
+      · 文件名对不上（``work_desktop.env`` vs ``work-desktop.env``）
+      · 内容是 UTF-8 BOM 的（PowerShell 5.1 的 -Encoding UTF8 就会）
+      · 缺 NXS_SECRET 这一行
+
+    这四种情况的修法完全不同，而"缺节点密钥"一个都指不出来。
+
+    所以：把 ``load_actor`` 的诊断信息原样带出去。
+    """
+    from nxs.cli.actor import load_actor
+
+    env_var = "NXS_SECRET_" + node_id.upper().replace("-", "_")
+
+    # ① 先试凭据文件（生产路径）
+    file_error = ""
+    try:
+        secret = load_actor(node_id).secret.decode("utf-8")
+        if secret:
+            return secret, ""
+        file_error = "凭据文件里 NXS_SECRET 是空的"
+    except Exception as exc:  # noqa: BLE001
+        # 保留原始消息 —— load_actor 的报错很有信息量
+        # （会列出目录下现有哪些身份文件）
+        file_error = str(exc)
+
+    # ② 环境变量兜底（本地调试方便）
+    env_secret = os.environ.get(env_var, "")
+    if env_secret:
+        return env_secret, ""
+
+    return "", file_error
+
+
+def _secret_for(node_id: str) -> str:
+    """只要密钥（不需要诊断时的简化版）。"""
+    return _resolve_secret(node_id)[0]
+
+
+def _credential_hint(node_id: str) -> str:
+    """给出凭据文件应该放在哪 —— **与 load_actor 用同一套规则**。
+
+    ⚠ 之前这里手写了个 ``~/.nexus-mesh/agents``，而 ``load_actor`` 的
+    默认值是 ``/etc/nexus-mesh/agents``。在 Windows 上前者是
+    ``C:\\Users\\X\\.nexus-mesh\\agents``，后者是
+    ``C:\\etc\\nexus-mesh\\agents`` —— 两个完全不同的地方。
+
+    于是提示让人把文件放到 A，代码去 B 里找，永远对不上。
+    **提示里的路径必须来自实际查找逻辑，不能另写一份。**
+    """
+    from nxs.cli.actor import DEFAULT_ACTOR_DIR
+
+    directory = Path(os.environ.get("NXS_ACTOR_DIR") or DEFAULT_ACTOR_DIR)
+    # ⚠ 只返回路径，不掺杂说明。
+    #
+    #   初版把「（注意：没设 NXS_ACTOR_DIR……）」拼进了返回值里，
+    #   于是这个函数既像"取路径"又像"给提示"，调用方没法干净地用。
+    #   数据就是数据，提示由调用方逐行打印。
+    return str(directory / f"{node_id}.env")
+
+
+def _actor_dir_is_default() -> bool:
+    """是否在用代码的默认凭据目录（即用户没设 NXS_ACTOR_DIR）。"""
+    return not os.environ.get("NXS_ACTOR_DIR")
 
 
 # ---------------------------------------------------------------------------
 # 自检
 # ---------------------------------------------------------------------------
+
+def check_credential(node_id: str, logger: logging.Logger) -> int:
+    """检查凭据文件的完整状态。**只读，不连网。**
+
+    ⚠ 为什么需要单独一条命令：
+
+    凭据读不到有四种原因，修法完全不同 ——
+
+    ==============================  ==========================
+    原因                             修法
+    ==============================  ==========================
+    文件在该在的地方不存在             换目录 / 建文件
+    文件名对不上（下划线 vs 连字符）    改名
+    内容有 UTF-8 BOM                 重写为 ASCII
+    缺 NXS_SECRET 这一行             补上
+    ==============================  ==========================
+
+    而"缺节点密钥"这五个字一个都指不出来。所以给它一条专门的命令，
+    把每层的实际状态都摆出来。
+    """
+    from nxs.cli.actor import DEFAULT_ACTOR_DIR, _parse_env_file
+
+    env_var = "NXS_SECRET_" + node_id.upper().replace("-", "_")
+    actor_dir = os.environ.get("NXS_ACTOR_DIR")
+    directory = Path(actor_dir or DEFAULT_ACTOR_DIR)
+    path = directory / f"{node_id}.env"
+
+    logger.info("节点 ID  : %s", node_id)
+    logger.info("凭据目录 : %s%s", directory,
+                "" if actor_dir else "  ← 来自代码默认值（NXS_ACTOR_DIR 未设）")
+    logger.info("目标文件 : %s", path)
+    logger.info("")
+
+    ok = True
+
+    # ① 目录
+    if directory.is_dir():
+        logger.info("  ✓ 凭据目录存在")
+        existing = sorted(p.stem for p in directory.glob("*.env"))
+        if existing:
+            logger.info("    目录下现有身份：%s", existing)
+            if node_id not in existing:
+                logger.warning("    ⚠ 里面没有 %r —— 文件名对不上？", node_id)
+                similar = [e for e in existing
+                           if e.replace("_", "-") == node_id.replace("_", "-")]
+                if similar:
+                    logger.warning("      有名字相似的文件：%s"
+                                   "（下划线 vs 连字符？）", similar)
+                ok = False
+        else:
+            logger.info("    目录下还没有任何 .env 文件")
+            ok = False
+    else:
+        logger.error("  ✗ 凭据目录不存在：%s", directory)
+        logger.error("    → 部署脚本会创建它，或手工：mkdir \"%s\"", directory)
+        ok = False
+
+    # ② 文件
+    if not path.is_file():
+        logger.error("  ✗ 凭据文件不存在")
+        ok = False
+    else:
+        logger.info("  ✓ 凭据文件存在（%d 字节）", path.stat().st_size)
+
+        # ③ BOM
+        raw = path.read_bytes()
+        if raw.startswith(b"\xef\xbb\xbf"):
+            logger.warning("    ⚠ 文件带 UTF-8 BOM —— 老版本会因此读不到第一个键")
+            logger.warning("      （现在已兼容，但建议重写为 ASCII 更干净）")
+
+        # ④ 解析
+        try:
+            vals = _parse_env_file(path)
+            keys = sorted(vals)
+            logger.info("    解析出的键：%s", keys)
+            for need in ("NXS_NODE_ID", "NXS_SECRET"):
+                if need not in vals:
+                    logger.error("    ✗ 缺 %s", need)
+                    ok = False
+                elif not vals[need]:
+                    logger.error("    ✗ %s 是空的", need)
+                    ok = False
+            if "NXS_NODE_ID" in vals and vals["NXS_NODE_ID"] != node_id:
+                logger.warning("    ⚠ 文件里的 NXS_NODE_ID=%r 与节点 ID %r 不一致",
+                               vals["NXS_NODE_ID"], node_id)
+            if "NXS_SECRET" in vals:
+                s = vals["NXS_SECRET"]
+                logger.info("    NXS_SECRET 长度 %d（正常应为 64）%s",
+                            len(s), "" if len(s) == 64 else "  ← 长度不对")
+                if len(s) != 64:
+                    ok = False
+        except Exception as exc:  # noqa: BLE001
+            logger.error("    ✗ 解析失败：%s", exc)
+            ok = False
+
+    # ⑤ 整体判定（走真实代码路径）
+    logger.info("")
+    secret, err = _resolve_secret(node_id)
+    if secret:
+        logger.info("  ✓ 能取到密钥（%d 字节）—— 凭据可用", len(secret))
+        return 0
+
+    logger.error("  ✗ 取不到密钥")
+    if err:
+        for line in err.splitlines():
+            logger.error("    %s", line)
+    logger.error("")
+    logger.error("  环境变量兜底：$env:%s = %r", env_var,
+                 "（未设）" if not os.environ.get(env_var) else "（已设）")
+    logger.error("")
+    logger.error("  修法（PowerShell，把 <密钥> 换成你取到的 64 位值）：")
+    logger.error("    $secret = \"<密钥>\"")
+    logger.error("    $dir = \"%s\"", directory)
+    logger.error("    New-Item -ItemType Directory -Force -Path $dir | Out-Null")
+    logger.error("    @(")
+    logger.error("      \"NXS_NODE_ID=%s\"", node_id)
+    logger.error("      \"NXS_COORDINATOR_URL=%s\"",
+                 os.environ.get("NXS_COORDINATOR_URL", "https://<IP>:18800/nxs"))
+    logger.error("      \"NXS_CA_FILE=<ca.pem 路径>\"")
+    logger.error("      \"NXS_SECRET=$secret\"")
+    logger.error("    ) | Set-Content -Path (Join-Path $dir \"%s.env\") -Encoding ASCII",
+                 node_id)
+    logger.error("")
+    logger.error("  ⚠ -Encoding ASCII 是必须的：UTF8 会加 BOM")
+    return 1
+
 
 def check_tools(bin_path: str, logger: logging.Logger) -> int:
     """确认 CodeBuddy 能用。**注册之前必须先过这一关。**
@@ -535,6 +724,9 @@ def main() -> int:
                              "默认只给 1500 字节摘要 —— 见模块文档")
     parser.add_argument("--check-tools", action="store_true",
                         help="只检查 CodeBuddy 是否可用，不注册节点")
+    parser.add_argument("--check-credential", action="store_true",
+                        help="只检查凭据文件状态（在哪找、找到什么、有什么问题），"
+                             "不连接任何服务")
     parser.add_argument("--dry-run", action="store_true",
                         help="探活 + 注册，不进入领任务循环")
     parser.add_argument("--verbose", "-v", action="store_true")
@@ -547,6 +739,9 @@ def main() -> int:
     )
     log = logging.getLogger("codebuddy-node")
 
+    if args.check_credential:
+        return check_credential(args.node_id, log)
+
     if args.check_tools:
         return check_tools(args.bin, log)
 
@@ -555,12 +750,14 @@ def main() -> int:
     #   用户实际踩过：先报"缺 --url"，设好再跑，又报"缺凭据"，
     #   再设好，又报"缺白名单" —— 三次往返。
     #   而且只说"缺 X"没说"该怎么给"，等于把排查成本推给用户。
+    secret, secret_error = _resolve_secret(args.node_id)
+
     missing: list[tuple[str, str]] = []
     if not args.url:
         missing.append(("协调节点地址", "NXS_COORDINATOR_URL"))
     if not os.environ.get("CODEBUDDY_ALLOWED_TOOLS") and not args.allowed_tool:
         missing.append(("工具白名单", "CODEBUDDY_ALLOWED_TOOLS"))
-    if not _secret_for(args.node_id):
+    if not secret:
         missing.append(("节点密钥", f"NXS_SECRET_{args.node_id.upper().replace('-', '_')}"))
 
     if missing:
@@ -579,15 +776,29 @@ def main() -> int:
             log.error("  [工具白名单] 推荐这一组（够 Agent 自主查数据）：")
             log.error("    $env:CODEBUDDY_ALLOWED_TOOLS = \"Read,Grep,Glob,Bash,WebFetch\"")
         if any(v.startswith("NXS_SECRET_") for _, v in missing):
-            log.error("  [节点密钥] 在服务器上取，然后写进凭据文件：")
-            log.error("    # 服务器上：grep NXS_SECRET_%s /etc/nexus-mesh/nxs.env",
-                      args.node_id.upper().replace("-", "_"))
-            # 用 Path 拼路径，不要手写分隔符 —— 否则 Windows 上会混出
-            # "/Users/x/.nexus-mesh\agents" 这种半半拉拉的样子。
-            actor_dir = os.environ.get("NXS_ACTOR_DIR") or str(
-                Path.home() / ".nexus-mesh")
-            cred_path = Path(actor_dir) / "agents" / f"{args.node_id}.env"
-            log.error("    # 本机：%s 里写 NXS_SECRET=<取到的值>", cred_path)
+            log.error("  [节点密钥]")
+            if secret_error:
+                # ★ 把 load_actor 的原始诊断原样带出来。
+                #   它会说明是"文件不存在"还是"缺键"还是"内容矛盾"，
+                #   并列出目录下现有哪些身份文件 —— 这些信息足够定位。
+                for line in secret_error.splitlines():
+                    log.error("    %s", line)
+                log.error("")
+            log.error("    期望位置：%s", _credential_hint(args.node_id))
+            if _actor_dir_is_default():
+                log.error("      ⚠ 没设 NXS_ACTOR_DIR，上面是代码的默认值（服务器路径）。")
+                log.error("        部署脚本 -WriteEnv 会把它设成 ~/.nexus-mesh/agents")
+            log.error("    文件内容应为四行（KEY=VALUE）：")
+            log.error("      NXS_NODE_ID=%s", args.node_id)
+            log.error("      NXS_COORDINATOR_URL=%s",
+                      args.url or "https://<服务器IP>:18800/nxs")
+            log.error("      NXS_CA_FILE=<ca.pem 的绝对路径>")
+            log.error("      NXS_SECRET=<从服务器取到的 64 位值>")
+            log.error("")
+            log.error("    ⚠ 写文件时的两个坑：")
+            log.error("      · 别用 -Encoding UTF8（PowerShell 5.1 会加 BOM，")
+            log.error("        导致第一个键名读不到）→ 用 -Encoding ASCII")
+            log.error("      · 文件名必须正好是 %s.env", args.node_id)
         log.error("")
         log.error("或者让部署脚本一次写好（它会校验 CA、CodeBuddy、白名单）：")
         log.error("  powershell -ExecutionPolicy Bypass -File deploy\\setup-work-node.ps1 -WriteEnv")

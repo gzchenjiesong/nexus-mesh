@@ -35,7 +35,24 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ConfDir   = if ($env:NXS_ACTOR_DIR) { $env:NXS_ACTOR_DIR } else { Join-Path $HOME ".nexus-mesh" }
+# ⚠ 两个目录必须分清 —— 这里错一次就会导致"凭据文件明明存在却读不到"。
+#
+#   $ConfDir   = ~/.nexus-mesh            （配置根目录）
+#   $AgentDir  = ~/.nexus-mesh/agents     （存放 <节点>.env 的目录）
+#
+# 而环境变量 NXS_ACTOR_DIR 指的是 **$AgentDir**，不是 $ConfDir。
+# 因为 load_actor() 是这么用的：
+#     directory = NXS_ACTOR_DIR or /etc/nexus-mesh/agents
+#     path = directory / f"{name}.env"
+# 也就是说它把 NXS_ACTOR_DIR 当成"装 .env 的那个目录"。
+#
+# 初版把 NXS_ACTOR_DIR 设成了 $ConfDir（上一级），于是代码去
+# ~/.nexus-mesh/work-desktop.env 找，而用户按提示把文件放在
+# ~/.nexus-mesh/agents/work-desktop.env —— 差一层目录，永远找不到。
+#
+# 服务器上的约定可以印证：NXS_ACTOR_DIR 未设，代码默认
+# /etc/nexus-mesh/agents，而凭据就在 /etc/nexus-mesh/agents/*.env。
+$ConfDir   = if ($env:NXS_CONF_DIR) { $env:NXS_CONF_DIR } else { Join-Path $HOME ".nexus-mesh" }
 $AgentDir  = Join-Path $ConfDir "agents"
 $CaFile    = Join-Path $ConfDir "ca.pem"
 $CredFile  = Join-Path $AgentDir "$NodeId.env"
@@ -733,7 +750,8 @@ Say ""
 #   接着跑桥接就报「缺少 --url 或 NXS_COORDINATOR_URL」。
 #   提示不等于配置 —— 要么做，要么说清"这需要你自己执行"。
 $envPairs = [ordered]@{
-    "NXS_ACTOR_DIR"        = $ConfDir
+    # ⚠ 是 $AgentDir（装 .env 的目录），不是 $ConfDir —— 见文件头的说明
+    "NXS_ACTOR_DIR"        = $AgentDir
     "NXS_COORDINATOR_URL"  = $ServerUrl
     "NXS_CA_FILE"          = $CaFile
     "NXS_NODE_ID"          = $NodeId

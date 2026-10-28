@@ -20,7 +20,16 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONF_DIR="${NXS_ACTOR_DIR:-$HOME/.nexus-mesh}"
+# ⚠ 两个目录必须分清（与 ps1 版同一个坑）：
+#     CONF_DIR  = ~/.nexus-mesh          配置根目录
+#     AGENT_DIR = ~/.nexus-mesh/agents   装 <节点>.env 的目录
+#   而环境变量 NXS_ACTOR_DIR 指的是 **AGENT_DIR**，因为 load_actor()
+#   把它当成"装 .env 的那个目录"：path = NXS_ACTOR_DIR / "<name>.env"
+#
+#   bash 版这里原来读的是 NXS_ACTOR_DIR 当 conf 目录用 ——
+#   而下方的提示又正确地写 export NXS_ACTOR_DIR="$AGENT_DIR"。
+#   两处不一致，等于自己跟自己打架。现在统一到 NXS_CONF_DIR。
+CONF_DIR="${NXS_CONF_DIR:-$HOME/.nexus-mesh}"
 AGENT_DIR="$CONF_DIR/agents"
 SERVER="${NXS_SERVER:-43.138.222.206:18800}"
 NODE_ID="${NXS_NODE_ID:-work-desktop}"
