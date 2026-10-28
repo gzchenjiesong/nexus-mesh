@@ -90,6 +90,7 @@ from nxs.sdk import NodeClient, NodeConfig
 from examples.agent_bridge_common import (
     DEFAULT_TIMEOUT,
     MAX_ANSWER_BYTES,
+    TEXT_KWARGS,
     make_ask_handler,
     run_subprocess,
     scrub_secrets,
@@ -296,7 +297,8 @@ def audit_tools(node: str, cli: str, agent_id: str, logger: logging.Logger) -> i
     try:
         result = subprocess.run(
             [node, cli, "sandbox", "explain", "--agent", agent_id],
-            capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL,
+            capture_output=True, **TEXT_KWARGS, timeout=90,
+            stdin=subprocess.DEVNULL,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.error("查询失败：%s", exc)
@@ -407,7 +409,7 @@ def main() -> int:
         probe = subprocess.run(
             build_cmd(args.node_bin, args.cli, args.agent_id,
                       "只回复两个字：就绪"),
-            capture_output=True, text=True,
+            capture_output=True, **TEXT_KWARGS,
             timeout=min(args.timeout, 120), stdin=subprocess.DEVNULL,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:

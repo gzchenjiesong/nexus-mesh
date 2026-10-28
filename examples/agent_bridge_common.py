@@ -63,6 +63,34 @@ MAX_QUESTION_CHARS = 4000
 #: 单次调用的默认超时（秒）。实测简单问答 9-10 秒，
 #: 给到 180 秒是为了容纳"检索 + 归纳"这类活。
 #: 超时就判失败，**不要无限等** —— 任务的租约在这种情况下会被调用方视为卡住。
+#: ``subprocess`` 文本模式**必须**用的编码参数。
+#:
+#: ⚠⚠ **Windows 上这是硬性要求，否则 json 模式必然失败。**
+#:
+#: ``text=True`` 不指定 ``encoding`` 时，Python 用**系统 locale 编码**
+#: 解码子进程输出。Windows 中文系统上是 ``cp936``（GBK）。
+#: 而 CodeBuddy 输出的是 **UTF-8**，于是：
+#:
+#:   ① 中文被解成乱码：「就绪」→「灏辩华」
+#:      （UTF-8 字节 E5 B0 B1 E7 BB AA 被 GBK 逐对解码的产物）
+#:
+#:   ② JSON 里有非 GBK 字节时**直接抛异常**：
+#:        UnicodeDecodeError: 'gbk' codec can't decode byte 0x94
+#:      而这个异常发生在 subprocess 的**读取线程**里 ——
+#:      主线程拿到的是空 stdout，于是报「输出为空」
+#:
+#: 第 ② 种最恶劣：**看起来像"程序没输出"，实际是解码崩了。**
+#: 实测 Windows 现场：text 模式出乱码，json 模式 stdout 0 字节 +
+#: stderr 0 字节，完全看不出是编码问题。
+#:
+#: ``errors="replace"``：万一遇到真的非 UTF-8 输出，替换成 U+FFFD
+#: 而不是抛异常 —— 宁可看到带占位符的内容，也不要拿不到任何内容。
+TEXT_KWARGS: dict[str, object] = {
+    "text": True,
+    "encoding": "utf-8",
+    "errors": "replace",
+}
+
 DEFAULT_TIMEOUT = 180
 
 #: runner 的签名：吃一个问题，吐一段文字。
@@ -274,7 +302,7 @@ def run_subprocess(
             # Windows + .cmd/.bat 时必须经 cmd.exe，否则 WinError 193
             normalize_command(cmd),
             capture_output=True,
-            text=True,
+            **TEXT_KWARGS,
             timeout=timeout,
             # 不给 stdin：这些都是单次调用模式，读不到输入正好，
             # 免得意外进入交互等待

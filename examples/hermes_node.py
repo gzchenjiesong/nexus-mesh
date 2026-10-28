@@ -82,6 +82,7 @@ from nxs.sdk import NodeClient, NodeConfig
 from examples.agent_bridge_common import (  # noqa: F401 - 部分符号供外部导入
     DEFAULT_TIMEOUT,
     MAX_ANSWER_BYTES,
+    TEXT_KWARGS,
     MAX_QUESTION_CHARS,
     TRUNCATION_MARK,
     build_prompt as _build_prompt_common,
@@ -293,7 +294,7 @@ def probe(hermes_cmd: list[str], *, timeout: int,
     try:
         result = subprocess.run(
             [*hermes_cmd, "只回复两个字：就绪"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, **TEXT_KWARGS, timeout=timeout,
             stdin=subprocess.DEVNULL,
             env=_hermes_env(hermes_home, node_id),
             cwd=hermes_home if Path(hermes_home).is_dir() else None,

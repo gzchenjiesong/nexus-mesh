@@ -64,7 +64,8 @@ def drill_cli() -> None:
     for cmd in commands:
         result = subprocess.run(
             [sys.executable, "-m", "nxs", cmd, "--help"],
-            cwd=ROOT, capture_output=True, text=True, timeout=60,
+            cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=60,
         )
         check(f"nxs {cmd} --help", result.returncode == 0,
               f"rc={result.returncode}")

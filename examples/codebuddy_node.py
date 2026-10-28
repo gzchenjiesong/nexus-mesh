@@ -85,6 +85,7 @@ from nxs.sdk import NodeClient, NodeConfig
 from examples.agent_bridge_common import (
     DEFAULT_TIMEOUT,
     SUMMARY_LIMIT,
+    TEXT_KWARGS,
     make_ask_handler,
     run_subprocess,
     scrub_secrets,
@@ -920,7 +921,7 @@ def _probe_once(bin_path: str, args: list[str], *, timeout: int,
     cmd = [bin_path, *args]
     logger.debug("执行：%s", " ".join(cmd))
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
+        r = subprocess.run(cmd, capture_output=True, **TEXT_KWARGS,
                            timeout=timeout, stdin=subprocess.DEVNULL,
                            # ⚠ **必须传清理过的环境。**
                            #   不传就继承父进程的完整环境 —— 而桥接跑在
@@ -1044,7 +1045,7 @@ def _available_in_noninteractive_shell(bin_path: str) -> bool:
         name = Path(bin_path).name
         try:
             r = _sp.run(["/bin/sh", "-c", f"command -v {name}"],
-                        capture_output=True, text=True, timeout=15,
+                        capture_output=True, **TEXT_KWARGS, timeout=15,
                         env={"HOME": str(Path.home()), "PATH": system_path})
         except (OSError, _sp.TimeoutExpired):
             return True
@@ -1145,7 +1146,7 @@ def _keychain_codebuddy_entries() -> tuple[bool, str]:
 
     try:
         r = _sp.run(["security", "dump-keychain"], capture_output=True,
-                    text=True, timeout=20)
+                    **TEXT_KWARGS, timeout=20)
     except (OSError, _sp.TimeoutExpired):
         return False, ""
 
