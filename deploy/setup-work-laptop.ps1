@@ -55,38 +55,100 @@ Say ""
 Say "-> Python（桥接是 Python 程序，必须 >= 3.11）"
 $Py = $null
 $PyVer = $null
+
+# ⚠ Windows 上探测 Python 有两个真实的坑，都必须处理：
+#
+# ① **Microsoft Store 存根**：系统自带的 `python.exe` 可能是个重解析点
+#    （在 %LOCALAPPDATA%\Microsoft\WindowsApps\ 下），跑它会**弹出应用商店**。
+#    那不是 Python，却会占住 `python` 这个命令名 —— 看起来像"装了但用不了"。
+#
+# ② **卡住**：某些环境下跑存根或 py 启动器会长时间无响应。脚本如果直接
+#    `& python -c ...`，就会静默卡死 —— 用户只看到输出停在某一行，
+#    既没有报错也没有进展。
+#
+# 所以：跳过 WindowsApps、带硬超时、并且**先打印再执行**（卡住时能定位）。
+
+# 把探测脚本写成临时文件，而不是内联 `-c "..."`。
+# 理由：内联要处理引号转义与括号嵌套，一旦编码或转义出问题就崩在解析阶段，
+# 而报错位置指向别处。写成文件后完全没有这层风险。
+$probeFile = Join-Path $env:TEMP "nxs_pyver_probe.py"
+$outFile   = Join-Path $env:TEMP "nxs_pyver_out.txt"
+$errFile   = Join-Path $env:TEMP "nxs_pyver_err.txt"
+Set-Content -Path $probeFile -Encoding ASCII `
+    -Value 'import sys; print("%d.%d" % sys.version_info[:2])'
+
 foreach ($cand in @("python", "python3", "py")) {
     $exe = Get-Command $cand -ErrorAction SilentlyContinue
     if (-not $exe) { continue }
 
-    # 用**单引号**包 Python 代码：PowerShell 单引号内不做任何展开，
-    # 里面的引号、括号、$ 都是字面量 —— 不会像双引号那样参与解析。
-    # （原来用双引号 + 嵌套括号，一旦文件编码出问题就崩在解析阶段。）
-    $code = 'import sys; print(str(sys.version_info[0]) + "." + str(sys.version_info[1]))'
+    # ① 跳过 Microsoft Store 存根
+    if ($exe.Source -like "*\WindowsApps\*") {
+        Warn "$cand 是 Microsoft Store 存根（不是真的 Python），跳过"
+        continue
+    }
 
+    Say "   试 $cand -> $($exe.Source)"
+
+    # ② 带硬超时地跑一次。Start-Process 而不是 `&`：
+    #    `&` 没有超时，卡住就永远卡住。
     $raw = $null
-    try { $raw = & $exe.Source -c $code 2>$null } catch { continue }
-    if (-not $raw) { continue }
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath $exe.Source -ArgumentList @($probeFile) `
+            -NoNewWindow -PassThru `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        if (-not $proc.WaitForExit(8000)) {
+            try { $proc.Kill() } catch { }
+            Warn "$cand 超过 8 秒无响应，跳过"
+            continue
+        }
+        if (Test-Path $outFile) { $raw = (Get-Content $outFile -Raw) }
+    } catch {
+        Warn "$cand 跑不起来：$($_.Exception.Message)"
+        continue
+    } finally {
+        if ($proc -and -not $proc.HasExited) { try { $proc.Kill() } catch { } }
+    }
+
+    if (-not $raw) {
+        # 常见于 py 启动器没装 Python、或存根返回空
+        $errText = ""
+        if (Test-Path $errFile) { $errText = (Get-Content $errFile -Raw) }
+        if ($errText -and $errText.Trim()) {
+            Warn "$cand 无输出（$($errText.Trim().Split([char]10)[0])）"
+        } else {
+            Warn "$cand 无输出，跳过"
+        }
+        continue
+    }
 
     $verText = ([string]$raw).Trim()
 
-    # 不用 [version] 强转 —— 它能接受 "3.11" 但遇到多余空白或后缀就抛异常，
-    # 而那个异常会被 catch 吞掉，看起来像"版本不够"。分段比较更直白。
+    # 不用 [version] 强转 —— 它遇多余空白或后缀就抛异常，
+    # 而异常会被 catch 吞掉，看起来像"版本不够"。分段比较更直白。
     $parts = $verText.Split('.')
-    if ($parts.Length -lt 2) { continue }
+    if ($parts.Length -lt 2) { Warn "$cand 版本格式异常：$verText"; continue }
     $major = 0; $minor = 0
     if (-not [int]::TryParse($parts[0], [ref]$major)) { continue }
     if (-not [int]::TryParse($parts[1], [ref]$minor)) { continue }
 
     $versionOk = ($major -gt 3) -or (($major -eq 3) -and ($minor -ge 11))
     if ($versionOk) {
+        # 存**完整路径**而不是命令名 —— 计划任务启动时 PATH 可能与终端不同，
+        # 存命令名会导致"手工能跑、任务报找不到 python"。
         $Py = $exe.Source
         $PyVer = $verText
-        Ok "$cand -> $PyVer"
+        Ok "$cand -> ${PyVer}（$($exe.Source)）"
         break
     }
     Warn "$cand -> ${verText}（需要 3.11+）"
 }
+
+# 清掉临时文件（失败也不管，不影响流程）
+foreach ($f in @($probeFile, $outFile, $errFile)) {
+    try { if (Test-Path $f) { Remove-Item $f -Force } } catch { }
+}
+
 if (-not $Py) {
     Bad "没有可用的 Python 3.11+"
     Say ""

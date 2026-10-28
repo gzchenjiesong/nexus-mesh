@@ -375,3 +375,206 @@ class TestPowerShellFragility:
         assert "$Py = $exe.Source" in code, (
             "$Py 应存可执行文件的完整路径（$exe.Source），而不是命令名"
         )
+
+
+class TestPythonDetectionRobustness:
+    """★ Windows 上探测 Python 的两个真实陷阱。
+
+    用户第一次跑就在这一节停住了（输出停在「凭据目录」之后，
+    Python 检测那一段既没报错也没进展）。这两个坑都会造成那种症状。
+    """
+
+    path = DEPLOY / "setup-work-laptop.ps1"
+
+    def _text(self) -> str:
+        return self.path.read_bytes().decode("utf-8-sig")
+
+    @covers("M14.F8")
+    def test_skips_microsoft_store_stub(self):
+        """★ 必须跳过 `WindowsApps` 下的 python.exe。
+
+        系统自带的 `python.exe` 常常是个**重解析点**（App Execution Alias），
+        跑它会弹应用商店。它占着 `python` 这个命令名，但不是真的 Python ——
+        用户看到"python 能命令补全"就会以为装了。
+
+        不跳过的话，最坏情况是弹窗 + 卡住；最好情况也是白跑一次。
+        """
+        text = self._text()
+        assert "WindowsApps" in text, (
+            "没跳过 Microsoft Store 存根 —— 它会弹应用商店/卡住，"
+            "而用户会以为 Python 装好了"
+        )
+
+    @covers("M14.F8")
+    def test_probe_has_timeout(self):
+        """★ 探测必须有硬超时。
+
+        `& python -c ...` 卡住时没有任何机制能救 —— 脚本永远停在那里，
+        用户看到的是"输出到某一行就不动了"，既无报错也无进展。
+
+        用 Start-Process + WaitForExit(毫秒) 才有超时能力。
+        """
+        text = self._text()
+        assert "WaitForExit(" in text, (
+            "没有超时机制 —— 探测卡住时脚本会永远停住，"
+            "而这正是用户第一次跑遇到的症状"
+        )
+        assert "Kill()" in text, "超时后要把子进程杀掉，否则残留"
+
+    @covers("M14.F8")
+    def test_probe_script_in_file_not_inline(self):
+        """★ 探测代码写成临时文件，不用内联 `-c "..."`。
+
+        内联要处理引号转义 + 括号嵌套，任何一处编码/转义出错都会崩在
+        **解析阶段**，而报错位置往往指向几十行之外（BOM 那个坑就是这样）。
+
+        写成 `.py` 文件后，PowerShell 只传一个路径，没有转义问题。
+        """
+        text = self._text()
+        assert "nxs_pyver_probe.py" in text
+
+        # 只检查**代码行** —— 注释里举例说明 `& python -c ...` 是正常的，
+        # 那是在解释为什么不用它。
+        import re
+        code = "\n".join(l for l in text.splitlines()
+                         if not l.lstrip().startswith("#"))
+        assert not re.search(r"&\s*\S+\s+-c\s", code), (
+            "代码里还有内联 -c 调用 —— 应改为临时文件"
+        )
+
+    @covers("M14.F8")
+    def test_prints_progress_before_probing(self):
+        """★ 探测前先打印，卡住时能定位。
+
+        用户第一次的问题就是"不知道卡在哪"。`Say` 在读 Python 之前执行，
+        所以最后一行输出就是卡住的位置。
+        """
+        text = self._text()
+        idx_say = text.find("试 $cand")
+        idx_probe = text.find("Start-Process -FilePath $exe.Source")
+        assert idx_say > 0 and idx_probe > 0
+        assert idx_say < idx_probe, (
+            "进度输出应在实际探测之前 —— 否则卡住时一行提示都没有"
+        )
+
+
+class TestPowerShellQuoting:
+    """★ 引号必须配对 —— 不配对会让 PowerShell 直接解析失败。
+
+    ⚠ 这是我自己写出来的真错误：在 `diag-python.ps1` 里写了
+
+        Write-Host "  ⚠ 别点系统弹的"应用商店"里那个 ……"
+
+    中文里习惯用引号强调某个词，但在 PowerShell 双引号字符串里，
+    那个引号会**提前结束字符串**，后面的内容被当成代码 → 解析失败。
+
+    而且它和 BOM 那个坑联合起来最难查：解析器一旦在某个字符串里迷路，
+    后面几百行都会被误读，报错位置跟真正的问题毫无关系。
+
+    修法：字符串里要强调就用「」或单引号，不要用 ASCII 双引号。
+    """
+
+    paths = [DEPLOY / "setup-work-laptop.ps1", DEPLOY / "diag-python.ps1"]
+
+    @covers("M14.F8")
+    def test_all_scripts_have_bom(self):
+        """diag 脚本也一样要 BOM。"""
+        for p in self.paths:
+            if not p.exists():
+                continue
+            assert p.read_bytes().startswith(b"\xef\xbb\xbf"), f"{p.name} 缺 BOM"
+
+    @covers("M14.F8")
+    def test_no_var_followed_by_nonascii(self):
+        """所有 ps1 都不能有 `$var` 紧跟非 ASCII 的问题。
+
+        ⚠ 这个坑我犯了**三次**（ver / verText / PyVer / first）——
+        每次都是"写中文说明时顺手加了括号"。
+        所以它不是一次性修完就完事，必须有测试一直守着。
+        """
+        import re
+        for p in self.paths:
+            if not p.exists():
+                continue
+            text = p.read_bytes().decode("utf-8-sig")
+            bad = re.findall(r"\$([A-Za-z_]\w*)(?=[^\x00-\x7F])", text)
+            assert not bad, (
+                f"{p.name}: 这些变量后面紧跟非 ASCII，会被吞进变量名："
+                f"{sorted(set(bad))}"
+            )
+
+    @covers("M14.F8")
+    def test_double_quotes_even_per_line(self):
+        """每行代码的未转义双引号必须是偶数。
+
+        奇数意味着字符串没有正常闭合 —— PowerShell 会从那里开始
+        把后面的代码当成字符串内容，报出一堆位置错误的解析异常。
+        """
+        for p in self.paths:
+            if not p.exists():
+                continue
+            text = p.read_bytes().decode("utf-8-sig")
+            for idx, line in enumerate(text.splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                # 只看 # 之前的部分（行内注释不算）
+                hashpos = line.find("#")
+                code_part = line[:hashpos] if hashpos >= 0 else line
+                j, n, cnt = 0, len(code_part), 0
+                while j < n:
+                    if code_part[j] == "`":      # 反引号转义
+                        j += 2
+                        continue
+                    if code_part[j] == '"':
+                        if j + 1 < n and code_part[j + 1] == '"':  # "" 是字面引号
+                            j += 2
+                            continue
+                        cnt += 1
+                    j += 1
+                assert cnt % 2 == 0, (
+                    f"{p.name} 第 {idx} 行双引号不成对（{cnt} 个）："
+                    f"{line.strip()[:70]}\n"
+                    f"  字符串里的强调改用「」或单引号，别用 ASCII 双引号"
+                )
+
+
+class TestDiagScript:
+    """独立的诊断脚本：setup 卡住时先用它定位。"""
+
+    path = DEPLOY / "diag-python.ps1"
+
+    @covers("M14.F8")
+    def test_exists(self):
+        """★ 必须有独立的 Python 诊断脚本。
+
+        用户第一次跑 setup 就停在 Python 检测那一段，而主脚本太长 ——
+        在那个上下文里排查很费劲。一个只查 Python 的短脚本能 5 秒给出答案。
+        """
+        assert self.path.exists(), "缺 diag-python.ps1"
+
+    @covers("M14.F8")
+    def test_reports_store_stub(self):
+        """要说清"存根 ≠ Python"。
+
+        用户看到 `python` 命令存在，会认为已经装了 —— 而那可能只是
+        Microsoft Store 的转发存根。
+        """
+        text = self.path.read_bytes().decode("utf-8-sig")
+        assert "WindowsApps" in text
+        assert "存根" in text
+
+    @covers("M14.F8")
+    def test_lists_path_candidates(self):
+        """要把 PATH 里所有 python.exe 都列出来。
+
+        这样用户能自己看出"装了两个版本"或"只装了个存根"。
+        """
+        text = self.path.read_bytes().decode("utf-8-sig")
+        assert "PATH" in text
+        assert "python.exe" in text
+
+    @covers("M14.F8")
+    def test_has_timeout(self):
+        """诊断脚本本身也不能卡住 —— 否则失去意义。"""
+        text = self.path.read_bytes().decode("utf-8-sig")
+        assert "WaitForExit(" in text
