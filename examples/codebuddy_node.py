@@ -782,6 +782,89 @@ def _report_probe(label: str, ok: bool, out: str, err: str, rc: int,
                      "但没往 stdout 写东西）")
 
 
+def _system_default_path() -> str | None:
+    """取系统级默认 PATH（与交互式 shell 无关）。取不到返回 None。"""
+    entries: list[str] = []
+    paths_file = Path("/etc/paths")
+    if paths_file.is_file():
+        try:
+            entries += [ln.strip() for ln in
+                        paths_file.read_text(encoding="utf-8").splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")]
+        except OSError:
+            return None
+    # /etc/paths.d 里的补充（homebrew 等会写这里）
+    d = Path("/etc/paths.d")
+    if d.is_dir():
+        try:
+            for f in sorted(d.iterdir()):
+                try:
+                    entries += [ln.strip() for ln in
+                                f.read_text(encoding="utf-8").splitlines()
+                                if ln.strip()]
+                except OSError:
+                    continue
+        except OSError:
+            pass
+    if not entries:
+        return None
+    # 常见的用户级 bin 也加上（但**不含** .zshrc 才加的目录）——
+    # 这里刻意不加 ~/.local/bin：它就是我们要检测的嫌疑对象
+    for extra in ("/opt/homebrew/bin", "/usr/local/bin"):
+        if extra not in entries:
+            entries.append(extra)
+    return ":".join(entries)
+
+
+def _available_in_noninteractive_shell(bin_path: str) -> bool:
+    """检查这个 codebuddy **能不能被非交互环境找到**。
+
+    ## 为什么要专门检查这个
+
+    macOS/Linux 上，用户常把 CLI 装在 ``~/.local/bin``，靠 ``~/.zshrc``
+    把它加进 PATH。而 ``.zshrc`` **只对交互式 shell 生效**。
+
+    常驻节点由 launchd / systemd / 计划任务拉起，是**非交互**环境，
+    只认 ``/etc/paths`` 这类系统级配置 —— 于是服务一启动就
+    ``command not found``。
+
+    最恶劣的症状：手动跑 ``--check-tools`` 全绿，装成服务后每条任务都失败。
+
+    ## 判定方式（一个容易写错的地方）
+
+    ⚠ **不能只看 `command -v <name>`。** 那样只要名字出现在系统 PATH 的
+    *任意* 目录里就返回真 —— 即使传入的路径在 ``~/.local/bin``。
+    实测过：先建了 ``/opt/homebrew/bin/codebuddy`` 软链接，
+    再检查 ``~/.local/bin/codebuddy``，两者都返回 True，检查形同虚设。
+
+    正确做法：看**这个路径所在的目录**在不在系统默认 PATH 里。
+    """
+    import subprocess as _sp
+
+    system_path = _system_default_path()
+    if system_path is None:
+        return True   # 判断不了就不误报
+
+    bin_dir = str(Path(bin_path).resolve().parent)
+    # 软链接的原目标可能在别处，所以两个都算（软链接本身所在的目录
+    # 才是"被找到"的关键，用未 resolve 的父目录）
+    link_dir = str(Path(bin_path).parent)
+
+    dirs = system_path.split(":")
+    if link_dir in dirs or bin_dir in dirs:
+        # 目录在系统 PATH 里 —— 再确认真的能 command -v 到
+        name = Path(bin_path).name
+        try:
+            r = _sp.run(["/bin/sh", "-c", f"command -v {name}"],
+                        capture_output=True, text=True, timeout=15,
+                        env={"HOME": str(Path.home()), "PATH": system_path})
+        except (OSError, _sp.TimeoutExpired):
+            return True
+        return r.returncode == 0 and bool((r.stdout or "").strip())
+
+    return False
+
+
 def _detect_cli_auth() -> dict:
     """探测 **CLI 自己**的登录状态，返回 ``{"ok", "summary", "detail"}``。
 
@@ -949,6 +1032,34 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
     #   所以先在 keychain / 凭据管理器里找 CLI 自己的那条；
     #   找不到就说明 CLI 没登录过，直接给两条路，不用浪费一次调用去试。
     auth_hint = _detect_cli_auth()
+    # ---- 检查"非交互环境能不能找到它" ----
+    #
+    # ⚠ 这是个真踩到的坑，而且很隐蔽：
+    #
+    #   codebuddy 若只装在 `~/.local/bin`，而 PATH 是靠 `~/.zshrc` 加的，
+    #   那么**只有交互式终端能用**。
+    #   `.zshrc` 只在交互式 shell 里被读取 ——
+    #   而常驻节点是计划任务/launchd 拉起来的，那是**非交互环境**，
+    #   根本不读 `.zshrc`，于是 `codebuddy: command not found`。
+    #
+    #   症状：手动跑 `--dry-run` 一切正常，装成服务后全挂。
+    #   （macOS 实测：/etc/paths 里没有 ~/.local/bin，
+    #     干净 login shell 也找不到它）
+    #
+    #   修法：放进 /etc/paths 里已有的目录（如 /usr/local/bin、/opt/homebrew/bin），
+    #         或软链接过去。
+    if not _available_in_noninteractive_shell(bin_path):
+        logger.warning("")
+        logger.warning("⚠ %s 只在**交互式终端**里可用", bin_path)
+        logger.warning("   常驻节点由计划任务/launchd 拉起，那是非交互环境，")
+        logger.warning("   PATH 不读 ~/.zshrc —— 服务启动后会 command not found。")
+        logger.warning("")
+        logger.warning("   修法（选一个）：")
+        logger.warning("     sudo ln -sf %s /usr/local/bin/  # 需 sudo", bin_path)
+        logger.warning("     ln -sf %s /opt/homebrew/bin/    # Apple Silicon 免 sudo",
+                       bin_path)
+        logger.warning("")
+
     logger.info("认证方式：%s", auth_hint["summary"])
 
     # ⚠ 预检**只在该阻断时阻断**。

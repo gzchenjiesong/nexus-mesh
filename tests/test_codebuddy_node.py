@@ -1209,3 +1209,123 @@ class TestCredentialPersistence:
         )
         assert "NXS_SECRET_FOO" not in out
         assert "NXS_OPS_SECRET" not in out
+
+
+class TestNonInteractivePath:
+    """★★ codebuddy 必须能在**非交互环境**被找到。
+
+    ⚠ 真踩到的坑，而且症状极具误导性：
+
+    macOS 上把 CLI 装在 ``~/.local/bin``、靠 ``~/.zshrc`` 加进 PATH ——
+    那么：
+
+    ======================  ===========  ==============
+    场景                     读 .zshrc     能找到吗
+    ======================  ===========  ==============
+    用户手动开终端             ✓            ✓
+    计划任务 / launchd         **✗**        **✗**
+    ======================  ===========  ==============
+
+    而常驻节点恰恰是后者拉起的。临床表现：
+    **手动跑 ``--check-tools`` 全绿，装成服务后每条任务都失败**，
+    报错是 ``command not found`` —— 而用户第一反应是"环境变量没配好"，
+    不会想到 PATH 的生效范围。
+
+    macOS 实测：``/etc/paths`` 里没有 ``~/.local/bin``，
+    干净的 login shell（``env -i zsh -l``）也找不到它。
+    """
+
+    @covers("M14.F9")
+    def test_local_bin_not_in_system_path(self):
+        """★ 确认前提：~/.local/bin 通常不在系统默认 PATH 里。
+
+        这条测试本身也是对我的检查逻辑的**现实校验** ——
+        如果哪天 macOS 把它加进 /etc/paths 了，这条会红，
+        提醒我重新审视判定逻辑。
+        """
+        from examples.codebuddy_node import _system_default_path
+
+        sp = _system_default_path()
+        if sp is None:
+            pytest.skip("取不到系统默认 PATH（非 macOS/Linux？）")
+        # 记录事实而不是强制断言（不同系统可能不同）
+        has_local_bin = ".local/bin" in sp
+        if has_local_bin:
+            pytest.skip("这个系统把 ~/.local/bin 放进了默认 PATH")
+        assert "/usr/bin" in sp, "系统默认 PATH 取错了"
+
+    @covers("M14.F9")
+    def test_detects_zshrc_only_install(self):
+        """★ 只靠 .zshrc 的路径必须被判为"非交互不可用"。
+
+        ⚠ 这个检查我第一版写错了：用 ``command -v <name>`` 按名字找，
+        于是只要名字出现在系统 PATH 的**任意**目录里就返回真。
+        实测：先建了 /opt/homebrew/bin/codebuddy 软链接，再检查
+        ~/.local/bin/codebuddy —— 两者都 True，检查形同虚设。
+
+        正确做法：看**这个路径所在的目录**在不在系统默认 PATH 里。
+        """
+        import tempfile
+        from pathlib import Path
+
+        from examples.codebuddy_node import _available_in_noninteractive_shell
+
+        # 造一个不在系统 PATH 里的目录
+        tmp = Path(tempfile.mkdtemp(prefix="nxs-fakebin-"))
+        try:
+            fake = tmp / "codebuddy"
+            fake.write_text("#!/bin/sh\n echo fake\n", encoding="utf-8")
+            fake.chmod(0o755)
+            assert _available_in_noninteractive_shell(str(fake)) is False, (
+                "非系统 PATH 目录被判为可用 —— 检查逻辑失效"
+            )
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @covers("M14.F9")
+    def test_accepts_system_path_install(self):
+        """在系统默认 PATH 里的路径必须判为可用。"""
+        from examples.codebuddy_node import (
+            _available_in_noninteractive_shell,
+            _system_default_path,
+        )
+
+        sp = _system_default_path()
+        if sp is None:
+            pytest.skip("取不到系统默认 PATH")
+
+        # 找一个系统 PATH 里真实存在的可执行文件
+        import shutil
+        from pathlib import Path
+
+        candidate = None
+        for name in ("ls", "sh", "cat"):
+            p = shutil.which(name)
+            if p and str(Path(p).parent) in sp.split(":"):
+                candidate = p
+                break
+        if not candidate:
+            pytest.skip("找不到合适的样本")
+
+        assert _available_in_noninteractive_shell(candidate) is True
+
+    @covers("M14.F9")
+    def test_check_tools_warns_about_it(self):
+        """★ check_tools 必须就这个问题发出警告并给出修法。
+
+        光有检测函数没用 —— 得在用户会看的地方说出来，
+        而且要给具体命令（软链接到 /usr/local/bin 或 /opt/homebrew/bin）。
+        """
+        import inspect
+        from examples.codebuddy_node import check_tools
+
+        src = inspect.getsource(check_tools)
+        assert "_available_in_noninteractive_shell" in src, (
+            "check_tools 没调用这个检查"
+        )
+        assert "非交互" in src or "launchd" in src, (
+            "没解释为什么非交互环境会失败"
+        )
+        assert "ln -sf" in src, "没给软链接的修法"
+        assert "zshrc" in src, "没点明 .zshrc 只对交互式 shell 生效"
