@@ -550,8 +550,47 @@ def main() -> int:
     if args.check_tools:
         return check_tools(args.bin, log)
 
+    # ⚠ 一次把**所有**缺失项列出来，而不是查到哪个说哪个。
+    #
+    #   用户实际踩过：先报"缺 --url"，设好再跑，又报"缺凭据"，
+    #   再设好，又报"缺白名单" —— 三次往返。
+    #   而且只说"缺 X"没说"该怎么给"，等于把排查成本推给用户。
+    missing: list[tuple[str, str]] = []
     if not args.url:
-        log.error("缺少 --url 或 NXS_COORDINATOR_URL")
+        missing.append(("协调节点地址", "NXS_COORDINATOR_URL"))
+    if not os.environ.get("CODEBUDDY_ALLOWED_TOOLS") and not args.allowed_tool:
+        missing.append(("工具白名单", "CODEBUDDY_ALLOWED_TOOLS"))
+    if not _secret_for(args.node_id):
+        missing.append(("节点密钥", f"NXS_SECRET_{args.node_id.upper().replace('-', '_')}"))
+
+    if missing:
+        log.error("配置不完整 —— 缺 %d 项：", len(missing))
+        for i, (what, var) in enumerate(missing, 1):
+            log.error("  %d) %s  →  环境变量 %s", i, what, var)
+        log.error("")
+        log.error("最快的做法：先把这几项设进当前窗口，再重跑本命令。")
+
+        # 只打印**这一项**的值从哪来，不打印密钥本身
+        log.error("")
+        if any(v == "NXS_COORDINATOR_URL" for _, v in missing):
+            log.error("  [协调节点地址] 用部署脚本报的那个，形如：")
+            log.error("    $env:NXS_COORDINATOR_URL = \"https://<服务器IP>:18800/nxs\"")
+        if any(v == "CODEBUDDY_ALLOWED_TOOLS" for _, v in missing):
+            log.error("  [工具白名单] 推荐这一组（够 Agent 自主查数据）：")
+            log.error("    $env:CODEBUDDY_ALLOWED_TOOLS = \"Read,Grep,Glob,Bash,WebFetch\"")
+        if any(v.startswith("NXS_SECRET_") for _, v in missing):
+            log.error("  [节点密钥] 在服务器上取，然后写进凭据文件：")
+            log.error("    # 服务器上：grep NXS_SECRET_%s /etc/nexus-mesh/nxs.env",
+                      args.node_id.upper().replace("-", "_"))
+            # 用 Path 拼路径，不要手写分隔符 —— 否则 Windows 上会混出
+            # "/Users/x/.nexus-mesh\agents" 这种半半拉拉的样子。
+            actor_dir = os.environ.get("NXS_ACTOR_DIR") or str(
+                Path.home() / ".nexus-mesh")
+            cred_path = Path(actor_dir) / "agents" / f"{args.node_id}.env"
+            log.error("    # 本机：%s 里写 NXS_SECRET=<取到的值>", cred_path)
+        log.error("")
+        log.error("或者让部署脚本一次写好（它会校验 CA、CodeBuddy、白名单）：")
+        log.error("  powershell -ExecutionPolicy Bypass -File deploy\\setup-work-node.ps1 -WriteEnv")
         return 2
 
     # 工具白名单：命令行优先，其次环境变量

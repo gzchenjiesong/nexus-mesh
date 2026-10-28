@@ -27,6 +27,9 @@
 param(
     [switch]$Check,                 # 只检查，不改动
     [switch]$InstallTask,           # 顺便创建计划任务（常驻）
+    [switch]$WriteEnv,              # 把环境变量真正写入用户级（永久）
+    [string]$AllowedTools = $(if ($env:CODEBUDDY_ALLOWED_TOOLS) { $env:CODEBUDDY_ALLOWED_TOOLS } else { "" }),
+    [string]$ExtraDirs = $(if ($env:CODEBUDDY_EXTRA_DIRS) { $env:CODEBUDDY_EXTRA_DIRS } else { "" })
     [string]$NodeId = $(if ($env:NXS_NODE_ID) { $env:NXS_NODE_ID } else { "work-desktop" }),
     [string]$Server = $(if ($env:NXS_SERVER) { $env:NXS_SERVER } else { "43.138.222.206:18800" })
 )
@@ -676,11 +679,50 @@ if ($InstallTask) {
 Say ""
 Say "-> 接下来"
 Say ""
-Say "  1) 设环境变量（永久，用户级）："
-Say ""
-Say '     [Environment]::SetEnvironmentVariable("NXS_ACTOR_DIR", "' + $AgentDir + '", "User")'
-Say '     [Environment]::SetEnvironmentVariable("NXS_COORDINATOR_URL", "' + $ServerUrl + '", "User")'
-Say '     [Environment]::SetEnvironmentVariable("NXS_CA_FILE", "' + $CaFile + '", "User")'
+# 环境变量：要么真写进去，要么明确告诉用户"这只是打印"。
+#
+# ⚠ 之前的版本**只打印命令、不写入**，于是用户跑完 setup 以为配好了，
+#   接着跑桥接就报「缺少 --url 或 NXS_COORDINATOR_URL」。
+#   提示不等于配置 —— 要么做，要么说清"这需要你自己执行"。
+$envPairs = [ordered]@{
+    "NXS_ACTOR_DIR"        = $ConfDir
+    "NXS_COORDINATOR_URL"  = $ServerUrl
+    "NXS_CA_FILE"          = $CaFile
+    "NXS_NODE_ID"          = $NodeId
+    "CODEBUDDY_BIN"        = $CbPath
+    "CODEBUDDY_WORKDIR"    = $RepoDir
+}
+if ($AllowedTools) { $envPairs["CODEBUDDY_ALLOWED_TOOLS"] = $AllowedTools }
+if ($ExtraDirs)    { $envPairs["CODEBUDDY_EXTRA_DIRS"]   = $ExtraDirs }
+
+if ($WriteEnv) {
+    Say "  1) 环境变量（**已写入用户级，新开的窗口生效**）："
+    Say ""
+    foreach ($k in $envPairs.Keys) {
+        $v = $envPairs[$k]
+        if (-not $v) { continue }
+        [Environment]::SetEnvironmentVariable($k, $v, "User")
+        # 同时设进当前进程，方便紧接着的命令能用
+        Set-Item -Path "Env:$k" -Value $v
+        Say ("     {0} = {1}" -f $k, $v)
+    }
+    Say ""
+    Say "     ⚠ 当前窗口已生效；**别的新窗口要重开一次**才读到。"
+} else {
+    Say "  1) 环境变量（**下面只是打印，没有写入**）："
+    Say ""
+    Say "     要自动写入用户级，重跑本脚本加 -WriteEnv："
+    Say ""
+    Say "       powershell -ExecutionPolicy Bypass -File deploy\setup-work-node.ps1 -WriteEnv"
+    Say ""
+    Say "     或者手工执行："
+    Say ""
+    foreach ($k in $envPairs.Keys) {
+        $v = $envPairs[$k]
+        if (-not $v) { continue }
+        Say ('       [Environment]::SetEnvironmentVariable("{0}", "{1}", "User")' -f $k, $v)
+    }
+}
 Say ""
 Say "  2) 确认 CodeBuddy 能用（会消耗一点额度）："
 Say ""

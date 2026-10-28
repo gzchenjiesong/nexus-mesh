@@ -344,18 +344,80 @@ class TestRefusesToStartWithoutWhitelist:
 
     @covers("M14.F8")
     def test_whitelist_from_env(self, monkeypatch):
-        """环境变量方式也要能配（部署时更省事）。"""
+        """环境变量方式也要能配（部署时更省事）。
+
+        ⚠ 这里要同时给全**三样**：url / 白名单 / 凭据。
+        只给白名单的话，新的"一次列全缺失项"逻辑仍会返回 2 ——
+        因为密钥也没有。那是对的：配置不全就该统一报 2，
+        好过一条一条试。
+        """
         import examples.codebuddy_node as mod
+
+        # 造一份凭据文件（避免依赖真实密钥）
+        #
+        # ⚠ 不用 pytest 的 tmp_path —— 沙箱的 sitecustomize 拦了 Path.mkdir，
+        #   那个夹具会报 FileExistsError。用 tempfile 自己建。
+        import shutil
+        import tempfile
+
+        from pathlib import Path
+
+        tmp = Path(tempfile.mkdtemp(prefix="nxs-cb-"))
+        # ⚠ NXS_ACTOR_DIR 指向**凭据目录本身**，不是父目录。
+        #   load_actor 自己不再套一层 agents/。
+        actor_dir = tmp
+        (actor_dir / "work-desktop.env").write_text(
+            "NXS_NODE_ID=work-desktop\n"
+            "NXS_COORDINATOR_URL=https://x/nxs\n"
+            f"NXS_SECRET={'s' * 64}\n",
+            encoding="utf-8")
 
         monkeypatch.setattr(sys, "argv", [
             "codebuddy_node.py", "--url", "https://x/nxs", "--dry-run",
         ])
         monkeypatch.setenv("CODEBUDDY_ALLOWED_TOOLS", "Read,Grep")
-        monkeypatch.setenv("NXS_SECRET_WORK_LAPTOP", "s" * 64)
-        # 会往下走到探活，那里找不到 codebuddy 二进制 → 返回 1
-        # 关键是**不是 2**（2 = 白名单缺失）
+        monkeypatch.setenv("NXS_ACTOR_DIR", str(tmp))
+        monkeypatch.delenv("CODEBUDDY_BIN", raising=False)
+        try:
+            # 三样齐了 → 越过配置检查，往下走到探活。
+            # 探活找不到 codebuddy 二进制 → 返回 1（而不是 2 = 配置不全）
+            rc = mod.main()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        assert rc == 1, "配置齐全后应当越过配置检查，进入探活阶段"
+
+    @covers("M14.F8")
+    def test_lists_all_missing_at_once(self, monkeypatch, caplog):
+        """★ 缺配置时要**一次列全**，不要让用户一条一条试。
+
+        用户实际踩过：先报"缺 --url"，设好再跑又报"缺凭据"，
+        再设好又报"缺白名单" —— 三次往返。
+
+        而且只说"缺 X"不说"该怎么给"，等于把排查推给用户。
+        """
+        import examples.codebuddy_node as mod
+
+        monkeypatch.setattr(sys, "argv", ["codebuddy_node.py", "--dry-run"])
+        for v in ("NXS_COORDINATOR_URL", "CODEBUDDY_ALLOWED_TOOLS",
+                  "NXS_ACTOR_DIR", "NXS_NODE_ID"):
+            monkeypatch.delenv(v, raising=False)
+
+        import logging as _logging
+        caplog.set_level(_logging.ERROR)
+
         rc = mod.main()
-        assert rc == 1, "有了白名单就应当越过启动检查"
+        assert rc == 2
+
+        # ⚠ logging 默认走 handler 到 stderr，capsys 抓不到 —— 用 caplog
+        err = caplog.text
+        # 三项都要提到（不能只报第一个）
+        assert "NXS_COORDINATOR_URL" in err
+        assert "CODEBUDDY_ALLOWED_TOOLS" in err
+        assert "NXS_SECRET_WORK_DESKTOP" in err
+        # 要给"怎么设"的示例，不只是"缺什么"
+        assert "env:" in err or "SetEnvironmentVariable" in err or "$env:" in err
+        # 要指向一键写好的办法
+        assert "setup-work-node.ps1" in err
 
 
 class TestWindowsCompat:
