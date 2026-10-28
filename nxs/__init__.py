@@ -13,5 +13,5 @@
 * ``backends``  接口实现，可替换
 """
 
-__version__ = "0.29.2"
+__version__ = "0.30.0"
 __all__ = ["__version__"]
