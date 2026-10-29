@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **740** 个测试方法（已声明覆盖）· **137** 个纵向编号项（114 功能点 + 23 模块需求）
+共 **724** 个测试方法（已声明覆盖）· **137** 个纵向编号项（114 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -60,7 +60,7 @@ _（未实现，暂无功能点）_
 | **M3.F1** | 角色卡注册（默认不批准） | `nxs/control/registry.py:Registry.register` | G1,G5 | P0 | S9 | 11 |
 | **M3.F2** | 人工批准 | `nxs/control/registry.py:Registry.approve` | G1,G5 | P0 | S9 | 2 |
 | **M3.F3** | 凭据吊销（保留记录） | `nxs/control/registry.py:Registry.revoke` | G2 | P0 | S10 | 2 |
-| **M3.F4** | 心跳与三档存活状态 | `nxs/control/registry.py:Registry.heartbeat/sweep/resurrect` | G1 | P1 | — | 9 |
+| **M3.F4** | 心跳与三档存活状态 | `nxs/control/registry.py:Registry.heartbeat/sweep/resurrect` | G1 | P1 | — | 1 |
 | **M3.F5** | 能力索引（只含可路由节点） | `nxs/control/registry.py:Registry.capability_index` | G1,G5 | P1 | — | 1 |
 | **M3.F6** | 可路由性检查 | `nxs/control/registry.py:Registry.require_routable` | G3 | P0 | — | 1 |
 | **M3.F7** | 角色卡持久化（重启后注册表仍在） | `nxs/backends/sqlite/SqliteRegistryStore` | G1,G5 | P0 | — | 2 |
@@ -96,13 +96,13 @@ _（未实现，暂无功能点）_
 
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
-| **M5.F1** | 任务类型白名单 | `nxs/control/policy.py:PolicyEngine.check_delivery（类型判定）` | G2 | P0 | S1 | 18 |
+| **M5.F1** | 任务类型白名单 | `nxs/control/policy.py:PolicyEngine.check_delivery（类型判定）` | G2 | P0 | S1 | 16 |
 | **M5.F2** | 域间矩阵校验（默认拒绝） | `nxs/control/policy.py:PolicyEngine.check_delivery（rule 查找）` | G2 | P0 | S3 | 3 |
 | **M5.F3** | 接收方约束校验 | `nxs/control/policy.py:PolicyEngine.check_delivery（域矩阵可达性）` | G2 | P0 | S3 | 1 |
 | **M5.F4** | 应答字段白名单（含列表递归） | `nxs/control/policy.py:PolicyEngine.check_response` | G2 | P0 | S2 | 5 |
 | **M5.F5** | 等级上限计算（三重取最小） | `nxs/control/policy.py:PolicyEngine.check_delivery（min 计算）` | G2 | P0 | S5 | 8 |
-| **M5.F6** | 发布权限校验 | `nxs/control/policy.py:PolicyEngine.check_publish` | G2 | P0 | S3 | 5 |
-| **M5.F7** | 配额校验（并发／按日／字节） | `nxs/control/policy.py:PolicyEngine.check_quota` | G2 | P1 | — | 13 |
+| **M5.F6** | 发布权限校验 | `nxs/control/policy.py:PolicyEngine.check_publish` | G2 | P0 | S3 | 4 |
+| **M5.F7** | 配额校验（并发／按日／字节） | `nxs/control/policy.py:PolicyEngine.check_quota` | G2 | P1 | — | 3 |
 | **M5.F8** | 委托链校验 | `nxs/control/policy.py:PolicyEngine.check_delegation` | G2 | P1 | — | 1 |
 | **M5.F9** | 能力发现查询 | `nxs/control/policy.py:PolicyEngine.providers_of` | G1 | P1 | — | 2 |
 | **M5.F10** | 角色卡来源可注入（策略层以注册表为准，而非只看配置） | `nxs/control/policy.py:PolicyEngine.__init__（card_resolver/cards_source）` | G1,G5 | P0 | — | 2 |
@@ -119,7 +119,7 @@ _（未实现，暂无功能点）_
 | **M6.F2** | 任务领取（轮询即心跳） | `nxs/data/mailbox.py:Mailbox.poll` | G1 | P0 | — | 1 |
 | **M6.F3** | 原子领取（并发下唯一赢家） | `nxs/backends/{memory,sqlite}/*.claim` | G1 | P0 | — | 3 |
 | **M6.F4** | 周期性维护（标记 stale ＋ 释放租约） | `nxs/data/mailbox.py:Mailbox.sweep` | G1 | P1 | — | 1 |
-| **M6.R1** | 被拒的任务不得在队列留下任何痕迹 | （由 M6.F1 实现） | G2 | P0 | — | 2 |
+| **M6.R1** | 被拒的任务不得在队列留下任何痕迹 | （由 M6.F1 实现） | G2 | P0 | — | 1 |
 | **M6.R2** | 空队列不做长轮询（受限网络下连接会被切断） | （由 M6.F2 实现） | G1 | P1 | — | 1 |
 
 ### M7 任务生命周期
@@ -183,7 +183,7 @@ _（未实现，暂无功能点）_
 
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
-| **M11.F1** | 配置加载与严格校验（非法即拒绝启动） | `nxs/mgmt/config.py:load_config` | G4,G5 | P0 | — | 46 |
+| **M11.F1** | 配置加载与严格校验（非法即拒绝启动） | `nxs/mgmt/config.py:load_config` | G4,G5 | P0 | — | 52 |
 | **M11.F2** | 矩阵规则解析（拒绝裸通配） | `nxs/mgmt/config.py:MatrixRule.from_dict/matches_type` | G5 | P0 | S3 | 1 |
 | **M11.F3** | 凭据来源解析（环境变量优先） | `nxs/mgmt/config.py:load_config（凭据段）` | G2 | P0 | — | 3 |
 | **M11.F4** | 示例配置回退与临时凭据 | `nxs/mgmt/config.py:resolve_config_path/demo_env_for` | G4 | P2 | — | 4 |
@@ -238,7 +238,7 @@ _（未实现，暂无功能点）_
 | **M14.F5** | 节点状态查询（含未批准节点） | `nxs/edge/gateway.py:_Handler._handle_ops（nodes）` | G3 | P1 | — | 4 |
 | **M14.F6** | 运维动作审计（谁在何时给谁放了行） | `nxs/edge/gateway.py:Gateway.record_ops` | G3 | P0 | — | 1 |
 | **M14.F7** | 运维 CLI（nxs ops） | `nxs/__main__.py:cmd_ops` | G3 | P1 | — | 7 |
-| **M14.F8** | 部署自检（nxs doctor：持久化／权限／TLS／运维通道） | `nxs/__main__.py:cmd_doctor` | G3 | P1 | — | 88 |
+| **M14.F8** | 部署自检（nxs doctor：持久化／权限／TLS／运维通道） | `nxs/__main__.py:cmd_doctor` | G3 | P1 | — | 87 |
 | **M14.F9** | TLS 证书生成脚本化（CA 扩展完整、文件权限正确） | `deploy/gen-tls.sh` | G3 | P1 | — | 56 |
 | **M14.R1** | 运维通道不与节点共享配额——故障时运维必须进得来 | （由 M14.F1, M14.F2, M14.F3 实现） | G3 | P0 | — | 2 |
 | **M14.R2** | 被管理者不能给自己批条子：节点密钥无法调用运维接口 | （由 M14.F2 实现） | G2,G3 | P0 | — | 2 |

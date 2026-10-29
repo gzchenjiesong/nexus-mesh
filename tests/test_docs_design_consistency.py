@@ -66,6 +66,8 @@ HISTORICAL: set[str] = {
 SELF_REFERENTIAL: set[str] = {
     "docs/design/06-agent-role-model.md",
     "docs/design/07-permission-model-implementation.md",
+    # 测试清单：它的职责正是"列出哪些测试绑定了旧模型"，必然要写出这些词
+    "docs/design/08-test-inventory.md",
 }
 
 

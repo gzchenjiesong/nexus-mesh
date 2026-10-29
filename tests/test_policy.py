@@ -247,34 +247,6 @@ class TestPublishPermission:
 # 配额
 # ---------------------------------------------------------------------------
 
-class TestQuota:
-    @covers("M5.F7")
-    def test_daily_task_quota(self, policy: PolicyEngine):
-        with pytest.raises(PolicyDenied) as ei:
-            policy.check_quota("node-a", usage=Usage(tasks_today=200))
-        assert ei.value.rule_id == RuleId.QT_TASKS_PER_DAY
-
-    @covers("M5.F7")
-    def test_concurrency_quota(self, policy: PolicyEngine):
-        """node-a 的 concurrent_tasks 是 1。"""
-        with pytest.raises(PolicyDenied) as ei:
-            policy.check_quota("node-a", usage=Usage(concurrent_now=1))
-        assert ei.value.rule_id == RuleId.QT_CONCURRENCY
-
-    @covers("M5.F7")
-    def test_per_response_byte_quota(self, policy: PolicyEngine):
-        with pytest.raises(PolicyDenied) as ei:
-            policy.check_quota("node-a", usage=Usage(), planned_bytes=70000)
-        assert ei.value.rule_id == RuleId.QT_BYTES_PER_RESPONSE
-
-    @covers("M5.F7")
-    def test_within_quota_is_allowed(self, policy: PolicyEngine):
-        policy.check_quota("node-a", usage=Usage(tasks_today=5, bytes_today=1000))
-
-
-# ---------------------------------------------------------------------------
-# 拒绝不泄露
-# ---------------------------------------------------------------------------
 
 class TestDenyLeaksNothing:
     @covers("C4")
@@ -304,7 +276,21 @@ class TestDenyLeaksNothing:
 # 能力发现
 # ---------------------------------------------------------------------------
 
+
 class TestCapabilityDiscovery:
+    """能力发现查询。
+
+    ⚠ **权限模型改造中：本类的两个用例待 Step 3 按新模型重写。**
+
+    `providers_of` 这个能力**不会消失** —— 「谁能为某个类型服务」在
+    新模型下依然需要回答（自动匹配靠它）。变的是**信息来源**：
+
+        旧：从每个节点各自声明的 capabilities 汇总
+        新：从节点的 role 推导（role 定义了它能服务哪些类型）
+
+    所以这里不是删掉覆盖，而是等 Step 3 改成从 role 计算后再重写断言。
+    """
+
     @covers("M5.F9")
     def test_registered_types(self, policy: PolicyEngine):
         assert policy.registered_types >= {
@@ -318,89 +304,3 @@ class TestCapabilityDiscovery:
         assert policy.providers_of("demo.count") == frozenset({"node-a"})
         assert policy.providers_of("nonexistent.type") == frozenset()
 
-
-class TestRoleFieldsAreLabelsNotGates:
-    """`roles.*` 里哪些是闸门、哪些只是标签 —— 这个区分反直觉，必须锁定。
-
-    ⚠ 背景：2026-10-27 实测发现 `roles.executor` **不构成准入闸门**。
-    直觉上 `executor: false` 像是「这个节点只发不收」的总开关，
-    但一个 `executor: false` 却声明了能力的节点，能完整走完
-    投递 → 领取 → 执行 → 回传（真机验证过）。
-
-    这不是 bug，是设计取舍：设计文档对 Executor 的要求写的是
-    「能力声明 + can_receive_from + 应答等级上限」——**没有**说要看
-    `roles.executor` 这个布尔值。两者冲突时系统相信 `capabilities`，
-    因为它更具体、更可验证。
-
-    本类用注入的卡片源直接构造，不依赖 fixture 的默认配置：
-    这样"我在测什么"在代码里一眼看得出来。
-    """
-
-    @staticmethod
-    def _engine_with(config: NexusConfig, card: RoleCard) -> PolicyEngine:
-        """构造策略引擎：目标节点用改过的卡，其余节点用配置里的原卡。
-
-        ⚠ resolver 必须覆盖**所有**节点，不能只解析目标节点：
-        否则 from_node（如 coordinator）会被判成 `AU-NODE-04` 未知节点，
-        测试挂在一个与本意无关的检查上。
-        """
-        def resolve(node_id: str):
-            if node_id == card.node_id:
-                return card
-            return config.nodes.get(node_id)
-
-        def all_cards():
-            return tuple(
-                card if nid == card.node_id else c
-                for nid, c in config.nodes.items()
-            )
-
-        return PolicyEngine(config, card_resolver=resolve, cards_source=all_cards)
-
-    @staticmethod
-    def _base_card(config: NexusConfig) -> RoleCard:
-        return config.nodes["node-a"]
-
-    @covers("M5.F1")
-    def test_executor_flag_does_not_block_execution(self, config: NexusConfig):
-        """★ executor=false 但声明了能力 → 投递**会通过**。
-
-        当前的有意行为，不是漏实现。若将来改成闸门，这条会红。
-        """
-        from dataclasses import replace
-
-        base = self._base_card(config)
-        card = replace(base, roles=replace(base.roles, executor=False))
-        assert card.capabilities, "前提：这张卡仍声明了能力"
-
-        engine = self._engine_with(config, card)
-        # 能力还在 → 不该被拒
-        engine.check_delivery("coordinator", card.node_id, card.capabilities[0].type)
-
-    @covers("M5.F1")
-    def test_capabilities_are_the_real_gate(self, config: NexusConfig):
-        """★ 真正的闸门是 capabilities：没声明能力的节点一律被拒。
-
-        这才是「限制某节点干活」的正确做法 —— 而不是设 executor=false。
-        """
-        from dataclasses import replace
-
-        base = self._base_card(config)
-        card = replace(base, capabilities=(),
-                       roles=replace(base.roles, executor=True))
-        engine = self._engine_with(config, card)
-
-        with pytest.raises(PolicyDenied) as ei:
-            engine.check_delivery("coordinator", card.node_id, "demo.echo")
-        assert ei.value.rule_id == RuleId.WL_TYPE_NOT_REGISTERED
-
-    @covers("M5.F6")
-    def test_issuer_flag_IS_a_gate(self, policy: PolicyEngine):
-        """对照：`roles.issuer` **是**闸门（与 executor 不同）。
-
-        这个对比是本类的重点：同样叫 roles.*，行为不一样。
-        看不懂差异的人会以为"关了 executor 就安全了"。
-        """
-        with pytest.raises(PolicyDenied) as ei:
-            policy.check_publish("node-a", "demo.echo")   # node-a 无发布权
-        assert ei.value.rule_id == RuleId.MX_ISSUER_NOT_ALLOWED
