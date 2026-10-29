@@ -229,7 +229,7 @@ class TaskLifecycle:
         task = self._store.get(task_id)
         if task is None or task.to_node != node_id:
             raise PolicyDenied(
-                RuleId.MX_RECEIVE_NOT_ALLOWED,
+                RuleId.LF_TASK_NOT_FOUND,
                 f"{node_id} tried to renew {task_id!r}",
             )
         if task.is_terminal:

@@ -74,41 +74,35 @@ policy:
   auto_approve_domains: [cloud]
 
   matrix:
-    # 协调域可以把任务派给 zone-a，但只限这两个类型，且应答上限为摘要级（summary）
+    # ★ **只表达可达性**（权限模型改造 · Step 4）
+    #
+    #   旧版同时写 allow_types 与 max_level —— 三个问题缠在一个配置项里，
+    #   出问题时无法判断是哪一侧设错了。现在各归其位：
+    #
+    #       类型权限 → role.serves（谁能服务什么）
+    #       应答上限 → min(role.max_response_level, 节点 self_limits)
+    #       可达性   → 本矩阵（这批数据能被谁触达）
+    #
+    # ⚠ **代价**：被批准进某个域的 driver，可以向目标域发**任意已定义类型**。
+    #   控制面从「域 × 类型」收成「域 + 角色」两级 —— 仍是两条独立约束，
+    #   只是换了维度。这意味着**角色数量少是前提**：角色超过 5 个、
+    #   或某域内 driver 超过 5 个，就该重新审视。
     - from_domain: cloud
       to_domain: zone-a
-      allow_types: [demo.echo, demo.count]
-      max_level: summary
 
-    # 派给 zone-b 的类型用前缀通配，演示"新增同前缀类型不必改矩阵"
-    # ⚠ 不接受裸通配 '*'——那等于取消默认拒绝
     - from_domain: cloud
       to_domain: zone-b
-      allow_types: ["demo.*"]
-      max_level: fragment
 
-    # ★ 让 zone-b 可以向协调域上报（演示"有发布权"与"跨域被拒"是两个层次）
-    #
-    #   这条规则存在的目的是让示例能演示完整的控制层次：
-    #     · 角色层：roles.issuer 决定"能不能发"
-    #     · 矩阵层：本条规则决定"能发给谁"
-    #   只有两条都通过才能投递成功。
-    #
-    #   ⚠ 生产环境是否给某个域开放 Issuer，是需要你决策的事
-    #     （Issuer 开放会让"任务参数"成为数据外流通道）。
-    #     示例里开放它，仅为展示矩阵层仍然有效。
+    # zone-b 可以向协调域上报（演示「有发布权」与「跨域被拒」是两个层次）
     - from_domain: zone-b
       to_domain: cloud
-      allow_types: ["demo.*"]
-      max_level: summary
 
     # zone-a / zone-b 之间刻意**没有规则**：
-    # 任一方向的委托都会被 MX-DOMAIN-02 拒绝。这是"信任域之间互不可达"的保证。
+    # 任一方向的委托都会被 MX-DOMAIN-02 拒绝。这是「信任域之间互不可达」的保证。
     #
-    # 注意这一层的意义：即使某个节点具备 Issuer 角色（角色层放行），
-    # 只要矩阵里没有对应的「域 × 域」规则，投递**仍然**会被拒。
-    # 两层控制彼此独立，这正是不用「点对点授权」而用「域 × 类型」的原因。
-
+    # 注意这一层的意义：即使节点具备发布权（角色层放行），
+    # 只要矩阵里没有对应的「域 → 域」规则，投递**仍然**会被拒。
+    # 两层控制彼此独立 —— 这正是不用「点对点授权」的原因。
 # ------------------------------------------------------------------------------
 # 节点
 # ------------------------------------------------------------------------------
@@ -195,18 +189,32 @@ types:
 #
 # 只有 can_issue 需要审批 —— 其他（用哪些工具、自限额、工作目录）
 # 都是节点自律，Mesh 只记录不拦。
+#
+# ⚠ **角色粒度 = 能力边界粒度**
+#
+#   因为 Agent 不能声明"我只做角色能力的一部分"，所以"只会 echo、
+#   不会 count 的机器"必须是一个**不同角色**。
+#
+#   这是这套模型的必然代价：审批时一眼看清整体，换来角色表要按
+#   **实际存在的 Agent 能力组合**来切，而不是按抽象能力切。
+#
+#   示例里 worker / driver 的 serves 刻意写得不同，用来演示
+#   「角色决定能服务什么」—— 如果都写 ["demo.*"]，所有节点就都能
+#   服务所有 demo 类型，能力匹配的演示价值就没了。
 roles:
   - name: worker
     can_issue: false
-    serves: ["demo.*"]
+    serves: [demo.echo, demo.count]
     max_response_level: summary
     description: "只执行任务，不发布。内网执行者、检索节点"
 
   - name: driver
     can_issue: true
-    serves: ["demo.*"]
-    max_response_level: summary
-    description: "既发布也执行。主 Agent 的典型角色"
+    serves: [demo.echo, demo.search, demo.slow, demo.synthesize]
+    # 上限给到 fragment：driver 通常是主 Agent，需要看比摘要更细的内容。
+    # 这不是"放松"——它仍是角色级硬上限，节点还能用 self_limits 往下收。
+    max_response_level: fragment
+    description: "既发布也执行。主 Agent 的典型角色（含跨域聚合）"
 
   - name: publisher
     can_issue: true

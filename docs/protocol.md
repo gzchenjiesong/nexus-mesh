@@ -299,10 +299,10 @@ effective = min( 域间矩阵上限, 节点自约束上限, 能力声明等级 )
 | `LF-IDEM-04` | 幂等键重复 |
 | `LF-TASK-404` | 任务不存在，**或调用方看不到它**（两种情况刻意不区分，见下） |
 
-### `MX-RECEIVE-03` 为什么被拆成三份 <!-- ok:describes-removed -->
+### 已删除的 `MX-RECEIVE-xx` 旧码为什么被拆成三份 <!-- ok:describes-removed -->
 
-它原来是一个"什么都管"的错误码，实际承担了三种完全不同的语义
-（`delivery not permitted`）：
+它原来是一个"什么都管"的错误码（`delivery not permitted`），
+实际承担了三种完全不同的语义：
 
 | 原调用点 | 真实语义 | 新归属 |
 |---|---|---|

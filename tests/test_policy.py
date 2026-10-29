@@ -45,13 +45,23 @@ class TestSecurityAssertion1_TypeAllowlist:
 
     @covers("M5.F2", "M11.F2")
     def test_wildcard_does_not_over_match(self, policy: PolicyEngine, config):
-        """``demo.*`` 匹配 demo.echo，但不该匹配 demoX.y —— 前缀边界要准。"""
-        rule = config.policy.find("cloud", "zone-b")   # find() 的参数是**域**
-        assert rule is not None
-        assert rule.matches_type("demo.echo")
-        assert rule.matches_type("demo.search")
-        assert not rule.matches_type("other.thing")
-        assert not rule.matches_type("demoX.y")
+        """``前缀.*`` 匹配 demo.echo，但不该匹配 demoX.y —— 前缀边界要准。
+
+        ⚠ 权限模型改造后这条测试的**对象变了**：
+
+            旧：矩阵规则的 allow_types 通配（矩阵已不列类型）
+            新：角色 serves 的通配
+
+        保护的性质没变（前缀匹配不能误伤），只是归到角色上了。
+        """
+        from nxs.mgmt.config import RoleDecl
+
+        r = RoleDecl(name="t", serves=("demo.*",))
+        assert r.serves_type("demo.echo")
+        assert r.serves_type("demo.search")
+        assert not r.serves_type("other.thing")
+        # 关键：保留结尾的点，"demo.*" 不能匹配 "demoX.y"
+        assert not r.serves_type("demoX.y")
 
 
 # ---------------------------------------------------------------------------
@@ -157,16 +167,46 @@ class TestSecurityAssertion3_DefaultDeny:
         assert ei.value.rule_id == RuleId.MX_DOMAIN_FORBIDDEN
 
     @covers("M5.F3")
-    def test_zone_b_to_coordinator_blocked_by_receiver_not_matrix(self, policy: PolicyEngine):
-        """zone-b → coordinator 有矩阵规则，但 coordinator 的 can_receive_from 为空。
+    def test_zone_b_to_coordinator_is_reachable(self, policy: PolicyEngine):
+        """★ zone-b → coordinator 现在**可达**（行为变更，Step 4）。
 
-        两种拒绝是**不同层次**的原因，不应混为一谈：
-        * zone-a → coordinator：矩阵层没有规则（``MX-DOMAIN-02``）
-        * zone-b → coordinator：矩阵层有规则，但接收方不接受（``MX-RECEIVE-03``）
+        ⚠ 这条测试原名 `test_zone_b_to_coordinator_blocked_by_receiver_not_matrix`，
+        它验证的是：
+
+            矩阵允许 zone-b → cloud，但 coordinator 的 can_receive_from 为空
+            → 被 MX-RECEIVE-03 拒
+
+        **`can_receive_from` 这个检查已经被移除**（权限模型改造 Step 4）：
+        "谁能给我派活"由运维在域矩阵里定义，而不是节点自己声明 ——
+        那是旧模型"逐项申请权限"的思路，权力归属不清楚。
+
+        所以现在：矩阵里有 zone-b → cloud 这条规则，投递就被允许。
+
+        **这不是放松管制，是换了管制位置**：
+        要限制 zone-b 向上派活，正确做法是**删掉矩阵里的那条规则**，
+        而不是依赖对端节点自己说"我不接受"。
+
+        对照：`test_zone_a_has_no_outbound_rule` 依然被拒 ——
+        因为 zone-a 在矩阵里确实没有出向规则。
         """
+        # 矩阵里有 zone-b → cloud，所以可达
+        rule = policy._cfg.policy.find("zone-b", "cloud")
+        assert rule is not None, "配置里应有 zone-b → cloud 规则"
+
+        d = policy.check_delivery("node-b", "coordinator", "demo.synthesize")
+        assert d.task_type == "demo.synthesize"
+
+    @covers("M5.F3")
+    def test_removing_matrix_rule_blocks_delivery(self, policy: PolicyEngine):
+        """★ 去掉矩阵规则就真的不可达 —— 证明围栏在矩阵上生效。
+
+        这是上一条测试的反面：不依赖 can_receive_from，
+        而是直接在矩阵层面验证"没有规则 = 不可达"。
+        """
+        # zone-a 没有出向规则（配置里刻意留空）
         with pytest.raises(PolicyDenied) as ei:
-            policy.check_delivery("node-b", "coordinator", "demo.synthesize")
-        assert ei.value.rule_id == RuleId.MX_RECEIVE_NOT_ALLOWED
+            policy.check_delivery("node-a", "coordinator", "demo.synthesize")
+        assert ei.value.rule_id == RuleId.MX_DOMAIN_FORBIDDEN
 
     @covers("M5.R1")
     def test_zone_b_cannot_cross_to_zone_a(self, policy: PolicyEngine):
@@ -354,8 +394,17 @@ class TestCapabilityDiscovery:
 
     @covers("M5.F9")
     def test_providers_are_config_driven(self, policy: PolicyEngine):
-        """提供者来自配置，而非代码硬编码——这是"独立基础设施"的判据。"""
-        assert policy.providers_of("demo.echo") == frozenset({"node-a", "node-b"})
-        assert policy.providers_of("demo.count") == frozenset({"node-a"})
+        """服务者由 role.serves 决定，而非代码硬编码。
+
+        ⚠ 期望值随角色定义变化（权限模型改造 · Step 4）：
+        coordinator 现在是 driver、serves 含 demo.echo，所以它也在列表里。
+        这正是设计的意图 —— **能力边界由角色决定**，不再逐节点声明。
+        """
+        assert policy.providers_of("demo.echo") == frozenset(
+            {"coordinator", "node-a", "node-b"}), \
+            "driver 和 worker 的 serves 都含 demo.echo"
+        # demo.count 只有 worker 服务 —— 角色边界确实在起作用
+        assert policy.providers_of("demo.count") == frozenset({"node-a"}), \
+            "driver 的 serves 不含 demo.count"
         assert policy.providers_of("nonexistent.type") == frozenset()
 

@@ -347,7 +347,8 @@ class TestAuthorizationAttacks:
                                secret=SECRETS["node-b"])
         with pytest.raises(PolicyDenied) as excinfo:
             node_b.complete("node-b", stolen, [])
-        assert excinfo.value.rule_id is RuleId.MX_RECEIVE_NOT_ALLOWED
+        # 任务归属问题 → LF-TASK-404（原来是那个「什么都管」的旧码）
+        assert excinfo.value.rule_id is RuleId.LF_TASK_NOT_FOUND
 
     @covers("M1.F11", "M1.F16")
     def test_fabricated_from_node_is_ignored(self, gateway):

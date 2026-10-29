@@ -156,54 +156,56 @@ class StoreConfig:
 
 @dataclass(frozen=True)
 class MatrixRule:
-    """权限矩阵的一条规则。
+    """域间可达性的一条规则。
 
-    **维度是「域 × 类型」，不是「节点 × 节点」。** 这是把权限复杂度从
-    O(N²) 压回可控范围的关键：新增节点只需归属到既有域，规则自动继承。
+    ## 权限模型改造后它只管一件事
+
+    旧版这条规则同时管两件事：**这对域之间能不能通**、**能通哪些任务类型**、
+    **上限多细**。三个问题缠在一个配置项里，出问题时无法判断是哪一侧设错了。
+
+    现在它只回答第一个：**这批数据能被谁触达。**
+
+        类型权限 → 由 role 决定（Step 3 已切）
+        应答上限 → 由 role + 节点自限取 min（本步切换）
+        可达性   → 本规则
+
+    ## 代价（必须知晓）
+
+    被批准进某个域的 driver，可以向目标域发**任意已定义类型**的任务。
+
+    控制面从「域 × 类型」两级收成「域 + 角色」两级 —— 仍然是两条独立约束，
+    只是换了维度：域管数据围栏，角色管类型权限。
+
+    ⚠ 这个代价意味着：**角色数量少是这套模型的前提。**
+    角色超过 5 个、或某个域内的 driver 超过 5 个，就该重新审视。
     """
 
     from_domain: str
     to_domain: str
-    allow_types: tuple[str, ...] = ()
-    max_level: Level = Level.SUMMARY
 
-    _FIELDS = ("from_domain", "to_domain", "allow_types", "max_level")
+    _FIELDS = ("from_domain", "to_domain")
 
     @classmethod
     def from_dict(cls, obj: Mapping[str, Any], where: str) -> "MatrixRule":
         if not isinstance(obj, Mapping):
             raise ConfigError(f"{where}: 期望映射")
+
+        # ⚠ 旧字段被显式拒绝，并指向正确位置 ——
+        #   静默忽略会让人以为配了 type 限制而实际没有，那是安全误解。
+        legacy = [k for k in ("allow_types", "max_level") if k in obj]
+        if legacy:
+            raise ConfigError(
+                f"{where}: 字段 {legacy} 已被移除。\n"
+                f"  域矩阵现在只表达可达性（from_domain → to_domain）。\n"
+                f"  · 类型权限 → 由 role.serves 决定\n"
+                f"  · 应答上限 → 由 role.max_response_level 与节点 self_limits 取 min"
+            )
+
         _reject_unknown(obj, cls._FIELDS, where)
-        raw_types = obj.get("allow_types") or []
-        if not isinstance(raw_types, (list, tuple)) or not raw_types:
-            raise ConfigError(f"{where}.allow_types: 必须显式列出至少一个类型模式")
-        patterns: list[str] = []
-        for p in raw_types:
-            if not isinstance(p, str) or not p.strip():
-                raise ConfigError(f"{where}.allow_types: 元素必须是非空字符串")
-            if p.strip() == "*":
-                # 全通配等于取消默认拒绝，必须显式写出来才允许——这里直接禁止，
-                # 需要放开时逐个列模式，避免一次误配把整个域打开。
-                raise ConfigError(
-                    f"{where}.allow_types: 不允许裸通配 '*'；"
-                    f"请写成 '<前缀>.*' 显式限定范围"
-                )
-            patterns.append(p.strip())
         return cls(
             from_domain=str(_require(obj, "from_domain", where, (str,))),
             to_domain=str(_require(obj, "to_domain", where, (str,))),
-            allow_types=tuple(patterns),
-            max_level=Level.parse(obj.get("max_level", "summary"), f"{where}.max_level"),
         )
-
-    def matches_type(self, task_type: str) -> bool:
-        for p in self.allow_types:
-            if p.endswith(".*"):
-                if task_type.startswith(p[:-1]):  # 保留结尾的点，避免 "demo" 匹配 "demoX.y"
-                    return True
-            elif task_type == p:
-                return True
-        return False
 
 
 @dataclass(frozen=True)
@@ -911,19 +913,14 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
                     f"policy.matrix[{i}].{side}: 引用了不存在的域 '{dom}'；"
                     f"已定义的域为 {sorted(known)}"
                 )
-        # 矩阵里写的具体类型必须是某个节点真的能提供的能力。
-        # 提前报错比运行时"任务投出去没人接"好排查得多。
-        # 通配模式（如 "demo.*"）无法静态核对，跳过。
+        # ⚠ 矩阵不再列类型，所以这里没有"类型必须有人提供"的校验了。
         #
-        # 自注册模式下无从核对——那些节点的能力在运行时才出现。
-        if not strict:
-            continue
-        for pattern in rule.allow_types:
-            if not pattern.endswith(".*") and pattern not in available_types:
-                raise ConfigError(
-                    f"policy.matrix[{i}].allow_types: 类型 '{pattern}' 没有任何节点提供；"
-                    f"可用的类型为 {sorted(available_types)}"
-                )
+        #   这曾经是一道有用的静态检查（提前发现"任务发出去没人接"），
+        #   但它绑在已被移除的 `allow_types` 上。
+        #
+        #   替代检查在 types 段：`_parse_roles` 已保证角色引用的类型
+        #   都在 types 里定义过，而 `_parse_types` 保证类型不重复。
+        #   所以"引用了一个不存在的类型"依然会在启动时被拦住。
 
     # ---- 本进程承载的节点 ----
     #

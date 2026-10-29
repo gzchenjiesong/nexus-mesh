@@ -440,7 +440,16 @@ class SelfLimits:
     #: 约 36 分钟。再长，发布方不如换节点。
     max_backlog: int = 20
     #: 这个节点自己愿意给出多细的产出。与角色上限**取 min**。
-    max_response_level: Level = Level.SUMMARY
+    #:
+    #: ⚠ **默认值是 FULL_TEXT（即"我不额外限制"），不是 SUMMARY。**
+    #:
+    #: 这是"自律"语义的必然结论：自限是节点**主动**收紧。
+    #: 没声明 = 没收紧，不该凭空把上限压到摘要级。
+    #:
+    #: 初版把默认写成 SUMMARY，结果所有未声明自限的节点上限都被压到
+    #: 摘要级 —— 包括本来就是 fragment 的协调节点。症状是
+    #: `WL-LEVEL-002`，而它看起来像"role 配错了"。
+    max_response_level: Level = Level.FULL_TEXT
 
     _FIELDS = ("max_backlog", "max_response_level")
 
@@ -464,7 +473,7 @@ class SelfLimits:
         return cls(
             max_backlog=backlog,
             max_response_level=Level.parse(
-                obj.get("max_response_level", "summary"),
+                obj.get("max_response_level", "full_text"),
                 f"{where}.max_response_level"),
         )
 

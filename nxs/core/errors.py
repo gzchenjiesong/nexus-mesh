@@ -56,7 +56,17 @@ class RuleId(str, Enum):
     # ---------- MX- 权限矩阵 ----------
     MX_DOMAIN_FORBIDDEN = "MX-DOMAIN-02"
     MX_ISSUER_NOT_ALLOWED = "MX-ISSUER-01"
-    MX_RECEIVE_NOT_ALLOWED = "MX-RECEIVE-03"
+    #: 节点尚未批准 / 不可路由。
+    #:
+    #: ⚠ 这个码是从已删除的 ``MX-RECEIVE-03`` 拆出来的
+    #: （权限模型改造 Step 4）。那一个码原来同时管三件事：
+    #:
+    #:     域不可达    → MX-DOMAIN-02
+    #:     未批准      → 本码
+    #:     任务不属于你 → LF-TASK-404
+    #:
+    #: 一个码覆盖三种语义，排障时必须读代码才知道这次是谁不许谁。
+    AU_NOT_APPROVED = "AU-APPROVE-05"
     MX_DELEGATION_TOO_DEEP = "MX-DELEGATE-04"
 
     # ---------- WL- 白名单 ----------
@@ -106,7 +116,7 @@ _SAFE_MESSAGES: dict[RuleId, str] = {
     RuleId.AU_NODE_UNKNOWN: "node not registered",
     RuleId.MX_DOMAIN_FORBIDDEN: "delegation not permitted",
     RuleId.MX_ISSUER_NOT_ALLOWED: "publish not permitted",
-    RuleId.MX_RECEIVE_NOT_ALLOWED: "delivery not permitted",
+    RuleId.AU_NOT_APPROVED: "not approved",
     RuleId.MX_DELEGATION_TOO_DEEP: "delegation not permitted",
     RuleId.WL_TYPE_NOT_REGISTERED: "task type not available",
     RuleId.WL_FIELD_NOT_ALLOWED: "response rejected",

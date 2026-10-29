@@ -125,12 +125,17 @@ class TestLifecycleRenew:
 
         with pytest.raises(PolicyDenied) as excinfo:
             app.lifecycle.renew("node-b", claimed.id)
-        assert excinfo.value.rule_id is RuleId.MX_RECEIVE_NOT_ALLOWED
+        # ⚠ 权限模型改造 Step 4：这里原来用的那个「什么都管」的旧码已经删除，
+        #   改成了 LF-TASK-404。
+        #
+        #   语义没变（"这个任务不属于你"），但码更准确了 ——
+        #   LF-TASK-404 的定义正是「任务不存在，或调用方看不到它」。
+        assert excinfo.value.rule_id is RuleId.LF_TASK_NOT_FOUND
 
         # 不存在的任务返回同样的码 —— 否则可用来枚举
         with pytest.raises(PolicyDenied) as excinfo2:
             app.lifecycle.renew("node-b", "no-such-task")
-        assert excinfo2.value.rule_id is RuleId.MX_RECEIVE_NOT_ALLOWED
+        assert excinfo2.value.rule_id is RuleId.LF_TASK_NOT_FOUND
 
     @covers("M7.F10")
     def test_renew_after_terminal_rejected(self, make_app):

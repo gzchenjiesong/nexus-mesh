@@ -271,28 +271,93 @@ coordinator → node-a  demo.echo       → 放行，上限=METADATA
 
 ---
 
-### Step 4 · 域矩阵去类型化
+### Step 4 · 域矩阵去类型化 ✅ 主体完成（2026-10-29）
 
 **改**
 
 ```yaml
 # 前
-- from: cloud
-  to: zone-work
+- from_domain: cloud
+  to_domain: zone-work
   allow_types: [work.calendar, work.summary, work.query, work.*]
   max_level: summary
 
 # 后
-- from: cloud
-  to: zone-work
+- from_domain: cloud
+  to_domain: zone-work
 ```
 
-- `MatrixRule` 删 `allow_types` / `max_level`
-- `MX-RECEIVE-03` 拆成三份：域不可达 → `MX-DOMAIN-02`；
-  未批准 → 新增 `AU-APPROVE-05`；任务归属 → 并入已有的 `LF-TASK-404`
-- 广播展开时按域过滤（见模型文档 §4）
+- `MatrixRule` 删 `allow_types` / `max_level` —— 只表达可达性
+- `providers_of` / `registered_types` 改为从 `role.serves` 与 `types` 计算
+- 删 `can_receive_from` 检查（"谁能给我派活"归运维矩阵，不归节点自报）
+- 上限从「三重」变「两重」：`min(role, 节点自限, 能力声明)`
+- **`MX-RECEIVE-03` 拆成三份并删除**
 
 **这是唯一真正放宽的一步。** 单独做，是为了出问题时归因清晰。
+
+**错误码拆分结果**
+
+| 原语义 | 新归属 |
+|---|---|
+| 域不可达 | `MX-DOMAIN-02` |
+| 未批准 / 不可路由 | **新增** `AU-APPROVE-05` |
+| 任务不属于调用方 | 并入已有的 `LF-TASK-404` |
+
+第三项是白捡的简化：`gateway.py` 原注释写「不存在与不属于自己返回同一个
+错误，避免枚举」，而 `LF-TASK-404` 的定义正是这个 —— 本来就是一件事。
+
+**⚠ 实际改动中踩到的一个真 bug（值得记录）**
+
+`check_response()` 里还有一处 `min(rule.max_level, ...)` 我在第一次改
+`check_delivery` 时漏掉了。症状是 `test_can_run_core_without_any_backend`
+（安全带类）报 `AttributeError: MatrixRule has no attribute max_level`。
+
+**这正是安全带测试的价值**：它不在权限模型的影响面内，
+一旦红了就说明代码真坏了，而不是测试过时。
+
+**⚠ 另一个自己造成的坑**
+
+`SelfLimits.max_response_level` 初版默认写成 `SUMMARY`，结果所有未声明
+自限的节点上限都被压到摘要级 —— 包括本来就是 fragment 的协调节点。
+症状 `WL-LEVEL-002`，看起来像"role 配错了"。
+
+已改为默认 `FULL_TEXT`：**自限是节点主动收紧，没声明就是没收紧。**
+
+**配置改动**
+
+| 文件 | 改了什么 |
+|---|---|
+| `config/nxs.example.yaml` | 矩阵去类型化；角色 `serves` 精确化；driver 上限改 fragment |
+| `deploy/local.yaml.example` | 矩阵去类型化（两处）|
+
+角色 `serves` 为什么精确化：初版都写 `["demo.*"]`，导致所有节点都能服务
+所有 demo 类型，`providers_of` 失去区分度，能力匹配的演示价值就没了。
+
+**测试改动（全部是改写，不是删除）**
+
+| 原测试 | 改成 |
+|---|---|
+| `test_declaring_domains_relaxes_static_type_check` | `test_template_matrix_has_no_type_lists` |
+| `test_wildcard_does_not_over_match` | 对象从矩阵 `allow_types` 换成 `RoleDecl.serves` |
+| `test_zone_b_to_coordinator_blocked_by_receiver_not_matrix` | `test_zone_b_to_coordinator_is_reachable` + 一条反面测试 |
+| `test_providers_are_config_driven` | 期望值更新（角色边界确实起作用）|
+| 5 处错误码断言 | `AU-APPROVE-05` / `LF-TASK-404` |
+
+**反向验证**
+
+- 让 `providers_of` 强制走旧路径 → 对应测试 FAILED
+- 让矩阵永远放行 → `TestSecurityAssertion3_DefaultDeny` 5 条 FAILED
+
+**未做：广播展开**
+
+原计划 Step 4 含「广播按域展开」。**已拆成独立一步（Step 4b）**，理由：
+
+1. 它是**新功能**，不是改造 —— 当前没有任何调用方
+2. 它需要设计「广播的 N 个结果怎么返回给调用方」（task group），
+   那是协议层的设计，不是本轮改动
+3. 混在 Step 4 里会让"矩阵去类型化"这个已经放宽的改动难以归因
+
+`TypeDecl.delivery` 仍登记在 `UNIMPLEMENTED`，等 Step 4b 接线。
 
 **判据（明确的前后对比）**
 

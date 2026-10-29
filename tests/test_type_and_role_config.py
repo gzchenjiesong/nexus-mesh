@@ -51,7 +51,6 @@ policy:
   matrix:
     - from_domain: cloud
       to_domain: cloud
-      allow_types: ["demo.*"]
 {extra}
 """
 

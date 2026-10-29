@@ -232,7 +232,7 @@ _STATUS_BY_RULE: dict[RuleId, int] = {
     RuleId.AU_NODE_UNKNOWN: 401,
     RuleId.MX_DOMAIN_FORBIDDEN: 403,
     RuleId.MX_ISSUER_NOT_ALLOWED: 403,
-    RuleId.MX_RECEIVE_NOT_ALLOWED: 403,
+    RuleId.AU_NOT_APPROVED: 403,
     RuleId.MX_DELEGATION_TOO_DEEP: 403,
     RuleId.WL_TYPE_NOT_REGISTERED: 404,
     RuleId.WL_FIELD_NOT_ALLOWED: 403,
@@ -1055,8 +1055,13 @@ class _Handler(BaseHTTPRequestHandler):
         """
         actual = self.gw.app.lifecycle.get(claimed.id)
         if actual is None or actual.to_node != sender:
+            # ⚠ 用 LF-TASK-404 而不是 MX-RECEIVE-03。
+            #
+            #   原注释说的是「不存在与不属于自己返回同一个错误，避免枚举」，
+            #   而 LF-TASK-404 的定义正好是「任务不存在，或调用方看不到它」
+            #   —— 本来就是同一件事，分开只是历史原因。
             raise PolicyDenied(
-                RuleId.MX_RECEIVE_NOT_ALLOWED,
+                RuleId.LF_TASK_NOT_FOUND,
                 f"task {claimed.id!r} not owned by {sender}",
             )
         return actual

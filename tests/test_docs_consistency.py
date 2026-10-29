@@ -550,7 +550,8 @@ class TestDocumentedInterfacesExist:
         from nxs.core.errors import RuleId
 
         # 文档已定、代码未实现（改造新增）
-        _PENDING_CODES = {"AU-APPROVE-05", "QT-BACKLOG-07"}
+        # ⚠ AU-APPROVE-05 已在 Step 4 实现，从清单移除
+        _PENDING_CODES = {"QT-BACKLOG-07"}
 
         # ⚠ 代码里还在、文档已删除（改造待删）。
         #
@@ -558,6 +559,7 @@ class TestDocumentedInterfacesExist:
         #   这些错误码。但如果忘了删，用户就会命中一个文档里查不到的码。
         #   所以列在这里而不是静默放过 —— 忘记删的时候它会一直挂着。
         _PENDING_DELETION = {
+            # ⚠ MX-RECEIVE-03 已在 Step 4 删除（拆成三份），不再需要列
             "MX-DELEGATE-04",   # 二次委托，Step 5 删
             "QT-TASK-01",       # 按日任务数，Step 5 删
             "QT-BYTE-02",       # 单次字节，Step 5 删

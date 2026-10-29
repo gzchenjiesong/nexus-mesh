@@ -266,9 +266,10 @@ def _explain_denial(exc: PolicyDenied, me: str, target: str) -> str:
         RuleId.MX_DOMAIN_FORBIDDEN:
             f"矩阵里没有从你的域到 {target} 所在域的规则。\n"
             f"  需要运维在 policy.matrix 里加一条。",
-        RuleId.MX_RECEIVE_NOT_ALLOWED:
-            f"{target} 不接受你所在域的委托，或它当前不可路由（未批准/stale）。\n"
-            f"  用 `nxs-cli whoami` 确认自己，找运维确认 {target} 的状态。",
+        RuleId.AU_NOT_APPROVED:
+            f"{target} 尚未被批准，或当前不可路由（stale/已吊销）。\n"
+            f"  用 `nxs-cli whoami` 确认自己，找运维确认 {target} 的状态。\n"
+            f"  ⚠ 若它已批准但还是被拒，检查域矩阵里有没有到你所在域的规则。",
         RuleId.WL_TYPE_NOT_REGISTERED:
             f"没有任何节点提供类型 {target!r} 对应的能力。\n"
             f"  检查 --type 是否拼错。",

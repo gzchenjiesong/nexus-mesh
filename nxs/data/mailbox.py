@@ -231,7 +231,7 @@ class Mailbox:
         if rec.state == "revoked":
             raise PolicyDenied(RuleId.AU_CREDENTIAL_REVOKED)
         if not rec.approved:
-            raise PolicyDenied(RuleId.MX_RECEIVE_NOT_ALLOWED,
+            raise PolicyDenied(RuleId.AU_NOT_APPROVED,
                                f"{node_id} not approved")
 
         self._registry.heartbeat(node_id)

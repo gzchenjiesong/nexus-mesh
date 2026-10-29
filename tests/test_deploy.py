@@ -75,20 +75,34 @@ class TestProductionTemplate:
             path.unlink(missing_ok=True)
 
     @covers("M11.F8")
-    def test_declaring_domains_relaxes_static_type_check(self):
-        """声明了 domains = 接受自注册节点 ⇒ 不再静态核对类型名。
+    def test_template_matrix_has_no_type_lists(self):
+        """★ 模板的矩阵必须只表达可达性。
 
-        理由：那些节点的能力运行时才出现。反过来，没声明 domains 的
-        配置（所有节点都在文件里）仍应严格核对——见 test_policy 的用例。
+        ⚠ 这条测试原本叫 `test_declaring_domains_relaxes_static_type_check`，
+        测的是"声明 domains 之后不再静态核对 allow_types"。
+
+        权限模型改造后 `allow_types` 整个字段被移除了，所以那条测试
+        测的是一个**不再存在的机制**。改成守现在真正要保证的事：
+
+            矩阵里只有 from_domain / to_domain，
+            类型权限归 role.serves。
+
+        这比删掉它好 —— 它阻止有人把类型列表加回矩阵
+        （那会让"能不能到达"和"能发什么类型"重新纠缠在一起）。
         """
+        import dataclasses
+
         from nxs.mgmt.config import load_config
 
-        # 模板里 allow_types 含 work.calendar，而配置里只有 coordinator 节点、
-        # coordinator 并不提供 work.calendar —— 严格核对会失败，自注册模式应放行
         cfg = load_config(DEPLOY / "local.yaml.example", env=TEMPLATE_ENV)
-        coordinator_types = {c.type for c in cfg.nodes["coordinator"].capabilities}
-        assert "work.calendar" not in coordinator_types, "测试前提：coordinator 不提供 work.calendar"
-        assert any("work.calendar" in r.allow_types for r in cfg.policy.rules)
+        assert cfg.policy.rules, "模板应有矩阵规则"
+
+        for r in cfg.policy.rules:
+            fields = {f.name for f in dataclasses.fields(r)}
+            assert fields == {"from_domain", "to_domain"}, (
+                f"矩阵规则多了字段 {fields - {'from_domain', 'to_domain'}}；\n"
+                f"  域矩阵只该表达可达性，类型权限归 role.serves"
+            )
 
     @covers("M11.F1")
     def test_template_loads(self):

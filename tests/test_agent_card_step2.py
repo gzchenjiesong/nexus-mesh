@@ -52,17 +52,24 @@ class TestSelfLimits:
     def test_defaults(self):
         s = SelfLimits()
         assert s.max_backlog == 20, "缺省必须是 20，不是不限"
-        assert s.max_response_level is Level.SUMMARY
+        assert s.max_response_level is Level.FULL_TEXT, (
+            "自限的默认必须是「不额外限制」。\n"
+            "  ⚠ 初版写成 SUMMARY，结果所有未声明自限的节点上限都被压到摘要级 ——\n"
+            "  症状是 WL-LEVEL-002，而它看起来像 role 配错了。"
+        )
 
     @covers("M11.F1")
-    def test_missing_section_uses_defaults(self):
-        """旧卡片没有 self_limits 节 —— 必须拿到默认值而不是崩。
+    def test_missing_section_means_no_extra_limit(self):
+        """旧卡片没有 self_limits 节 → 不额外收紧。
 
-        这是向后兼容的底线：旧卡片能原样工作。
+        这是"自律"语义的必然结论：自限是节点主动收紧，
+        没声明 = 没收紧。
         """
         c = _card()
         assert c.self_limits.max_backlog == 20
-        assert c.self_limits.max_response_level is Level.SUMMARY
+        assert c.self_limits.max_response_level is Level.FULL_TEXT
+        # 关键：effective 应等于约束（而不是被自限压到 summary）
+        assert c.effective_max_level() is c.constraints.max_response_level
 
     @covers("M11.F1")
     def test_rejects_zero_backlog(self):
@@ -122,6 +129,17 @@ class TestEffectiveMaxLevel:
                                "can_issue_types": [], "can_receive_from": ["cloud"]},
                   self_limits={"max_response_level": "summary"})
         assert c.effective_max_level() is Level.SUMMARY
+
+    @covers("M11.F1")
+    def test_default_self_limit_does_not_tighten(self):
+        """★ 未声明自限时，effective 必须等于约束上限，不能被压到 summary。
+
+        这是 Step 4 踩到的坑：默认值写成 summary 会让所有节点上限降级，
+        而症状 WL-LEVEL-002 看起来像 role 配错了。
+        """
+        c = _card(constraints={"max_response_level": "fragment",
+                               "can_issue_types": [], "can_receive_from": ["cloud"]})
+        assert c.effective_max_level() is Level.FRAGMENT
 
     @covers("M11.F1")
     def test_public_dict_reports_effective_not_raw(self):

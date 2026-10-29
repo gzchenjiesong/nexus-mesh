@@ -232,7 +232,7 @@ class Registry:
         if rec.state == NodeState.REVOKED:
             raise PolicyDenied(RuleId.AU_CREDENTIAL_REVOKED)
         if not rec.routable:
-            raise PolicyDenied(RuleId.MX_RECEIVE_NOT_ALLOWED,
+            raise PolicyDenied(RuleId.AU_NOT_APPROVED,
                                f"{node_id} state={rec.state} approved={rec.approved}")
         return rec.card
 

@@ -133,7 +133,7 @@ class TestEndToEnd:
         assert not s["registry"].record("node-a").approved
         with pytest.raises(PolicyDenied) as ei:
             s["mailbox"].poll("node-a")
-        assert ei.value.rule_id == RuleId.MX_RECEIVE_NOT_ALLOWED
+        assert ei.value.rule_id == RuleId.AU_NOT_APPROVED
 
     @covers("M3.R1")
     def test_unapproved_node_cannot_be_delivered_to(self, unapproved_stack):
@@ -142,7 +142,7 @@ class TestEndToEnd:
         with pytest.raises(PolicyDenied) as ei:
             s["mailbox"].deliver(from_node="coordinator", to_node="node-a",
                                  task_type="demo.echo", params={"text": "x"})
-        assert ei.value.rule_id == RuleId.MX_RECEIVE_NOT_ALLOWED
+        assert ei.value.rule_id == RuleId.AU_NOT_APPROVED
 
     @covers("M3.F2")
     def test_approval_enables_polling(self, unapproved_stack):
