@@ -77,9 +77,37 @@ function Warn($msg){ Write-Host "  WARN $msg" -ForegroundColor Yellow }
 #
 #   报错点离真正原因（"选错脚本了"）隔了几十行，很容易误判成脚本有 bug。
 #   明确说一句，比让人猜好。
-if (-not $IsWindows) {
+#
+# ⚠⚠ **不能直接用 `if (-not $IsWindows)`。**
+#
+#   `$IsWindows` 是 **PowerShell 6+ 才有的自动变量**。在 **Windows 自带的
+#   PowerShell 5.1** 上它**未定义** —— 读出来是 `$null`，而
+#
+#       -not $null   →   $true
+#
+#   于是守卫**在真正的 Windows 上误触发**，把用户挡在门外：
+#
+#       FAIL 这是 Windows 专用脚本，当前不是 Windows（）。
+#
+#   （括号里也是空的，因为 `$PSVersionTable.Platform` 同样是 6+ 才有。）
+#
+#   这是自己挖的坑：写守卫时只在本机的 pwsh 7.5 上试过，
+#   而那台机器上 `$IsWindows` 有值，永远走不到错误分支。
+#
+#   正确判据：**PowerShell 5.1 只在 Windows 上存在**（它是 .NET Framework
+#   时代的产物，从没有过 macOS/Linux 版）。所以：
+#
+#     · 版本 < 6  → 必然是 Windows
+#     · 版本 >= 6 → 才去看 `$IsWindows`
+$isWindowsHost = $true
+if ($PSVersionTable.PSVersion.Major -ge 6) {
+    $isWindowsHost = [bool]$IsWindows
+}
+
+if (-not $isWindowsHost) {
     Say ""
-    Bad "这是 Windows 专用脚本，当前不是 Windows（$($PSVersionTable.Platform)）。"
+    $platDesc = if ($PSVersionTable.Platform) { $PSVersionTable.Platform } else { "非 Windows" }
+    Bad "这是 Windows 专用脚本，当前不是 Windows（${platDesc}）。"
     Say ""
     Say "   macOS / Linux 请用："
     Say "     bash deploy/setup-work-node.sh"
@@ -424,7 +452,19 @@ except Exception as e:
     out["err"] = type(e).__name__ + ": " + str(e)
 print(json.dumps(out))
 '@
-    Set-Content -Path $chkFile -Value $chkCode -Encoding UTF8
+    # ⚠ 写 Python 临时脚本要用**无 BOM 的 UTF-8**。
+    #
+    #   `Set-Content -Encoding UTF8` 在 **PowerShell 5.1** 上会**加 BOM**
+    #   （PS 6+ 才默认无 BOM）。这里的内容含中文注释，所以不能用 ASCII。
+    #
+    #   Python 3 其实能读带 BOM 的源码（当成编码声明处理），所以带 BOM
+    #   也能跑通 —— 但那是"碰巧能行"，不是设计。显式无 BOM 更稳，
+    #   也避免以后有人换语言/换解析器时踩坑。
+    #
+    #   用 New-Object 而不是 ::new() —— 后者要 PowerShell 5.0+，
+    #   前者在任何版本都可用。
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($chkFile, $chkCode, $utf8NoBom)
 
     # 传参走环境变量（见上），ArgumentList 只给文件路径 —— 单元素，不可能为空
     # ⚠ 这里必须**现查**，不能依赖外部变量。

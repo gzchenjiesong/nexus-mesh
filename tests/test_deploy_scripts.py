@@ -2371,3 +2371,151 @@ class TestParamIsSingleSourceOfTruth:
             + "\n  统一用 $AllowedTools —— param 已经做了"
               "「命令行优先、环境变量兜底」"
         )
+
+
+class TestPowerShell51Compatibility:
+    """★★ 脚本必须在 **Windows 自带的 PowerShell 5.1** 上能跑。
+
+    ⚠⚠ **这是用户在真机上撞到的 bug（v1.0.5 修）。**
+
+    我加的平台守卫写的是::
+
+        if (-not $IsWindows) { ...exit 1 }
+
+    `$IsWindows` 是 **PowerShell 6+ 才有的自动变量**。
+    Windows 自带的 **PowerShell 5.1** 上它**未定义** → 读作 `$null`，
+    而 ``-not $null`` 是 ``$true`` —— 于是守卫**在真正的 Windows 上误触发**：
+
+        FAIL 这是 Windows 专用脚本，当前不是 Windows（）。
+
+    （括号里也是空的，因为 `$PSVersionTable.Platform` 同样 6+ 才有。）
+
+    ## 为什么自己没测出来
+
+    我只在本机的 **pwsh 7.5（macOS）** 上验过。那台机器上 `$IsWindows`
+    有值，永远走不到"被挡住"的分支 —— **守卫在测试环境里是死的**。
+
+    ## 为什么静态检查也没抓到
+
+    我还把 `$IsWindows` 加进了"PowerShell 自动变量"白名单
+    （`_PS_AUTOMATIC`），于是"变量必须赋值"那条检查也放过了它。
+    白名单本身没错（它在 6+ 上确实是自动变量），但它**掩盖了版本差异**。
+
+    ## 正确判据
+
+    **PowerShell 5.1 只在 Windows 上存在**（.NET Framework 时代产物，
+    从没有过 macOS/Linux 版）。所以：
+
+      · 版本 < 6  → 必然是 Windows
+      · 版本 >= 6 → 才看 `$IsWindows`
+
+    ## 这条测试怎么验
+
+    不靠"读代码猜"，而是**真的用 pwsh 跑一遍三种场景的组合逻辑**，
+    断言旧写法在 5.1 场景下会 BLOCKED、新写法会 PROCEED。
+    """
+
+    SCRIPT = DEPLOY / "setup-work-node.ps1"
+
+    @covers("M14.F8")
+    def test_guard_does_not_use_bare_iswindows(self):
+        """★ 平台守卫不能只用 `$IsWindows`，必须先判版本。"""
+        import re
+
+        text = self.SCRIPT.read_bytes().decode("utf-8-sig")
+        lines = text.splitlines()
+
+        offenders = []
+        for lineno, line in enumerate(lines, 1):
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            # 形如 `if (-not $IsWindows)` 或 `if ($IsWindows)` 的**裸判断**
+            if re.match(r"^if\s*\(\s*-?not\s+\$IsWindows\s*\)", s) or \
+               re.match(r"^if\s*\(\s*\$IsWindows\s*\)", s):
+                offenders.append((lineno, s[:90]))
+
+        assert not offenders, (
+            "平台守卫直接用了 $IsWindows，在 PowerShell 5.1 上它是 $null，\n"
+            "  会导致 `-not $null` = $true → **在真 Windows 上误判为非 Windows**：\n"
+            + "\n".join(f"    {n}: {s}" for n, s in offenders)
+            + "\n  正确写法：先判 $PSVersionTable.PSVersion.Major，\n"
+              "  5.1 必然是 Windows，6+ 才看 $IsWindows"
+        )
+
+    @covers("M14.F8")
+    def test_guard_logic_across_powershell_versions(self):
+        """★★ 用真实 pwsh 跑三种场景，验证守卫行为符合预期。
+
+        这条是**行为测试**，不是读代码 —— 上一版就是因为只读代码
+        （"$IsWindows 是自动变量，没毛病"）才漏掉的。
+        """
+        import shutil
+        import subprocess
+
+        pwsh = _find_pwsh()
+        if not pwsh:
+            import pytest as _pytest
+            _pytest.skip("没有 pwsh，跳过行为测试（CI 里是有的）")
+
+        # 把两种写法的判定逻辑抽出来，在 pwsh 里对三种组合求值
+        probe = r"""
+function Test-OldGuard {
+    param([int]$Ver, $IsWin)
+    if ($Ver -lt 6) { $IsWin = $null }      # 5.1 上未定义
+    if (-not $IsWin) { return "BLOCKED" } else { return "PROCEED" }
+}
+function Test-NewGuard {
+    param([int]$Ver, $IsWin)
+    if ($Ver -lt 6) { $IsWin = $null }      # 5.1 上未定义
+    $isWindowsHost = $true
+    if ($Ver -ge 6) { $isWindowsHost = [bool]$IsWin }
+    if (-not $isWindowsHost) { return "BLOCKED" } else { return "PROCEED" }
+}
+$r = [ordered]@{}
+$r["ps51_win_old"]   = Test-OldGuard -Ver 5 -IsWin $null
+$r["ps51_win_new"]   = Test-NewGuard -Ver 5 -IsWin $null
+$r["ps7_win_new"]    = Test-NewGuard -Ver 7 -IsWin $true
+$r["ps7_unix_new"]   = Test-NewGuard -Ver 7 -IsWin $false
+$r.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }
+"""
+        r = subprocess.run([pwsh, "-NoProfile", "-Command", probe],
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, f"pwsh 执行失败：{r.stderr}"
+
+        got = dict(l.split("=", 1) for l in r.stdout.strip().splitlines()
+                   if "=" in l)
+
+        # 旧写法在 5.1 上是错的 —— 记录这个事实，防止有人改回去
+        assert got.get("ps51_win_old") == "BLOCKED", (
+            "旧写法在 PS 5.1 上的行为变了？预期 BLOCKED（这就是那个 bug）"
+        )
+        # 新写法在三种场景下都必须正确
+        assert got.get("ps51_win_new") == "PROCEED", (
+            "新写法在 PS 5.1（Windows）上应放行，实际 "
+            f"{got.get('ps51_win_new')}"
+        )
+        assert got.get("ps7_win_new") == "PROCEED", (
+            f"新写法在 PS7/Windows 上应放行，实际 {got.get('ps7_win_new')}"
+        )
+        assert got.get("ps7_unix_new") == "BLOCKED", (
+            f"新写法在 PS7/macOS-Linux 上应拦住，实际 {got.get('ps7_unix_new')}"
+        )
+
+
+def _find_pwsh() -> str | None:
+    """找 pwsh 可执行文件的绝对路径。"""
+    import os
+    import shutil
+
+    p = shutil.which("pwsh")
+    if p:
+        return p
+    # lint-ps1.sh 会把 pwsh 解到 Cache 目录
+    for cand in (os.environ.get("PWSH_CACHE", ""), "/tmp/pwsh"):
+        if not cand:
+            continue
+        exe = os.path.join(cand, "pwsh")
+        if os.path.isfile(exe) and os.access(exe, os.X_OK):
+            return exe
+    return None
