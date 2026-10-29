@@ -126,6 +126,94 @@ policy:
 # 所以由服务进程自己续命。不加这一项，它过一会儿就会被判成 stale。
 local_node: coordinator
 
+# ==============================================================================
+# 任务类型（权限模型改造 · Step 1）
+# ==============================================================================
+#
+# ⭐ **类型必须由运维定义一次，节点只能引用。**
+#
+# 旧模型里类型是从各节点卡片的 capabilities 汇总出来的，于是同一个
+# demo.echo 可以由两个节点声明成两套契约（不同 response_fields），
+# 而系统不报错 —— 因为"谁说得对"没有答案。实测确认过这个漏洞。
+#
+# ⚠ 当前是 Step 1：这两节**只做解析与静态校验**，判定逻辑仍走旧的
+#    capabilities 汇总。等 Step 3/4 切过去后，这里才是唯一权威。
+#
+# 交付模式：
+#   unicast   —— 发给指定节点（当前所有任务都是这种）
+#   broadcast —— 发给所有能服务该类型的可用节点（按域逐域展开）
+#   ⚠ multicast（群组）暂不支持，等 group 能力落地再加 ——
+#     不预留用不了的枚举值。
+types:
+  - name: demo.echo
+    delivery: unicast
+    max_level: summary
+    response_fields: [echo, level]
+    params_schema:
+      text: "string"
+    description: "原样回显，用于连通性验证"
+
+  - name: demo.count
+    delivery: unicast
+    max_level: metadata
+    response_fields: [count, level]
+    params_schema:
+      n: "integer"
+    description: "数数，产出只有元数据"
+
+  - name: demo.search
+    delivery: unicast
+    max_level: summary
+    response_fields: [hits, level]
+    params_schema:
+      q: "string"
+    description: "模拟检索"
+
+  - name: demo.slow
+    delivery: unicast
+    max_level: summary
+    response_fields: [slept, level]
+    params_schema:
+      seconds: "number"
+    description: "故意慢，用于测租约续期"
+
+  - name: demo.synthesize
+    delivery: unicast
+    max_level: fragment
+    response_fields: [summary, level]
+    params_schema:
+      inputs: "string"
+    description: "把多个子结果合成结论（跨域聚合）"
+
+# ==============================================================================
+# 角色（权限模型改造 · Step 1）
+# ==============================================================================
+#
+# ⭐ **Agent 不逐项申请权限，而是从这里选一个。**
+#
+# 审批只需回答一个问题：允许这个 Agent 以这个角色加入这个域吗。
+#
+# 只有 can_issue 需要审批 —— 其他（用哪些工具、自限额、工作目录）
+# 都是节点自律，Mesh 只记录不拦。
+roles:
+  - name: worker
+    can_issue: false
+    serves: ["demo.*"]
+    max_response_level: summary
+    description: "只执行任务，不发布。内网执行者、检索节点"
+
+  - name: driver
+    can_issue: true
+    serves: ["demo.*"]
+    max_response_level: summary
+    description: "既发布也执行。主 Agent 的典型角色"
+
+  - name: publisher
+    can_issue: true
+    serves: []
+    max_response_level: summary
+    description: "只发布不执行。通知源、CI 触发器等（当前无实例）"
+
 nodes:
 
   # ============================================================================

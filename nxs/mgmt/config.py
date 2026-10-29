@@ -284,6 +284,25 @@ UNIMPLEMENTED: tuple[tuple[str, str], ...] = (
     ("roles.human_interface",
      "人机入口只是分类标签，无实现逻辑。没有 Web UI、没有面向人的会话通道；"
      "人机交互通过 CLI 与 SDK 进行"),
+    ("RoleDecl.can_issue",
+     "**权模型改造过渡项（Step 1 引入，Step 3 接线）**。"
+     "当前只解析与校验，判定仍走旧的 can_issue_types 白名单。"
+     "Step 3 把 check_publish 切到 role 之后，本项必须删除"),
+    ("RoleDecl.serves",
+     "**权模型改造过渡项（Step 1 引入，Step 4 接线）**。"
+     "当前只用于静态校验（角色引用的类型必须已定义），"
+     "路由仍走节点 capabilities 汇总。Step 4 切过去后删除本项"),
+    ("TypeDecl.delivery",
+     "**权模型改造过渡项（Step 1 引入，Step 4 接线）**。"
+     "当前所有任务都是 unicast，broadcast 的展开逻辑未实现。"
+     "Step 4 实现广播后删除本项"),
+    ("TypeDecl.response_fields",
+     "**权模型改造过渡项（Step 1 引入，Step 3 接线）**。"
+     "应答边界仍读节点 capabilities 里的 response_fields。"
+     "Step 3 切过去后删除本项"),
+    ("TypeDecl.max_level",
+     "**权模型改造过渡项（Step 1 引入，Step 4 接线）**。"
+     "上限计算仍读节点能力声明的 level。Step 4 切过去后删除本项"),
 )
 
 
@@ -306,6 +325,189 @@ class DomainDecl:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class TypeDecl:
+    """一个任务类型的**全局定义**。
+
+    ⭐ **这是权限模型改造的地基：任务类型必须只有一个定义方。**
+
+    旧模型里类型是从各节点卡片的 `capabilities` 汇总出来的，于是同一个
+    `work.query` 可以由两个节点声明成两套契约（不同的 `params_schema`、
+    不同的 `response_fields`），而系统不报错 —— 因为"谁说得对"没有答案。
+
+    实测确认过这个漏洞：构造两张都声明 `work.query` 但 `response_fields`
+    不同的卡片，两个都能成功注册。
+
+    现在类型由运维定义一次，节点只能**引用**（通过角色）。一个名字只有一种含义。
+    """
+
+    name: str
+    #: 交付模式。当前只支持 unicast / broadcast。
+    #: multicast（群组多播）等 group 做了再加 —— 不预留用不了的枚举值。
+    delivery: str = "unicast"
+    #: 该类型承诺的产出等级
+    max_level: Level = Level.SUMMARY
+    #: 应答字段白名单。空元组表示"该类型不限制字段"（仅对 demo 类型宽容）
+    response_fields: tuple[str, ...] = ()
+    #: 自由文本字段（提示注入的主要载体，两边都会清洗）
+    freetext_fields: tuple[str, ...] = ()
+    #: 参数 schema。当前仅声明，Step 6 才真正校验
+    params_schema: dict[str, str] = field(default_factory=dict)
+    description: str = ""
+
+    _FIELDS = ("name", "delivery", "max_level", "response_fields",
+               "freetext_fields", "params_schema", "description")
+
+    #: 支持的交付模式。**刻意只有两个** —— multicast 等 group 真做了再加，
+    #: 否则又是一个"枚举里有、但用不了"的值。
+    DELIVERY_MODES = ("unicast", "broadcast")
+
+    @classmethod
+    def from_dict(cls, obj: Mapping[str, Any], where: str) -> "TypeDecl":
+        if not isinstance(obj, Mapping):
+            raise ConfigError(f"{where}: 期望映射")
+        _reject_unknown(obj, cls._FIELDS, where)
+
+        name = str(_require(obj, "name", where, (str,)))
+        # 命名约定 <verb>.<object>，与 RoleCard 的 capability 校验保持一致
+        if not name or "." not in name:
+            raise ConfigError(
+                f"{where}.name: '{name}' 不符合 <verb>.<object> 命名约定"
+                f"（如 work.query）"
+            )
+
+        delivery = str(obj.get("delivery", "unicast")).strip().lower()
+        if delivery not in cls.DELIVERY_MODES:
+            raise ConfigError(
+                f"{where}.delivery: '{delivery}' 不受支持；"
+                f"可选 {list(cls.DELIVERY_MODES)}"
+                + ("（multicast 等 group 能力落地后再加）"
+                   if delivery == "multicast" else "")
+            )
+
+        fields = obj.get("response_fields") or []
+        if not isinstance(fields, (list, tuple)):
+            raise ConfigError(f"{where}.response_fields: 期望列表")
+        ft = obj.get("freetext_fields") or []
+        if not isinstance(ft, (list, tuple)):
+            raise ConfigError(f"{where}.freetext_fields: 期望列表")
+
+        freetext = tuple(str(x) for x in ft)
+        rf = tuple(str(x) for x in fields)
+        # 自由文本字段必须是应答字段的子集 —— 否则声明了一个永远不可能出现的字段
+        extra = [x for x in freetext if rf and x not in rf]
+        if extra:
+            raise ConfigError(
+                f"{where}.freetext_fields: {extra} 不在 response_fields 里"
+            )
+
+        schema = obj.get("params_schema") or {}
+        if not isinstance(schema, Mapping):
+            raise ConfigError(f"{where}.params_schema: 期望映射")
+
+        return cls(
+            name=name,
+            delivery=delivery,
+            max_level=Level.parse(obj.get("max_level", "summary"),
+                                  f"{where}.max_level"),
+            response_fields=rf,
+            freetext_fields=freetext,
+            params_schema=dict(schema),
+            description=str(obj.get("description", "")),
+        )
+
+    def serves(self, task_type: str) -> bool:
+        """是否就是这个类型（类型定义本身不做通配匹配）。"""
+        return self.name == task_type
+
+
+@dataclass(frozen=True)
+class RoleDecl:
+    """一个**角色**：能力与权限的预设组合。
+
+    ⭐ **Agent 不逐项申请权限，而是从这些角色里选一个。**
+
+    审批只需回答一个问题：允许这个 Agent 以这个角色加入这个域吗。
+
+    与旧模型的关键区别：旧模型把权限拆成 5 个布尔标志 + 逐类型白名单，
+    让每个节点自己拼装。实测下来 5 个标志里有 4 个从不参与判定，
+    而某"内网执行者"被批出了发布权却没人回头看过。
+    """
+
+    name: str
+    #: 能否发布任务。这是**唯一**需要审批的能力（其他都是节点自律）。
+    can_issue: bool = False
+    #: 能服务哪些任务类型。支持 `前缀.*` 通配。
+    serves: tuple[str, ...] = ()
+    #: 该类角色的节点最多能产出多细的内容（与节点自限取 min）
+    max_response_level: Level = Level.SUMMARY
+    description: str = ""
+
+    _FIELDS = ("name", "can_issue", "serves", "max_response_level", "description")
+
+    @classmethod
+    def from_dict(cls, obj: Mapping[str, Any], where: str) -> "RoleDecl":
+        if not isinstance(obj, Mapping):
+            raise ConfigError(f"{where}: 期望映射")
+        _reject_unknown(obj, cls._FIELDS, where)
+
+        name = str(_require(obj, "name", where, (str,)))
+        if not name.strip():
+            raise ConfigError(f"{where}.name: 不能为空")
+
+        raw_serves = obj.get("serves") or []
+        if not isinstance(raw_serves, (list, tuple)):
+            raise ConfigError(f"{where}.serves: 期望列表")
+        serves: list[str] = []
+        for s in raw_serves:
+            if not isinstance(s, str) or not s.strip():
+                raise ConfigError(f"{where}.serves: 元素必须是非空字符串")
+            if s.strip() == "*":
+                # 与矩阵同理：裸通配等于取消默认拒绝
+                raise ConfigError(
+                    f"{where}.serves: 不允许裸通配 '*'；"
+                    f"请写成 '<前缀>.*' 显式限定范围"
+                )
+            serves.append(s.strip())
+
+        can_issue = bool(obj.get("can_issue", False))
+
+        # ⭐ 空角色校验：既不能发布、又不服务任何类型 —— 那它什么都做不了。
+        #
+        # 这不是"理论上不该有"，而是配置时很容易写出来的东西：
+        # 想定义一个 publisher，忘了写 can_issue: true，于是得到一个
+        # 既不能发也不能收的角色。批准这样的角色会让运维以为放行了权限，
+        # 实际什么都没放。
+        if not can_issue and not serves:
+            raise ConfigError(
+                f"{where} ('{name.strip()}'): 这个角色既不能发布任务"
+                f"（can_issue=false）又不服务任何类型（serves 为空）—— "
+                f"它什么都做不了。\n"
+                f"  · 只执行的节点：写 serves: [类型]\n"
+                f"  · 只发布的角色：写 can_issue: true\n"
+            )
+
+        return cls(
+            name=name.strip(),
+            can_issue=can_issue,
+            serves=tuple(serves),
+            max_response_level=Level.parse(
+                obj.get("max_response_level", "summary"),
+                f"{where}.max_response_level"),
+            description=str(obj.get("description", "")),
+        )
+
+    def serves_type(self, task_type: str) -> bool:
+        """能否服务某个任务类型。`前缀.*` 通配，保留结尾的点避免误匹配。"""
+        for p in self.serves:
+            if p.endswith(".*"):
+                if task_type.startswith(p[:-1]):
+                    return True
+            elif task_type == p:
+                return True
+        return False
+
+
 @dataclass
 class NexusConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -313,6 +515,16 @@ class NexusConfig:
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     #: 信任域声明，按名字索引。为空时退化为"从节点卡片推导"（向后兼容）。
     domains: dict[str, DomainDecl] = field(default_factory=dict)
+    #: 任务类型的**全局定义**，按名字索引。
+    #:
+    #: ⚠ 改造中：Step 1 只做解析与静态校验，判定逻辑仍走旧的
+    #: 「从节点 capabilities 汇总」。等 Step 3/4 切过去后，这份定义
+    #: 才是唯一权威。
+    #:
+    #: 为空表示"尚未迁移"——旧配置照常工作。
+    types: dict[str, TypeDecl] = field(default_factory=dict)
+    #: 角色定义，按名字索引。同样为空表示尚未迁移。
+    roles: dict[str, RoleDecl] = field(default_factory=dict)
     #: 节点角色卡，按 node_id 索引
     nodes: dict[str, RoleCard] = field(default_factory=dict)
     #: 节点凭据，按 node_id 索引。**只存在于内存，不写入任何日志。**
@@ -437,6 +649,67 @@ def _parse_domains(obj: Any) -> dict[str, DomainDecl]:
     return out
 
 
+
+def _parse_types(obj: Any, *, source: str) -> dict[str, TypeDecl]:
+    """解析 ``types:`` 节。省略时返回空 dict（= 尚未迁移）。"""
+    if obj is None:
+        return {}
+    if not isinstance(obj, (list, tuple)):
+        raise ConfigError(f"{source}.types: 期望列表")
+    out: dict[str, TypeDecl] = {}
+    for i, entry in enumerate(obj):
+        where = f"{source}.types[{i}]"
+        decl = TypeDecl.from_dict(entry, where)
+        if decl.name in out:
+            raise ConfigError(
+                f"{where}: 任务类型 '{decl.name}' 重复定义。\n"
+                f"  ⚠ 类型必须全局唯一 —— 旧模型允许两个节点各声明一套同名"
+                f"类型的契约，那是本次改造要修的问题。"
+            )
+        out[decl.name] = decl
+    if not out:
+        raise ConfigError(f"{source}.types: 声明了该节但内容为空")
+    return out
+
+
+def _parse_roles(obj: Any, *, source: str,
+                 types: Mapping[str, TypeDecl]) -> dict[str, RoleDecl]:
+    """解析 ``roles:`` 节，并校验它引用的类型都已定义。"""
+    if obj is None:
+        return {}
+    if not isinstance(obj, (list, tuple)):
+        raise ConfigError(f"{source}.roles: 期望列表")
+    out: dict[str, RoleDecl] = {}
+    for i, entry in enumerate(obj):
+        where = f"{source}.roles[{i}]"
+        decl = RoleDecl.from_dict(entry, where)
+        if decl.name in out:
+            raise ConfigError(f"{where}: 角色 '{decl.name}' 重复定义")
+
+        # ⭐ 角色引用的类型必须已定义。
+        #
+        # 提前报错比运行时"任务投出去没人能接"好排查得多 ——
+        # 后者的症状是"派了活没反应"，而这看起来像网络问题。
+        if types:
+            for pattern in decl.serves:
+                if pattern.endswith(".*"):
+                    prefix = pattern[:-1]
+                    if not any(tn.startswith(prefix) for tn in types):
+                        raise ConfigError(
+                            f"{where}.serves: 通配 '{pattern}' 匹配不到任何"
+                            f"已定义的类型；已定义 {sorted(types)}"
+                        )
+                elif pattern not in types:
+                    raise ConfigError(
+                        f"{where}.serves: 类型 '{pattern}' 未在 types 中定义；"
+                        f"已定义 {sorted(types)}"
+                    )
+        out[decl.name] = decl
+    if not out:
+        raise ConfigError(f"{source}.roles: 声明了该节但内容为空")
+    return out
+
+
 def _load_yaml(path: Path) -> Mapping[str, Any]:
     try:
         import yaml  # 延迟导入：核心模块不依赖它，只有配置层需要
@@ -526,7 +799,9 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
     env = dict(os.environ if env is None else env)
     raw = _load_yaml(resolved)
     _reject_unknown(
-        raw, ("server", "stores", "policy", "domains", "nodes", "local_node"),
+        raw,
+        ("server", "stores", "policy", "domains", "nodes", "local_node",
+         "types", "roles"),
         f"{resolved.name}",
     )
 
@@ -584,6 +859,14 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
 
     # ---- 策略矩阵引用的域与类型必须真实存在 ----
     policy = PolicyConfig.from_dict(raw.get("policy"))
+
+    # ---- 任务类型与角色（权限模型改造，Step 1）----
+    #
+    # 两节都是可选的：省略即表示"该部署尚未迁移到角色模型"，
+    # 判定仍走旧的 capabilities 汇总。这样现有配置不受影响。
+    declared_types = _parse_types(raw.get("types"), source=resolved.name)
+    declared_roles = _parse_roles(raw.get("roles"), source=resolved.name,
+                                  types=declared_types)
 
     # ⭐ 严格模式 vs 自注册模式
     #
@@ -667,6 +950,8 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
         stores=StoreConfig.from_dict(raw.get("stores")),
         policy=policy,
         domains=declared_domains,
+        types=declared_types,
+        roles=declared_roles,
         nodes=nodes,
         secrets=secrets,
         local_node=local_node,
@@ -677,6 +962,8 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
+    "RoleDecl",
+    "TypeDecl",
     "DEMO_SECRET_SUFFIX",
     "UNIMPLEMENTED",
     "EXAMPLE_CONFIG_PATH",

@@ -81,7 +81,11 @@ sudo rm -f /var/lib/nexus-mesh/registry.db /var/lib/nexus-mesh/registry.db-shm \
 
 每步结束的可运行状态与验收判据如下。**测试没绿不要进下一步。**
 
-### Step 1 · 类型与角色定义进配置
+### Step 1 · 类型与角色定义进配置 ✅ 已完成（2026-10-29）
+
+> **完成情况**：`TypeDecl` / `RoleDecl` 已实现，`types:` / `roles:` 两节
+> 已接入 `load_config`，示例配置已补齐，新增 23 条测试。
+> **旧判定逻辑一行未动** —— `nxs verify` 19 项、`make demo` 九步全部通过。
 
 **改**
 
@@ -94,6 +98,46 @@ sudo rm -f /var/lib/nexus-mesh/registry.db /var/lib/nexus-mesh/registry.db-shm \
 **这步只加配置解析，不改任何判定。** 跑测试应该全绿。
 
 **判据**：配置里有非法类型引用 → 启动报错且指明是哪一行。
+
+**实际产出**
+
+| 内容 | 位置 |
+|---|---|
+| `TypeDecl`（类型定义） | `nxs/mgmt/config.py` |
+| `RoleDecl`（角色定义） | 同上 |
+| `_parse_types` / `_parse_roles` | 同上，含交叉校验 |
+| 示例配置 `types:` / `roles:` | `config/nxs.example.yaml` |
+| 测试 23 条 | `tests/test_type_and_role_config.py` |
+
+**实现的静态校验**（每条都有对应测试）
+
+| 校验 | 为什么 |
+|---|---|
+| 类型名符合 `<verb>.<object>` | 与能力声明的命名约定一致 |
+| **同名类型不可重复定义** | ★ 本改造的核心目的：旧模型允许两套契约共存 |
+| `delivery` 只接受 unicast / broadcast | multicast 不预留"用不了的值" |
+| `freetext_fields ⊆ response_fields` | 声明一个永不出现的字段会让人误以为那里有清洗 |
+| 未知字段报错 | 拼错 `delivery` 被静默忽略 → 以为配了实际没配 |
+| 角色引用的类型必须已定义 | 提前报错，避免运行时"派了活没反应" |
+| 通配模式必须能匹配到类型 | `invest.*` 在只有 `work.*` 时是配置错误 |
+| **空角色被拒** | 既不能发又不服务的角色，批准了等于什么都没放 |
+
+**⚠ Step 1 期间新增的 5 个「已知缺口」**
+
+`TypeDecl` / `RoleDecl` 的字段现在**只解析、不参与判定**。这必须如实登记，
+不能让它静默存在 —— 已加入 `config.UNIMPLEMENTED`：
+
+| 字段 | 何时接线 |
+|---|---|
+| `RoleDecl.can_issue` | Step 3 |
+| `RoleDecl.serves` | Step 4 |
+| `TypeDecl.delivery` | Step 4 |
+| `TypeDecl.response_fields` | Step 3 |
+| `TypeDecl.max_level` | Step 4 |
+
+> 这个登记是 `test_every_config_field_is_read_somewhere` 逼出来的 ——
+> 该守护的历史事故正是 `MatrixRule.allow_issue` 定义了却从未被读取。
+> **我没有用豁免绕过它，而是如实登记并写明接线时机。**
 
 ---
 
