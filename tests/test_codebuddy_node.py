@@ -666,11 +666,25 @@ class TestActorDirIsAgentDir:
     @covers("M14.F9")
     def test_ps1_sets_actor_dir_to_agent_dir(self):
         """ps1 必须把 NXS_ACTOR_DIR 设成 $AgentDir，不是 $ConfDir。"""
+        import re as _re
+
         text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
-        # 找 envPairs 里那一行
-        line = next((l for l in text.splitlines()
-                     if '"NXS_ACTOR_DIR"' in l and "=" in l), "")
-        assert line, "找不到 NXS_ACTOR_DIR 的设置"
+
+        # ⚠ **只找赋值形式 `"NXS_ACTOR_DIR" = <值>`。**
+        #
+        #   原来的判据是「含该字符串且有等号」，太宽 —— 后来脚本里加了
+        #   一行 `$need = @("NXS_ACTOR_DIR", "NXS_COORDINATOR_URL", ...)`
+        #   （计划任务前的环境变量检查），它有引号也有等号，
+        #   于是被误当成赋值行，测试直接红。
+        #
+        #   这是"检查器自己的判据不够精确"的又一例：
+        #   报错信息说"NXS_ACTOR_DIR 没有指向 $AgentDir"，
+        #   而实际指向是对的 —— 误导方向。
+        pat = _re.compile(
+            r'^\s*"NXS_ACTOR_DIR"\s*=\s*(.+?),?\s*$', _re.M)
+        m = pat.search(text)
+        assert m, "找不到 NXS_ACTOR_DIR 的赋值行（形如 \"NXS_ACTOR_DIR\" = ...）"
+        line = m.group(0).strip()
         assert "$AgentDir" in line, (
             f"NXS_ACTOR_DIR 没有指向 $AgentDir：{line.strip()}\n"
             f"  它必须指向装 .env 的目录，不是它的上一级"

@@ -765,6 +765,46 @@ if ($InstallTask) {
 
     $taskName = "NexusMesh-$NodeId"
 
+    # ⚠⚠ **计划任务读不到当前窗口的环境变量，这是必须提前查的。**
+    #
+    #   计划任务由 Task Scheduler 以你的身份拉起，环境只有
+    #   「系统级 + 用户级（HKCU\Environment）」——
+    #   **当前 PowerShell 里 set 的临时变量它完全看不到。**
+    #
+    #   而节点靠这几个环境变量找凭据与 CLI：
+    #     NXS_ACTOR_DIR / NXS_COORDINATOR_URL / NXS_CA_FILE / CODEBUDDY_BIN
+    #   缺 NXS_ACTOR_DIR 时，load_actor 会退回默认目录
+    #   （Windows 上是 C:\etc\nexus-mesh\agents），那里没有凭据 → 启动即失败。
+    #
+    #   最恶劣的地方：任务看起来"创建成功"，`Get-ScheduledTaskInfo`
+    #   只报"上次运行结果 0x1"，没有任何线索指向"环境变量没写"。
+    #
+    #   所以这里主动查用户级，缺了就明确说出来。
+    $need = @("NXS_ACTOR_DIR", "NXS_COORDINATOR_URL", "NXS_CA_FILE")
+    $missingUserEnv = @()
+    foreach ($k in $need) {
+        $uv = [Environment]::GetEnvironmentVariable($k, "User")
+        if (-not $uv) { $missingUserEnv += $k }
+    }
+
+    if ($missingUserEnv.Count -gt 0) {
+        Warn "用户级环境变量缺失，计划任务拉起时会找不到凭据："
+        foreach ($k in $missingUserEnv) { Say "       $k" }
+        Say ""
+        Say "       计划任务**不继承当前窗口的环境变量**，只读用户级/系统级。"
+        Say "       不加 -WriteEnv 的话，节点启动后会去默认目录找凭据："
+        Say "         C:\etc\nexus-mesh\agents\$NodeId.env（不存在）"
+        Say "       而任务状态只会显示「上次运行结果 0x1」，看不出是这个原因。"
+        Say ""
+        Say "       → 请重跑并同时加 -WriteEnv："
+        Say "         powershell -ExecutionPolicy Bypass -File deploy\setup-work-node.ps1 -WriteEnv -InstallTask"
+        Say ""
+        Warn "本次仍会创建任务，但**预计启动失败**。"
+        Say ""
+    } else {
+        Ok "用户级环境变量已就绪（计划任务能读到）"
+    }
+
     # 已存在就先删 —— 否则 Register 会报错，而错误信息不直观
     if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false

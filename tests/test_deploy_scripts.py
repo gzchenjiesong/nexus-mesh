@@ -2247,3 +2247,66 @@ class TestVersionReporting:
         # 必须真的去读 __init__.py 和 git
         assert "__version__" in text, "没从 __init__.py 读版本号"
         assert "rev-parse" in text, "没取 git commit"
+
+
+class TestNoBareQuoteInsidePsString:
+    """★★ 中文说明里不能用 ASCII 双引号包裹词语。
+
+    ⚠ **这是我在写 `-InstallTask` 提示时自己犯的、且很难发现的一类错。**
+
+    写的是::
+
+        Say "       而任务状态只会显示"上次运行结果 0x1"，看不出原因。"
+
+    PowerShell 会把第一个 ASCII 双引号当作字符串**结束**，
+    于是这行变成「Say 带 3 个参数」。而 ``function Say($msg)``
+    只接第一个，**后面两段被静默丢弃** ——
+
+        实际输出: [       而任务状态只会显示]
+
+    没有报错、没有警告、语法解析器也通过。**只是话说了一半。**
+
+    ## 为什么语法检查抓不到
+
+    ``Say "a" b "c"`` 是合法的多参数调用。解析器认为没问题，
+    问题在于函数签名只收一个参数。这是**语义**问题，不是语法问题。
+
+    ## 判据
+
+    ``Say``/``Ok``/``Bad``/``Warn`` 后面那个双引号字符串里，
+    不能再出现**未转义**的 ASCII 双引号。
+    转义形式 `` \\`" `` 是合法的（表示字面量引号）。
+    """
+
+    #: 只有这些辅助函数是"只收一个参数"的
+    HELPERS = ("Say", "Ok", "Bad", "Warn")
+
+    @covers("M14.F8")
+    def test_no_bare_ascii_quote_inside_helper_string(self):
+        import re
+
+        problems = []
+        for p in (DEPLOY / "setup-work-node.ps1",):
+            if not p.exists():
+                continue
+            for lineno, line in enumerate(
+                    p.read_bytes().decode("utf-8-sig").splitlines(), 1):
+                s = line.strip()
+                if s.startswith("#"):
+                    continue
+                m = re.match(
+                    r"^(?:" + "|".join(self.HELPERS) + r')\s+"(.*)"\s*$', s)
+                if not m:
+                    continue
+                inner = m.group(1)
+                # 去掉 `" 转义，剩下的 ASCII 双引号就是"裸的"
+                stripped = inner.replace('`"', "")
+                if '"' in stripped:
+                    problems.append((p.name, lineno, s[:100]))
+
+        assert not problems, (
+            "这些提示行的字符串里有未转义的 ASCII 双引号，\n"
+            "  会被当成字符串结束，**后半句被静默丢弃**：\n"
+            + "\n".join(f"    {n}:{ln}  {s}" for n, ln, s in problems)
+            + "\n  修法：中文里改用全角引号「」，或在需要字面引号时用 `\""
+        )
