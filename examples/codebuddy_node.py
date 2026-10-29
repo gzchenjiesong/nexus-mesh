@@ -321,14 +321,6 @@ def build_card(node_id: str, domain: str, *,
             "can_receive_from": sorted({domain, "cloud"}),
             "can_issue_types": ["agent.ask"],
             "can_delegate_to": [],
-            "quota": {
-                "tasks_per_day": 200,
-                # ★ 按**摘要上限**算字节配额，不是按协议上限。
-                #   这样配额数字与实际能送出去的量一致。
-                "bytes_per_response": SUMMARY_LIMIT,
-                "bytes_per_day": SUMMARY_LIMIT * 200,
-                "concurrent_tasks": 1,   # CodeBuddy 单会话，不并发
-            },
         },
     })
 

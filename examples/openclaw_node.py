@@ -50,7 +50,7 @@ allow: exec, process, read, ls, write, edit, apply_patch, ...
 |---|---|
 | 谁有发布权 | 只有 ``coordinator`` 有 ``issuer``。其余节点若要发布，需运维批准其角色卡 |
 | 矩阵 | ``zone-work → cloud`` 只放行 ``work.*``，**不含 ``agent.ask``** —— 外部域派不进来 |
-| 日配额 | ``quota.tasks_per_day`` 压低，失控循环烧不了无限次 |
+| 信箱深度 | ``self_limits.max_backlog`` 压低，失控循环烧不了无限次 |
 | 审计 | 每次投递记元数据，可事后追溯 |
 | 工具面 | **当前未限制** ← 唯一的缺口，等确定后再收窄 |
 
@@ -160,12 +160,6 @@ def build_card(node_id: str, domain: str, *, agent_id: str,
             # ★ 只放行 agent.ask
             "can_issue_types": ["agent.ask"],
             "can_delegate_to": [],
-            "quota": {
-                "tasks_per_day": 100,
-                "bytes_per_response": MAX_ANSWER_BYTES,
-                "bytes_per_day": MAX_ANSWER_BYTES * 100,
-                "concurrent_tasks": 1,   # OpenClaw agent turn 不宜并发
-            },
         },
     })
 

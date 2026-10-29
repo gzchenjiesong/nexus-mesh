@@ -20,7 +20,6 @@ from .models import (
     Capability,
     Constraints,
     Level,
-    Quota,
     RoleCard,
     Roles,
     Semantics,
@@ -31,7 +30,7 @@ from .models import (
 
 __all__ = [
     "ENVELOPE_VERSION", "Artifact", "AuthFailed", "Capability", "ConfigError",
-    "Constraints", "Envelope", "Level", "NexusError", "PolicyDenied", "Quota",
+    "Constraints", "Envelope", "Level", "NexusError", "PolicyDenied",
     "RoleCard", "Roles", "RuleId", "Semantics", "Task", "TaskExecutionError",
     "TaskMode", "TaskStatus", "canonical_bytes", "envelope_for", "safe_message",
 ]

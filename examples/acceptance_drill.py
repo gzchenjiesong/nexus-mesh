@@ -325,34 +325,54 @@ def drill_ui(transports: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def drill_dead_config(transports: dict) -> None:
-    """手册第三章：登记的死配置确实不生效。"""
-    from nxs.core.models import Artifact, Level
+    """手册第三章：配额已删除，唯一生效的是信箱深度。
+
+    ⚠ **这一段是性质反转的**（权限模型改造 Step 5b）：
+
+        旧：验证 `bytes_per_response` **确实不生效**（一项死配置）
+        新：验证 `max_backlog` **确实生效**（唯一真正的强制点）
+
+    反转本身就是这次改造的核心成果 —— 从"配了但不生效"变成
+    "配了就真的会被执行"。所以这不再是"抽查死配置"，
+    而是"抽查唯一活着的那道闸门"。
+    """
+    from nxs.core.errors import PolicyDenied, RuleId
     from nxs.mgmt.config import UNIMPLEMENTED
 
-    title("三 · 配了不生效（bytes_per_response 确实不触发）")
-    registered = dict(UNIMPLEMENTED)
-    check("bytes_per_response 已登记为未实现",
-          "bytes_per_response" in registered)
+    title("三 · 节点自限额（max_backlog 确实生效）")
 
-    coordinator = transports["coordinator"]
-    node = transports["node-a"]
-    coordinator.publish(from_node="coordinator", to_node="node-a", task_type="demo.echo",
-                params={"text": "big"}, idempotency_key="drill-dead-config")
-    task = node.poll("node-a")
-    if task is None:
-        check("准备大产物", False, "没领到任务")
-        return
-    # 200 KB > bytes_per_response(64 KB)，< max_body_bytes(256 KB)
-    big = "x" * 200_000
+    # ① 配额必须已从"未实现清单"里消失 —— 因为它整个不存在了
+    registered = dict(UNIMPLEMENTED)
+    check("配额项已从 UNIMPLEMENTED 移除（配置本身已删除）",
+          "bytes_per_response" not in registered,
+          "若它还在清单里，说明配额没删干净")
+
+    # ② Mesh 自我保护必须还在 —— 删配额时很容易误伤
+    from nxs.core.errors import RuleId as _R
+    values = {r.value for r in _R}
+    check("Mesh 自我保护仍在（速率 / 连接数）",
+          "QT-RATE-04" in values and "QT-CONN-06" in values,
+          "这两项与节点配额无关，不该被删")
+
+    # ③ 信箱深度确实会拒收
+    from nxs.control.policy import PolicyEngine
+    app = transports["_app"]
+    eng = PolicyEngine(app.config)
+    card = app.config.nodes["node-a"]
+    limit = card.self_limits.max_backlog
     try:
-        node.complete("node-a", task, [
-            Artifact(level=Level.METADATA, kind="structured",
-                     data={"echo": big, "level": "metadata"})
-        ])
-        check("200 KB 产物未被 bytes_per_response 拦（与手册一致）", True)
-    except Exception as exc:  # noqa: BLE001
-        check("200 KB 产物未被 bytes_per_response 拦", False,
-              f"竟被拦住：{exc}")
+        eng.check_backlog("node-a", pending=limit)
+        check(f"信箱满（{limit}）时拒收", False, "竟然没拒 —— 检查没生效")
+    except PolicyDenied as exc:
+        check(f"信箱满（{limit}）时拒收，错误码 {exc.rule_id.value}",
+              exc.rule_id == RuleId.QT_BACKLOG_FULL,
+              "错误码不对：该用 QT-BACKLOG-07（资源问题），"
+              "不能用 MX-*（权限问题）")
+    try:
+        eng.check_backlog("node-a", pending=0)
+        check("信箱空时放行", True)
+    except PolicyDenied as exc:
+        check("信箱空时放行", False, f"竟然被拒：{exc.rule_id.value}")
 
 
 # ---------------------------------------------------------------------------

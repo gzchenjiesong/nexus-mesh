@@ -58,7 +58,7 @@ code_execution**）。要放宽就用 ``--toolsets`` 显式指定，但请记住
 * **同一个 profile 与 gateway 并存**。gateway 是常驻服务，本桥接是短进程，
   两者共享 ``HERMES_HOME`` 的记忆与配置，但会话互不干扰。
 * **没有对 token 用量做限制**。每条任务都会烧 token（deepseek-v4-pro）。
-  要控成本就收紧 ``quota.tasks_per_day``。
+  要控成本就收紧 ``self_limits.max_backlog``。
 """
 
 from __future__ import annotations
@@ -169,14 +169,6 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
             # 白名单越窄，"它能把什么发出去"就越确定。
             "can_issue_types": ["agent.ask"],
             "can_delegate_to": [],
-            "quota": {
-                # 每次任务都烧 token，所以按日上限刻意压低。
-                # 要处理更多就把这个数调大——那是一个明确的成本决定。
-                "tasks_per_day": 100,
-                "bytes_per_response": MAX_ANSWER_BYTES,
-                "bytes_per_day": MAX_ANSWER_BYTES * 100,
-                "concurrent_tasks": 2,
-            },
         },
     })
 

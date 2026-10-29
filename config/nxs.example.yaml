@@ -256,12 +256,6 @@ nodes:
       can_receive_from: []        # 不接收任何人的委托
       can_issue_types: ["demo.*"] # 能发布 demo.* 前缀下的类型
       can_delegate_to: []         # 不做二次委托
-      quota:
-        tasks_per_day: 1000
-        bytes_per_response: 131072
-        bytes_per_day: 16777216
-        concurrent_tasks: 4
-
   # ============================================================================
   # 节点 A：模拟"最严约束"的一侧
   #   应答上限为摘要级，只能接收来自 cloud 域的委托，且不可作为 Issuer 发布任何任务。
@@ -298,12 +292,6 @@ nodes:
       can_receive_from: [cloud]     # 只有 cloud 能给它派任务
       can_issue_types: []         # 空列表 = 不可发布任何任务
       can_delegate_to: []         # 不做二次委托
-      quota:
-        tasks_per_day: 200
-        bytes_per_response: 65536
-        bytes_per_day: 4194304
-        concurrent_tasks: 1       # 单并发：这类节点通常资源有限
-
   # ============================================================================
   # 节点 B：约束较宽松的一侧
   #   应答上限为片段级，且有一个自由文本字段——演示"含自由文本"的特殊处理。
@@ -359,8 +347,3 @@ nodes:
       #   ⚠ 生产环境是否开放 Issuer 需要你决策（见文档 Q9）。
       can_issue_types: ["demo.*"]
       can_delegate_to: []
-      quota:
-        tasks_per_day: 500
-        bytes_per_response: 131072
-        bytes_per_day: 8388608
-        concurrent_tasks: 2

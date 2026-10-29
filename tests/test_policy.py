@@ -13,7 +13,7 @@ import pytest
 
 from conftest import covers
 
-from nxs.control import PolicyEngine, Usage, make_task
+from nxs.control import PolicyEngine, make_task
 from nxs.core import Artifact, Level, PolicyDenied, RuleId
 
 

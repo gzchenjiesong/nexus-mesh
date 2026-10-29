@@ -124,7 +124,6 @@ def work_card() -> RoleCard:
             "max_response_level": "summary",
             "can_receive_from": ["cloud"],
             "can_issue_types": [],
-            "quota": {"tasks_per_day": 200, "concurrent_tasks": 2},
         },
     })
 

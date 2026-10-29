@@ -400,6 +400,96 @@ coordinator → node-a  demo.echo       → 放行，上限=METADATA
 
 ---
 
+### Step 5b · 删配额 + 信箱深度 ✅ 已完成（2026-10-29）
+
+**删了什么**
+
+| 删除 | 位置 |
+|---|---|
+| `Quota` 类（4 字段） | `nxs/core/models.py` |
+| `Constraints.quota` | 同上 |
+| `Usage` 类（用量快照） | `nxs/control/policy.py` |
+| `check_quota()` | 同上 —— 换成 `check_backlog()` |
+| `app.usage_of()` | 换成 `app.backlog_of()` |
+| 4 个配额错误码 | `QT-TASK-01` / `QT-BYTE-02` / `QT-BYTE-03` / `QT-CONC-05` |
+
+**加了一样东西：`QT-BACKLOG-07`**
+
+它是**唯一真正会执行的**限额。语义说清：
+
+```
+MX-*           → "你没权限"   → 发布方去求运维改配置
+QT-BACKLOG-07  → "它来不及干" → 发布方稍后重试或换节点
+```
+
+**错误码：27 → 24**
+（删 4 个配额码、删 `MX-RECEIVE-03`、加 `AU-APPROVE-05` 与 `QT-BACKLOG-07`）
+
+**保留两项 Mesh 自我保护**
+
+`QT-RATE-04`（请求速率）与 `QT-CONN-06`（连接数）**刻意不动**。
+它们与节点配额是两回事：
+
+| | 问的问题 | 归谁 |
+|---|---|---|
+| 节点配额 | 你还能不能干活 | 节点自己 |
+| Mesh 自保 | 网络会不会被你拖垮 | 必须由 Mesh 强制 |
+
+删配额时很容易顺手把这两个也删掉 —— 那会让单个节点打爆网关。
+
+**⚠ 改动中漏了三处，都是测试抓到的**
+
+| 漏的地方 | 症状 |
+|---|---|
+| `matcher.py:184` 读 `card.constraints.quota` | 自动匹配时崩溃 |
+| `gateway.py` whoami 端点调 `usage_of()` | HTTP 500（RemoteDisconnected）|
+| `observ.py` 注释仍写"退回 quota" | 只是过时注释，不影响行为 |
+
+前两个是**真 bug** —— 说明"删字段"这个动作必须配合全库搜索，
+不能只改自己记得的那几处。
+
+**测试：新增 `tests/test_backlog.py`（9 条）**
+
+其中三条是这次改造最有价值的守护：
+
+| 测试 | 保护什么 |
+|---|---|
+| `test_at_limit_rejected` | 边界是 `>=` 不是 `>` —— 写成 `>` 会多攒一个 |
+| `test_uses_qt_backlog_not_mx` | 错误码必须是 `QT-*`，用 `MX-*` 会让发布方以为要审批 |
+| `test_mesh_self_protection_survives` | **反向**：删配额别误伤自保两项 |
+
+**双向验证三项**
+
+```
+边界改成 > limit        → 4 条 FAILED
+错误码改回 MX-*         → 2 条 FAILED
+整个检查变空操作        → 5 条 FAILED
+```
+
+**⚠ 一条测试我写反了，改的是测试不是代码**
+
+我最初写 `test_message_includes_counts`，要求错误响应里带 `pending=3/3`。
+但 `to_wire()` 的注释写明：**只含 rule_id 与固定消息** —— 不泄露内部状态，
+否则错误响应变成探测通道。
+
+已改为 `test_wire_message_does_not_leak_counts`：验证对外不带数字，
+而 `detail`（仅本地日志）带数字。
+
+**验收演练的性质反转**
+
+`examples/acceptance_drill.py` 第三章原本是「验证 `bytes_per_response`
+**确实不生效**」，现在改成「验证 `max_backlog` **确实生效**」。
+
+这个反转就是改造的核心成果：从"配了但不生效"变成"配了就真会执行"。
+
+**`UNIMPLEMENTED` 清单：12 → 6**
+
+删掉已过期的 6 项：`bytes_per_response` / `bytes_per_day`（配置已删）、
+`RoleDecl.can_issue`（Step 3 接线）、`RoleDecl.serves`（Step 4 接线）、
+`TypeDecl.response_fields` / `max_level`（Step 4 接线）。
+
+---
+
 ### Step 6 · 新功能：`paused` 状态 + schema 校验
 
 **改**

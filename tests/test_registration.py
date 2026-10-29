@@ -76,7 +76,6 @@ def make_card(node_id: str = "work-laptop", *, domain: str = "zone-work",
             "max_response_level": level,
             "can_receive_from": ["cloud"],
             "can_issue_types": [],
-            "quota": {"tasks_per_day": 100, "concurrent_tasks": 1},
         },
     })
 

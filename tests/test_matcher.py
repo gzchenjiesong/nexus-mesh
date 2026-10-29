@@ -38,15 +38,21 @@ from nxs.mgmt.config import load_config
 def card(node_id: str, *, domain: str = "zone-a", task_type: str = "job.run",
          level: str = "summary", max_level: str = "full_text",
          can_receive_from: tuple[str, ...] = ("cloud",),
-         concurrent: int = 1) -> RoleCard:
+         capacity: int = 1) -> RoleCard:
     """造一张最小角色卡。
 
     ``level``（能力声明的等级）与 ``max_level``（卡片上限）分开给，
     因为匹配器要取两者的**较小值**——这是最容易写错的地方之一。
+
+    ⚠ 参数名从 ``concurrent`` 改成 ``capacity``（权限模型改造 Step 5b）：
+    旧的 ``quota.concurrent_tasks`` 已删除，并发意图现在由 ``capacity``
+    表达 —— 语义从"配额上限"降级为"排程提示"，但匹配器算负载率时
+    用的是同一个数。
     """
     return RoleCard.from_dict({
         "node_id": node_id,
         "domain": domain,
+        "capacity": capacity,
         "roles": {"executor": True},
         "capabilities": [{
             "type": task_type, "level": level, "mode": "sync",
@@ -55,7 +61,6 @@ def card(node_id: str, *, domain: str = "zone-a", task_type: str = "job.run",
         "constraints": {
             "max_response_level": max_level,
             "can_receive_from": list(can_receive_from),
-            "quota": {"concurrent_tasks": concurrent},
         },
     })
 
@@ -198,7 +203,7 @@ class TestDeterministicOrdering:
         这是"确定性"最直接的表达。任何一处引入了字典序、集合序、
         或者"当前时间"作为排序依据，这条都会红。
         """
-        s = make_matcher(*[card(f"n{i}", concurrent=2) for i in range(6)])
+        s = make_matcher(*[card(f"n{i}", capacity=2) for i in range(6)])
         first = [c.node_id for c in s["matcher"].candidates(REQ)]
         for _ in range(20):
             assert [c.node_id for c in s["matcher"].candidates(REQ)] == first
@@ -239,7 +244,7 @@ class TestDeterministicOrdering:
         """③ 负载率低的优先。用比率而非绝对数。"""
         s = make_matcher(
             # busy: 1/1 满了；idle: 0/1 空闲
-            card("busy", concurrent=1), card("idle", concurrent=1),
+            card("busy", capacity=1), card("idle", capacity=1),
             working={"busy": 1},
         )
         assert [c.node_id for c in s["matcher"].candidates(REQ)] == ["idle", "busy"]
@@ -252,7 +257,7 @@ class TestDeterministicOrdering:
         按绝对数会选 small，按比率才是 big —— 后者才反映"谁真的还有余力"。
         """
         s = make_matcher(
-            card("big", concurrent=8), card("small", concurrent=1),
+            card("big", capacity=8), card("small", capacity=1),
             working={"big": 3, "small": 1},
         )
         ratios = {(c.node_id): c.load_ratio for c in s["matcher"].candidates(REQ)}
@@ -352,7 +357,7 @@ class TestSelect:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 called.add(node.func.attr)
 
-        forbidden = {"check_delivery", "check_publish", "check_quota",
+        forbidden = {"check_delivery", "check_publish", "check_backlog",
                      "check_response", "find"}
         # `find` 是 MatrixRule 查找矩阵用的（policy.find），也在禁止之列
         overlap = called & forbidden
@@ -473,7 +478,6 @@ class TestAutoDelivery:
             "constraints": {
                 "max_response_level": "metadata",
                 "can_receive_from": ["cloud"],
-                "quota": {"concurrent_tasks": 1},
             },
         }), approved=True)
 

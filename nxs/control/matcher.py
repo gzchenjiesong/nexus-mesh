@@ -181,7 +181,8 @@ class Matcher:
                 domain=card.domain,
                 level=provided,
                 load=self._load_of(card.node_id),
-                capacity=card.constraints.quota.concurrent_tasks,
+                # 排程提示：直接读 capacity（quota 已删，Step 5b）
+                capacity=card.effective_capacity(),
                 same_domain=bool(req.from_domain) and card.domain == req.from_domain,
             ))
 

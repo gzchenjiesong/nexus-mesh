@@ -273,10 +273,9 @@ def _explain_denial(exc: PolicyDenied, me: str, target: str) -> str:
         RuleId.WL_TYPE_NOT_REGISTERED:
             f"没有任何节点提供类型 {target!r} 对应的能力。\n"
             f"  检查 --type 是否拼错。",
-        RuleId.QT_TASKS_PER_DAY:
-            "今日任务配额用完了。等明天，或让运维调大 quota.tasks_per_day。",
-        RuleId.QT_CONCURRENCY:
-            f"{target} 的并发已满。稍后重试。",
+        RuleId.QT_BACKLOG_FULL:
+            f"{target} 的信箱已满（它自己申报的 max_backlog 上限）。\n"
+            f"  这不是「你没权限」，是「它来不及干」—— 稍后重试或换节点。",
         RuleId.AU_NODE_UNKNOWN:
             f"{target} 不是已知节点。检查节点 ID。",
     }

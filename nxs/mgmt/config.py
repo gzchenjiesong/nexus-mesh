@@ -271,40 +271,18 @@ EXAMPLE_CONFIG_PATH = "config/nxs.example.yaml"
 #:
 #: **新增配置项时，要么实现它，要么加到这里。**
 UNIMPLEMENTED: tuple[tuple[str, str], ...] = (
-    ("params_schema", "参数 schema 只声明、未校验；格式错误的参数由执行节点自己承担失败"),
-    ("bytes_per_response",
-     "单次应答字节上限永不触发：check_quota 的 planned_bytes 参数无调用点，"
-     "永远收默认值 0。真实的体积硬上限是 server.max_body_bytes（约 186 KB 文件）"),
-    ("bytes_per_day", "应答字节数未按节点累计，故按日字节配额永不触发"),
-    ("roles.relay",
-     "中继角色只声明、无实现逻辑。配置 roles.relay=true 不会让该节点转发任务"),
+    ("params_schema",
+     "参数 schema 只声明、未校验；格式错误的参数由执行节点自己承担失败。"
+     "⚠ Step 6 会真正校验它（TaskType 全局定义后，校验方与定义方是同一个）"),
+    ("roles.relay", "中继角色只声明、无实现逻辑。配 relay=true 不会让节点转发任务"),
     ("roles.observer", "观察者角色只声明、无实现逻辑（无只读订阅通道）"),
     ("roles.executor",
-     "执行角色**不构成准入闸门**：设 executor=false 不会阻止该节点领活与执行。"
-     "真正的闸门是 capabilities 声明（无声明则投递被 WL-TYPE-404 拒绝）。"
-     "实测确认：executor=false 但声明了能力的节点仍可完成完整闭环"),
+     "执行角色**不构成准入闸门**：设 executor=false 不会阻止该节点领活与执行"),
     ("roles.human_interface",
-     "人机入口只是分类标签，无实现逻辑。没有 Web UI、没有面向人的会话通道；"
-     "人机交互通过 CLI 与 SDK 进行"),
-    ("RoleDecl.can_issue",
-     "**权模型改造过渡项（Step 1 引入，Step 3 接线）**。"
-     "当前只解析与校验，判定仍走旧的 can_issue_types 白名单。"
-     "Step 3 把 check_publish 切到 role 之后，本项必须删除"),
-    ("RoleDecl.serves",
-     "**权模型改造过渡项（Step 1 引入，Step 4 接线）**。"
-     "当前只用于静态校验（角色引用的类型必须已定义），"
-     "路由仍走节点 capabilities 汇总。Step 4 切过去后删除本项"),
+     "人机入口只是分类标签，无实现逻辑。人机交互通过 CLI 与 SDK 进行"),
     ("TypeDecl.delivery",
-     "**权模型改造过渡项（Step 1 引入，Step 4 接线）**。"
-     "当前所有任务都是 unicast，broadcast 的展开逻辑未实现。"
-     "Step 4 实现广播后删除本项"),
-    ("TypeDecl.response_fields",
-     "**权模型改造过渡项（Step 1 引入，Step 3 接线）**。"
-     "应答边界仍读节点 capabilities 里的 response_fields。"
-     "Step 3 切过去后删除本项"),
-    ("TypeDecl.max_level",
-     "**权模型改造过渡项（Step 1 引入，Step 4 接线）**。"
-     "上限计算仍读节点能力声明的 level。Step 4 切过去后删除本项"),
+     "**权限模型改造遗留**：广播（broadcast）的展开逻辑未实现，"
+     "当前所有任务都按单播处理。等 group/广播能力落地后接线"),
 )
 
 

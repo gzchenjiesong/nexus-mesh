@@ -13,7 +13,7 @@
 为什么这个脚本值得进仓库
 ------------------------
 "能传多大"是个会被反复问到的问题，而答案依赖三个地方的限制
-（``server.max_body_bytes`` / 节点 ``quota`` / ``MAX_FREETEXT_BYTES``），
+（``server.max_body_bytes`` / 节点 ``self_limits`` / ``MAX_FREETEXT_BYTES``），
 其中**有一个是死配置**（``bytes_per_response`` 从未被传入，
 见 docs/artifact-size.md）。靠读配置推答案是错的，必须实测。
 
@@ -71,17 +71,17 @@ def _build_app(lease_seconds: int = 60):
     config.stores = replace(config.stores, queue="memory", registry="memory",
                             data_dir="/tmp/nxs-probe")
 
-    # 放宽 node-a 的并发，避免探测之间互相挤占
+    # 放宽 node-a 的信箱深度，避免探测之间互相挤占。
+    #
+    # ⚠ 原来是改 quota（并发 64 / 按日 100000）。配额已在权限模型改造
+    #   Step 5b 删除 —— 现在唯一会拦住探测的是 self_limits.max_backlog，
+    #   所以放宽它即可。
     original = config.nodes["node-a"]
     config.nodes["node-a"] = RoleCard.from_dict({
         **original.to_dict(),
-        "constraints": {
-            **original.to_dict()["constraints"],
-            "quota": {
-                **original.to_dict()["constraints"]["quota"],
-                "concurrent_tasks": 64,
-                "tasks_per_day": 100_000,
-            },
+        "self_limits": {
+            **original.to_dict()["self_limits"],
+            "max_backlog": 500,
         },
     })
 

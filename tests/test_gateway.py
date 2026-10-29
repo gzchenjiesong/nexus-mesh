@@ -693,13 +693,24 @@ class TestWhoamiEndpoint:
         assert info["card"]["capabilities"], "能力清单不该空"
 
     @covers("M1.F9")
-    def test_includes_approval_and_usage(self, clients):
-        """批准状态与今日用量都要给 —— 那正是 Agent 决策所需的。"""
+    def test_includes_approval_and_backlog(self, clients):
+        """批准状态与队列深度都要给 —— 那正是 Agent 决策所需的。
+
+        ⚠ 字段变了（权限模型改造 Step 5b）：
+
+            旧：usage.tasks_today / usage.concurrent_now（配额维度）
+            新：usage.pending（信箱里还有多少待办）
+
+        前两个数是节点自己的成本统计，与"网络怎么对待它"无关，已随配额删除。
+        队列深度是唯一会让发布方被拒（QT-BACKLOG-07）的因素，也是最该报的。
+        """
         info = clients["node-a"].whoami()
         assert "approved" in info
         assert info["approved"] is True
         assert "usage" in info
-        assert "tasks_today" in info["usage"]
+        assert "pending" in info["usage"], (
+            "调用方需要知道「它手上压了多少」才决定要不要再发 —— 这是唯一有用的数"
+        )
 
     @covers("M1.F9")
     def test_only_returns_self_never_others(self, clients):

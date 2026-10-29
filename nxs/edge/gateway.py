@@ -238,11 +238,8 @@ _STATUS_BY_RULE: dict[RuleId, int] = {
     RuleId.WL_FIELD_NOT_ALLOWED: 403,
     RuleId.WL_LEVEL_EXCEEDED: 403,
     RuleId.WL_FREETEXT_NOT_ALLOWED: 403,
-    RuleId.QT_TASKS_PER_DAY: 429,
-    RuleId.QT_BYTES_PER_RESPONSE: 429,
-    RuleId.QT_BYTES_PER_DAY: 429,
+    RuleId.QT_BACKLOG_FULL: 429,
     RuleId.QT_RATE_LIMITED: 429,
-    RuleId.QT_CONCURRENCY: 429,
     RuleId.LF_TASK_NOT_FOUND: 404,
     RuleId.QT_CONNECTION_LIMIT: 503,
     RuleId.LF_LEASE_HELD: 409,
@@ -893,15 +890,19 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         record = self.gw.app.registry.record(node_id)
-        usage = self.gw.app.usage_of(node_id)
+        # ⚠ 原来是 usage_of()，返回按日任务数与并发数。
+        #   配额已删（Step 5b），现在只报一个数：**信箱里还有多少待办**。
+        #
+        #   为什么只留这个：前两个数是节点自己的成本统计，与"网络怎么对待它"
+        #   无关；而队列深度是唯一会让发布方被拒（QT-BACKLOG-07）的因素，
+        #   也是节点申报 paused 的直接依据。
         self._send_json(200, {
             "node_id": node_id,
             "approved": bool(record.approved) if record else False,
             "state": str(record.state) if record else "unknown",
             "card": card.to_dict(),
             "usage": {
-                "tasks_today": usage.tasks_today,
-                "concurrent_now": usage.concurrent_now,
+                "pending": self.gw.app.backlog_of(node_id),
             },
         })
 

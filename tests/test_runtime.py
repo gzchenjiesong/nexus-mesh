@@ -24,7 +24,7 @@ from nxs.backends.memory import (
     MemoryQueueStore,
     MemoryRegistryStore,
 )
-from nxs.control import PolicyEngine, Registry, Usage
+from nxs.control import PolicyEngine, Registry
 from nxs.core import (
     Artifact,
     AuthFailed,

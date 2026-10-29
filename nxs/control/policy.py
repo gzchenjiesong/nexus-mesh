@@ -38,13 +38,11 @@ from ..mgmt.config import MatrixRule, NexusConfig, RoleDecl
 MAX_FREETEXT_BYTES = 4096
 
 
-@dataclass(frozen=True)
-class Usage:
-    """有状态的用量快照。由调用方（生命周期模块）维护并传入。"""
-
-    tasks_today: int = 0
-    bytes_today: int = 0
-    concurrent_now: int = 0
+# ⚠ `Usage` 类已删除（权限模型改造 Step 5b）。
+#
+#   它是配额用量快照（按日任务数 / 字节 / 并发）。配额删了，它也就没有
+#   使用者了 —— 现在只需要一个数：目标信箱里攒了多少个待办。
+#   那个数由 ``app.backlog_of()`` 从队列直接数，不需要专门的快照类型。
 
 
 @dataclass(frozen=True)
@@ -400,31 +398,41 @@ class PolicyEngine:
     # ④ 有状态检查：配额与并发
     # ------------------------------------------------------------------
 
-    def check_quota(self, node_id: str, *, usage: Usage,
-                    planned_bytes: int = 0) -> None:
-        """配额检查。用量由调用方统计并传入，本模块自身无状态。"""
-        card = self._card(node_id)
-        q = card.constraints.quota
+    def check_backlog(self, node_id: str, *, pending: int) -> None:
+        """信箱深度检查。
 
-        if usage.tasks_today >= q.tasks_per_day:
+        ## 这不是"配额"，是节点自己的防御
+
+        旧模型这里叫 `check_quota`，检查按日任务数、应答字节、并发数。
+        **那几项从未生效** —— 而根因是把"节点自己的防御"当成了
+        "网络的管制"：
+
+            命令在节点本机执行，网络看不见也管不了它用多少资源。
+            "网络允许你干多少"这个问法本身就是错的。
+
+        现在只检查一件事：**目标信箱是不是已经攒满了。**
+
+        ## 为什么必须检查
+
+        不设上限意味着积压可以无限增长 —— 发布方会以为自己投递成功，
+        而节点可能已经压了几百个。节点唯一的防御是主动说 `paused`，
+        但它可能还没意识到就被淹了。
+
+        `max_backlog` 由节点自己声明（缺省 20），语义是
+        「我最多攒这么多，超了请别再发了」。
+
+        ## 被拒之后
+
+        发布方应该**稍后重试或换节点**，而不是以为"我被限权了"。
+        所以错误码是 `QT-BACKLOG-07`（"对方的队列满了"），
+        而不是任何 `MX-*`（"你没权限"）。
+        """
+        card = self._card(node_id)
+        limit = card.self_limits.max_backlog
+        if pending >= limit:
             raise PolicyDenied(
-                RuleId.QT_TASKS_PER_DAY,
-                f"{node_id} tasks_today={usage.tasks_today}/{q.tasks_per_day}",
-            )
-        if planned_bytes > q.bytes_per_response:
-            raise PolicyDenied(
-                RuleId.QT_BYTES_PER_RESPONSE,
-                f"planned={planned_bytes} limit={q.bytes_per_response}",
-            )
-        if usage.bytes_today + planned_bytes > q.bytes_per_day:
-            raise PolicyDenied(
-                RuleId.QT_BYTES_PER_DAY,
-                f"{node_id} bytes_today={usage.bytes_today}",
-            )
-        if usage.concurrent_now >= q.concurrent_tasks:
-            raise PolicyDenied(
-                RuleId.QT_CONCURRENCY,
-                f"{node_id} concurrent={usage.concurrent_now}/{q.concurrent_tasks}",
+                RuleId.QT_BACKLOG_FULL,
+                f"{node_id} pending={pending}/{limit}",
             )
 
     # ------------------------------------------------------------------
@@ -509,6 +517,5 @@ __all__ = [
     "MAX_FREETEXT_BYTES",
     "DeliveryDecision",
     "PolicyEngine",
-    "Usage",
     "make_task",
 ]

@@ -22,7 +22,7 @@ from typing import Any, Protocol
 
 from .backends import memory
 from .control.matcher import Matcher
-from .control.policy import PolicyEngine, Usage
+from .control.policy import PolicyEngine
 from .control.registry import Registry
 from .core.errors import ConfigError, PolicyDenied, RuleId
 from .core.models import Artifact, Level, RoleCard, Task, TaskStatus
@@ -184,24 +184,19 @@ class NexusApp:
     # 用量与审计
     # ------------------------------------------------------------------
 
-    def usage_of(self, node_id: str, *, since: str | None = None) -> Usage:
-        """返回节点的当前用量快照。
+    def backlog_of(self, node_id: str) -> int:
+        """某节点信箱里还有多少个待办（``submitted`` 状态）。
 
-        三个维度都取自后端的真实统计：
-        * ``tasks_today`` —— 自 ``since`` 起该节点名下的任务数
-          （``since`` 省略时用"今天零点"，即按自然日统计）
-        * ``concurrent_now`` —— 当前处于 ``working`` 状态的任务数
-        * ``bytes_today`` —— v0.1 未统计（需要按节点累计应答字节数）
+        ⚠ 权限模型改造 Step 5b：原方法是 ``usage_of``，返回含三个维度的
+        ``Usage`` 快照。配额删掉后只需要这一个数 —— **队列深度**。
 
-        并发维度是精确的，它才是真正限制"同一节点同时处理多少任务"的那个。
+        为什么不需要"按日任务数"或"字节数"：
+
+            那些是节点自己的成本统计，与"网络该不该再给它派活"无关。
+            网络唯一需要知道的是「它手上压了多少还没干」，
+            因为那个数决定"再发一个会不会让它白等"。
         """
-        window = since or _today_start()
-        queue = self.stores.queue
-        return Usage(
-            tasks_today=queue.count_tasks(node_id, since=window),
-            concurrent_now=queue.count_tasks(node_id, status="working"),
-            bytes_today=0,
-        )
+        return self.stores.queue.count_tasks(node_id, status="submitted")
 
     def record(self, **kw: Any) -> None:
         """写审计。**失败会抛 :class:`AuditError`**，调用方应据此熔断。"""
@@ -259,7 +254,7 @@ class InProcessTransport:
                 idempotency_key=idempotency_key,
                 min_level=Level.parse(min_level, "min_level")
                 if min_level is not None else Level.METADATA,
-                usage_for=app.usage_of,
+                backlog_for=app.backlog_of,
             )
         except PolicyDenied as denied:
             self._audit_denied(denied, from_node=from_node,

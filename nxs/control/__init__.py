@@ -8,12 +8,11 @@ from .policy import (
     MAX_FREETEXT_BYTES,
     DeliveryDecision,
     PolicyEngine,
-    Usage,
     make_task,
 )
 from .registry import Registry
 
 __all__ = [
     "MAX_FREETEXT_BYTES", "DeliveryDecision", "PolicyEngine", "Registry",
-    "Usage", "make_task",
+    "make_task",
 ]

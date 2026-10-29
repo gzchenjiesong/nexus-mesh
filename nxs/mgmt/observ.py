@@ -731,9 +731,8 @@ def collect(metrics: Metrics, *, registry: Any, queue: Any,
             # ★ 从队列实测，不是计数器的猜测
             in_flight=queue.count_tasks(node_id, status="working"),
             pending=queue.count_tasks(node_id, status="submitted"),
-            # 用 effective_capacity：`capacity` 未声明时退回旧的
-            # quota.concurrent_tasks，所以旧卡片行为完全不变。
-            # 声明了就用它——语义从"配额"降级为"排程提示"。
+            # 用 effective_capacity：未声明时返回 1（保守假设）。
+            # 语义是"排程提示"，不是配额 —— 只用来算负载率，不用于限制。
             capacity=card.effective_capacity(),
             bytes_out=bytes_out.get(node_id, 0),
             denials=denials_by_node.get(node_id, {}),

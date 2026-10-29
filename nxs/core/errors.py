@@ -73,15 +73,12 @@ class RuleId(str, Enum):
     WL_TYPE_NOT_REGISTERED = "WL-TYPE-404"
     WL_FIELD_NOT_ALLOWED = "WL-FIELD-001"
     WL_LEVEL_EXCEEDED = "WL-LEVEL-002"
-    WL_FREETEXT_NOT_ALLOWED = "WL-FREETEXT-003"
-
-    # ---------- QT- 配额与速率 ----------
-    QT_TASKS_PER_DAY = "QT-TASK-01"
-    QT_BYTES_PER_RESPONSE = "QT-BYTE-02"
-    QT_BYTES_PER_DAY = "QT-BYTE-03"
-    QT_RATE_LIMITED = "QT-RATE-04"
-    QT_CONCURRENCY = "QT-CONC-05"
-    #: v0.2 新增（传输层）：入站并发连接/请求超过 ``server.max_concurrent_requests``。
+    WL_FREETEXT_NOT_ALLOWED = "WL-FREETEXT-003"    #: 目标信箱已达 depth 上限（节点自报的 self_limits.max_backlog）。
+    #:
+    #: ⚠ 这是**节点自己的防御**，不是网络配额。发布方收到它应该
+    #: 稍后重试或换节点 —— 而不是以为"我被限权了"。
+    QT_BACKLOG_FULL = "QT-BACKLOG-07"
+    QT_RATE_LIMITED = "QT-RATE-04"    #: v0.2 新增（传输层）：入站并发连接/请求超过 ``server.max_concurrent_requests``。
     #: 与 ``QT-CONC-05``（某节点任务并发配额）刻意分开：那是业务配额，
     #: 这是传输层自保，两者触发源不同、处置也不同。
     QT_CONNECTION_LIMIT = "QT-CONN-06"
@@ -122,11 +119,8 @@ _SAFE_MESSAGES: dict[RuleId, str] = {
     RuleId.WL_FIELD_NOT_ALLOWED: "response rejected",
     RuleId.WL_LEVEL_EXCEEDED: "response rejected",
     RuleId.WL_FREETEXT_NOT_ALLOWED: "response rejected",
-    RuleId.QT_TASKS_PER_DAY: "quota exhausted",
-    RuleId.QT_BYTES_PER_RESPONSE: "quota exceeded",
-    RuleId.QT_BYTES_PER_DAY: "quota exhausted",
+    RuleId.QT_BACKLOG_FULL: "backlog full",
     RuleId.QT_RATE_LIMITED: "rate limited",
-    RuleId.QT_CONCURRENCY: "quota exhausted",
     RuleId.QT_CONNECTION_LIMIT: "service busy",
     RuleId.LF_LEASE_HELD: "task unavailable",
     RuleId.LF_TASK_EXPIRED: "task expired",

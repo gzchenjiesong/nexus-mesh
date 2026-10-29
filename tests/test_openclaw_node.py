@@ -68,7 +68,9 @@ class TestRoleCard:
     def test_concurrency_is_one(self):
         """OpenClaw agent turn 不适合并发 —— 同一 agent 并行会互相干扰。"""
         card = build_card("taskflow", "cloud", agent_id="taskflow", tools_note="x")
-        assert card.constraints.quota.concurrent_tasks == 1
+        # ⚠ 原来是 quota.concurrent_tasks == 1（配额已删，Step 5b）
+        #   现在并发意图由 capacity 表达 —— 语义从"配额"降级为"排程提示"
+        assert card.effective_capacity() == 1
 
     @covers("M5.F1")
     def test_description_records_tool_surface(self):

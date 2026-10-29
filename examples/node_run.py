@@ -87,13 +87,18 @@ def build_card(node_id: str, domain: str) -> RoleCard:
             "can_receive_from": ["coordinator"],    # 只有协调域能给我派活
             "can_issue_types": [],          # 空 = 我不发任何任务
             "can_delegate_to": [],          # 不做二次委托
-            "quota": {
-                "tasks_per_day": 200,
-                "bytes_per_response": 65536,
-                "bytes_per_day": 4194304,
-                "concurrent_tasks": 2,
-            },
         },
+
+        # ★ 节点自律限额（不是配额 —— 见 docs/design/06 §6）
+        #
+        #   语义：「我自己最多攒这么多、最多给这么细」。
+        #   配额（按日任务数 / 字节数 / 并发数）已在改造中删除：
+        #   Mesh 无法强制它们，而"配了但不生效"比没有更危险。
+        "self_limits": {
+            "max_backlog": 20,              # 信箱最多攒 20 个，超了让发布方另找
+            "max_response_level": "summary",
+        },
+        "capacity": 2,                      # 排程提示（不用于限制）
     })
 
 

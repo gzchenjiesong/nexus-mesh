@@ -152,8 +152,3 @@ nodes:
       can_receive_from: []
       can_issue_types: ["work.*"]
       can_delegate_to: []
-      quota:
-        tasks_per_day: 2000
-        bytes_per_response: 131072
-        bytes_per_day: 33554432
-        concurrent_tasks: 8

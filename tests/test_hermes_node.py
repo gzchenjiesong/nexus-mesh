@@ -92,24 +92,38 @@ class TestRoleCard:
         assert card.constraints.can_receive_from == ("cloud",)
 
     @covers("M5.F7")
-    def test_quota_is_conservative(self):
-        """★ 每条任务都烧 token，所以日配额刻意压低。
+    def test_backlog_is_conservative(self):
+        """★ 每条任务都烧 token，所以信箱深度刻意压低。
 
-        这不是保守，是成本控制：一个默认 100 会让失控的循环
-        一天烧掉几百次 LLM 调用。
+        ⚠ 字段换了（权限模型改造 Step 5b）：
+
+            旧：quota.tasks_per_day <= 100 / concurrent_tasks <= 2
+            新：self_limits.max_backlog 很小
+
+        **成本控制的意图不变**，但机制变了：不再靠"按日配额拦你"，
+        而是靠"队列满了拒收"—— 后者是真能生效的，前者从未生效。
         """
         card = build_card("hermes-working", "cloud", toolsets="safe")
-        assert card.constraints.quota.tasks_per_day <= 100
-        assert card.constraints.quota.concurrent_tasks <= 2
+        assert card.self_limits.max_backlog <= 10, (
+            "信箱深度必须小 —— 每条任务烧 token，堆积等于烧钱"
+        )
+        assert card.effective_capacity() <= 2
 
     @covers("M10.F1")
-    def test_bytes_per_response_matches_freetext_limit(self):
-        """产出字节上限要与桥接自己的截断阈值一致。
+    def test_response_level_is_summary(self):
+        """产出等级必须声明为摘要级。
 
-        自己截断可以加省略号、可以记日志；被边界截断是静默的。
+        ⚠ 原来是查 `quota.bytes_per_response == MAX_ANSWER_BYTES`。
+        配额删了（Step 5b），改用等级表达同一件事：
+        **这个节点对外只给摘要，不给更细的内容。**
+
+        桥接自己的字节截断（MAX_ANSWER_BYTES）仍然生效 —— 那是节点侧
+        的自我裁剪，与网络侧的等级上限是两道独立的闸门。
         """
+        from nxs.core.models import Level
+
         card = build_card("hermes-working", "cloud", toolsets="safe")
-        assert card.constraints.quota.bytes_per_response == MAX_ANSWER_BYTES
+        assert card.self_limits.max_response_level is Level.SUMMARY
 
 
 class TestHermesInvocation:

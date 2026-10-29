@@ -289,12 +289,15 @@ class TestCoreHasNoIO:
     @covers("C2")
     def test_can_run_core_without_any_backend(self, config):
         """纯逻辑层不需要任何后端即可完成判定——这就是分层的收益。"""
-        from nxs.control import PolicyEngine, Usage, make_task
+        from nxs.control import PolicyEngine, make_task
         from nxs.core.models import Artifact, Level
 
         engine = PolicyEngine(config)     # 没有传任何存储
         engine.check_delivery("coordinator", "node-a", "demo.echo")
-        engine.check_quota("node-a", usage=Usage(tasks_today=1))
+        # ⚠ 原来是 check_quota(usage=Usage(tasks_today=1))
+        #   配额已删（Step 5b），现在是信箱深度检查 —— 同样不需要存储：
+        #   pending 由调用方传入，策略层仍然无状态。
+        engine.check_backlog("node-a", pending=0)
 
         task = make_task(task_id="t", idempotency_key="i", task_type="demo.echo",
                          from_node="coordinator", to_node="node-a", params={},

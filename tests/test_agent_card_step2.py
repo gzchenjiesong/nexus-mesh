@@ -157,26 +157,32 @@ class TestEffectiveMaxLevel:
 
 
 class TestEffectiveCapacity:
-    """排程提示。语义从"配额"降级而来，旧卡片行为必须不变。"""
+    """排程提示。语义从"配额"降级而来。
+
+    ⚠ Step 5b 之后 `quota` 已删除，所以这两个测试的对象变了：
+
+        旧：capacity 未声明时退回 quota.concurrent_tasks
+        新：capacity 未声明时返回 1（保守假设，让负载率可算）
+
+    原来那条 `test_falls_back_to_quota` 测的是一个**已不存在的回退路径**，
+    改写为验证新的保守默认值。
+    """
 
     @covers("M11.F1")
-    def test_falls_back_to_quota(self):
-        """★ 未声明 capacity → 退回 quota.concurrent_tasks。
+    def test_undeclared_capacity_defaults_to_one(self):
+        """★ 未声明 capacity → 按 1 算。
 
-        这条保证旧卡片零影响。如果它红了，说明改造破坏了向后兼容。
+        为什么是 1 而不是 0：负载率是 `pending / capacity`，
+        分母 0 会除零。而"按 1 算"意味着保守假设它单线程 ——
+        匹配器因此不会把多个任务堆给它。
         """
-        c = _card(constraints={"max_response_level": "summary",
-                               "can_issue_types": [], "can_receive_from": ["cloud"],
-                               "quota": {"concurrent_tasks": 7}})
-        assert c.capacity == 0, "未声明应为 0"
-        assert c.effective_capacity() == 7
+        c = _card()
+        assert c.capacity == 0, "字段本身仍应为 0（表示未声明）"
+        assert c.effective_capacity() == 1
 
     @covers("M11.F1")
     def test_declared_capacity_wins(self):
-        c = _card(capacity=3,
-                  constraints={"max_response_level": "summary",
-                               "can_issue_types": [], "can_receive_from": ["cloud"],
-                               "quota": {"concurrent_tasks": 7}})
+        c = _card(capacity=3)
         assert c.effective_capacity() == 3
 
     @covers("M11.F1")
@@ -361,5 +367,6 @@ class TestStep2DidNotChangeJudgement:
         )
         # 旧字段原封不动
         assert c.constraints.max_response_level is Level.SUMMARY
-        assert c.constraints.quota.concurrent_tasks == 1
         assert c.roles.executor is True
+        # ⚠ quota 已删（Step 5b），那条断言随之去掉；capacity 是它的替代物
+        assert c.capacity == 5

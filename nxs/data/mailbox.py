@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
-from ..control.policy import PolicyEngine, Usage
+from ..control.policy import PolicyEngine
 from ..control.registry import Registry
 from ..core.errors import ConfigError, PolicyDenied, RuleId
 from ..core.models import Level, Task, TaskMode
@@ -60,7 +60,7 @@ class Mailbox:
                 idempotency_key: str | None = None,
                 mode: str = TaskMode.SYNC,
                 min_level: Level = Level.METADATA,
-                usage_for: Callable[[str], Usage] | None = None) -> DeliveryResult:
+                backlog_for: Callable[[str], int] | None = None) -> DeliveryResult:
         """投递一个任务。
 
         :param to_node: 目标节点。**省略时走自动匹配**（M4）：
@@ -123,8 +123,8 @@ class Mailbox:
             decision = self._policy.check_delivery(from_node, to_node, task_type)
 
         # ⑤ 配额（拒绝时不扣减）
-        usage = usage_for(to_node) if usage_for is not None else Usage()
-        self._policy.check_quota(to_node, usage=usage)
+        pending = backlog_for(to_node) if backlog_for is not None else 0
+        self._policy.check_backlog(to_node, pending=pending)
 
         # 提交（幂等已在 ⓪ 处理，这里的二次检查只是纵深）
         task, created = self._lifecycle.submit(

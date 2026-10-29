@@ -76,14 +76,22 @@ class TestRoleCard:
         )
 
     @covers("M5.F7")
-    def test_byte_quota_matches_summary_limit(self):
-        """★ 字节配额必须按**摘要上限**算，不是按协议上限。
+    def test_self_limit_matches_summary_limit(self):
+        """★ 应答上限必须按**摘要级**声明，不是按协议上限。
 
-        如果写成 4096（协议上限），配额数字就与实际能送出去的量不一致 ——
-        那会让人误以为"配额还够"，而实际每次只能给 1500。
+        ⚠ 字段换了（权限模型改造 Step 5b）：
+
+            旧：constraints.quota.bytes_per_response == SUMMARY_LIMIT
+            新：self_limits.max_response_level == SUMMARY
+
+        **保护的性质没变**：这个节点对外只给摘要，不给更细的内容。
+        只是表达从"字节数"换成了"等级" —— 等级由协议定义，
+        比每次自己算字节数更不容易错。
         """
+        from nxs.core.models import Level
+
         card = build_card("work-laptop", "zone-work", allowed_tools=("Read",))
-        assert card.constraints.quota.bytes_per_response == SUMMARY_LIMIT
+        assert card.self_limits.max_response_level is Level.SUMMARY
 
     @covers("M5.F1")
     def test_description_records_tool_whitelist(self):

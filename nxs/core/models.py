@@ -253,7 +253,7 @@ def _parse_role_name(value: Any, where: str) -> str:
 
 
 def _parse_capacity(value: Any, where: str) -> int:
-    """排程提示。0 表示未声明（退回旧的 quota.concurrent_tasks）。"""
+    """排程提示。0 表示未声明（此时按 1 算，让负载率可算）。"""
     if value is None:
         return 0
     if not isinstance(value, int) or isinstance(value, bool):
@@ -382,31 +382,19 @@ class Capability:
         return bool(self.freetext_fields)
 
 
-@dataclass(frozen=True)
-class Quota:
-    """配额。默认值刻意保守——新增节点不会因为漏配而获得无限额度。"""
-
-    tasks_per_day: int = 200
-    bytes_per_response: int = 64 * 1024
-    bytes_per_day: int = 4 * 1024 * 1024
-    concurrent_tasks: int = 1
-
-    _FIELDS = ("tasks_per_day", "bytes_per_response", "bytes_per_day", "concurrent_tasks")
-
-    @classmethod
-    def from_dict(cls, obj: Mapping[str, Any] | None, where: str = "quota") -> "Quota":
-        obj = obj or {}
-        if not isinstance(obj, Mapping):
-            raise ConfigError(f"{where}: 期望映射")
-        _reject_unknown(obj, cls._FIELDS, where)
-        kwargs: dict[str, int] = {}
-        for k in cls._FIELDS:
-            if k in obj:
-                v = obj[k]
-                if not isinstance(v, int) or isinstance(v, bool) or v < 0:
-                    raise ConfigError(f"{where}.{k}: 必须是非负整数，实际 {v!r}")
-                kwargs[k] = v
-        return cls(**kwargs)
+# ⚠ `Quota` 类已删除（权限模型改造 Step 5b）。
+#
+#   它承载的是"网络允许你干多少"—— 按日任务数、应答字节、并发数。
+#   而 Mesh **无法强制**这些：命令在节点本机执行，网络看不见也管不了。
+#   实测确认过：`bytes_per_response` 的 `planned_bytes` 从来无人传值，
+#   那几项配额从头到尾**从未生效**。
+#
+#   错误的根源是把"节点自己的防御"当成了"网络的管制"。
+#   现在这类限额归 `SelfLimits`：节点主动声明，网络只记录与展示。
+#
+#   保留的是**Mesh 自我保护**两项（它们与节点配额无关）：
+#     · QT-RATE-04  请求速率 —— 防止单节点打爆网关
+#     · QT-CONN-06  连接数   —— 防止耗尽文件描述符
 
 
 @dataclass(frozen=True)
@@ -498,11 +486,9 @@ class Constraints:
     can_receive_from: tuple[str, ...] = ()
     #: 允许二次委托的目标域。**空元组 = 不做二次委托**（当前默认）。
     can_delegate_to: tuple[str, ...] = ()
-    quota: Quota = field(default_factory=Quota)
-
     _FIELDS = (
         "max_response_level", "can_issue_types", "can_receive_from",
-        "can_delegate_to", "quota",
+        "can_delegate_to",
     )
 
     @classmethod
@@ -518,7 +504,6 @@ class Constraints:
             can_issue_types=_as_str_list(obj.get("can_issue_types"), f"{where}.can_issue_types"),
             can_receive_from=_as_str_list(obj.get("can_receive_from"), f"{where}.can_receive_from"),
             can_delegate_to=_as_str_list(obj.get("can_delegate_to"), f"{where}.can_delegate_to"),
-            quota=Quota.from_dict(obj.get("quota"), f"{where}.quota"),
         )
 
 
@@ -564,7 +549,8 @@ class RoleCard:
     may_broadcast: bool = False
     #: 节点自律限额（非配额）。读取点：`effective_max_level`。
     self_limits: SelfLimits = field(default_factory=SelfLimits)
-    #: 排程提示：最多同时处理几个。0 = 未声明，退回旧的 quota.concurrent_tasks。
+    #: 排程提示：最多同时处理几个。0 = 未声明（按 1 算）。
+    #: ⚠ 这不是配额 —— 只用于让匹配器算负载率，从不用于拒绝。
     #: 读取点：`effective_capacity`（观测层用它算负载率）。
     capacity: int = 0
     #: 节点会用到哪些工具（Bash/Read/...）。**自律项，Mesh 只记录不限制**。
@@ -692,12 +678,10 @@ class RoleCard:
     def effective_capacity(self) -> int:
         """排程用的并发提示。
 
-        `capacity` 未声明（0）时退回旧的 `quota.concurrent_tasks` ——
-        这样旧卡片行为完全不变。
+        ⚠ Step 5b 起 `quota` 已删除，所以这里就是 `capacity` 本身。
+        未声明（0）时返回 1 —— 保守假设，让负载率算得出来而不是除零。
         """
-        if self.capacity > 0:
-            return self.capacity
-        return self.constraints.quota.concurrent_tasks
+        return self.capacity if self.capacity > 0 else 1
 
     def capability(self, task_type: str) -> Capability | None:
         for c in self.capabilities:
@@ -778,12 +762,6 @@ class RoleCard:
                 "can_issue_types": list(self.constraints.can_issue_types),
                 "can_receive_from": list(self.constraints.can_receive_from),
                 "can_delegate_to": list(self.constraints.can_delegate_to),
-                "quota": {
-                    "tasks_per_day": self.constraints.quota.tasks_per_day,
-                    "bytes_per_response": self.constraints.quota.bytes_per_response,
-                    "bytes_per_day": self.constraints.quota.bytes_per_day,
-                    "concurrent_tasks": self.constraints.quota.concurrent_tasks,
-                },
             },
             # ---- Step 2 新增 ----
             # 必须能 from_dict 原样读回，所以新字段也要完整输出
