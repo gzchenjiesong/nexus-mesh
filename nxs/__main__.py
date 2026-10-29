@@ -155,29 +155,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
                            f"（检查 domains: 段是否声明了它）",
         ))
 
-    # 4. 本进程承载的节点
+    # 4. （原「本进程承载的节点」检查已删除 · Step 5）
     #
-    # ⚠ 这条检查救的是"配错了但不报错"的情况：local_node 写错时，
-    # 症状是协调节点过一会儿变 stale —— 那看起来完全与配置无关。
-    if cfg.local_node:
-        ok = cfg.local_node in cfg.nodes
-        checks.append((
-            f"local_node '{cfg.local_node}' 是已定义的节点", ok,
-            "" if ok else f"已定义的节点为 {sorted(cfg.nodes)}",
-        ))
-    else:
-        # ⚠ 留空是合法的（这个进程不承载节点），但**不能标成"已声明"** ——
-        # 初版这里写的是「local_node 已声明（本进程承载的节点）✓」，
-        # 而实际值是空的。一个说"已声明"的勾，配着"留空 = ..."的提示，
-        # 读起来自相矛盾，反而让人以为配好了。
-        #
-        # 现在：标签如实说"留空"，状态用 warn 而不是 ok。
-        # 这样运维一眼能看出"我没配"，而不是"配了但没生效"。
-        checks.append((
-            "local_node 留空（本进程不承载节点）", "warn",
-            "如果协调节点运行在本进程内，必须声明它 —— "
-            "否则它会在 3 个心跳周期后被判 stale",
-        ))
+    #    mesh 不再是网络里的一个节点。配置里的每个节点都是**外部节点**，
+    #    必须自己心跳；没人给它心跳它就变 stale —— 那是正确的观测结果。
 
     # 5. 凭据长度
     for mid, secret in cfg.secrets.items():

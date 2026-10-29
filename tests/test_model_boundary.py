@@ -209,3 +209,109 @@ def test_no_test_targets_removed_concepts():
         f"这些测试还在引用已移除的 local_node 概念：{offenders}\n"
         "  mesh 不再注册为节点，该配置项整体删除"
     )
+
+
+class TestMeshIsNotANode:
+    """★★ Mesh 不承载任何节点，因此不替任何节点续命。
+
+    ⚠ **这是权限模型改造的一个核心设计决定（Step 5）。**
+
+    旧模型里协调节点是"本进程内的节点"，没有任何东西会给它发心跳，
+    于是启动 3 个心跳周期后必然被判 stale。为此加了
+    `local_node` 配置 + `_pulse_local_node()` 让它自己续命。
+
+    **那个 hack 的存在本身就是"mesh 不该是节点"的证据** ——
+    一个需要专门写配置、写续命逻辑、还要在文档里解释半天的东西，
+    说明它的定位错了。
+
+    现在：配置里的每个节点都是**外部节点**，必须自己心跳。
+    没人给某个节点心跳 → 它变 stale。**那是正确的观测结果**，
+    而不是需要被掩盖的问题。
+
+    这个类的存在是为了防止有人把续命逻辑加回来 ——
+    它一旦回来，"这台机器已经死了"就会永远显示 alive，
+    任务会被投给一个不存在的对端。
+    """
+
+    @covers("M11.F1")
+    def test_no_pulse_helper_left(self):
+        """续命辅助方法必须不存在了。"""
+        import inspect
+
+        from nxs.app import NexusApp
+
+        assert not hasattr(NexusApp, "_pulse_local_node"), (
+            "`_pulse_local_node` 又出现了。\\n"
+            "  mesh 不是网络里的节点，不该替任何节点续命。\\n"
+            "  若确实需要让某个节点保持 alive，正确做法是**它自己发心跳**。"
+        )
+
+    @covers("M11.F1")
+    def test_config_has_no_local_node_field(self):
+        """`local_node` 配置项必须不存在了。"""
+        import dataclasses
+
+        from nxs.mgmt.config import NexusConfig
+
+        names = {f.name for f in dataclasses.fields(NexusConfig)}
+        assert "local_node" not in names, (
+            "`local_node` 又回到 NexusConfig 了。\\n"
+            "  mesh 只提供网络能力，不承载节点。"
+        )
+
+    @covers("M11.F1")
+    def test_nobody_gets_heartbeat_for_free(self):
+        """★ 行为验证：启动后立刻 sweep，没人跑的节点必须是 stale。
+
+        这条是上面两条静态检查的行为版。静态检查能拦住"方法又写回来了"，
+        但拦不住"换个名字继续续命"。这条直接看结果：
+        **没有任何节点凭空获得心跳。**
+        """
+        from nxs.app import NexusApp
+        from nxs.ports.stores import NodeState
+        from pathlib import Path
+        import os
+
+        cfg = Path(__file__).resolve().parent.parent / "config" / "nxs.example.yaml"
+        env = {
+            f"NXS_SECRET_{m.upper().replace('-', '_')}":
+                f"{m}-demo-secret-0123456789abcdef"
+            for m in ("coordinator", "node-a", "node-b")
+        }
+        app = NexusApp.from_config_path(str(cfg), env=env, force_memory=True)
+        app.start()
+
+        # 刚注册的节点是 alive（有初始 last_seen），这没问题。
+        # 关键是把时间推到很久以后，看谁还在 alive —— 应该一个都不剩。
+        from dataclasses import replace as _replace
+
+        for nid in list(app.config.nodes):
+            rec = app.registry.record(nid)
+            # 伪造一个「很久以前」的 last_seen
+            if rec is not None:
+                app.registry._store.put(_replace(
+                    rec, last_seen="2020-01-01T00:00:00+00:00"))
+
+        # ⚠ 必须调 **app.sweep()**，不是 registry.sweep()。
+        #
+        #   续命逻辑挂在 app.sweep() 上（它就是被删掉的那两行之一）。
+        #   调 registry.sweep() 会绕开它，于是这条测试永远测不到
+        #   "有人把续命加回 app 层" —— 那是它最该防的东西。
+        #
+        #   这个坑是反向验证时发现的：注入续命后只有静态检查那条红，
+        #   行为测试仍是绿的。
+        # app.sweep() 返回的是计数器（{"marked_stale": n, "released": n}），
+        # 不是节点集合 —— 所以直接查各节点状态，不看返回值。
+        app.sweep()
+
+        still_alive = [
+            nid for nid in app.config.nodes
+            if app.registry.record(nid).state != NodeState.STALE
+        ]
+        assert not still_alive, (
+            f"这些节点在 app.sweep() 之后仍是 alive：{still_alive}\n"
+            f"  有节点被凭空续命了 —— mesh 不该替任何人续命。\n"
+            f"  若它们确实在跑，应该由**它们自己发心跳**。"
+        )
+        for nid in app.config.nodes:
+            assert app.registry.record(nid).state == NodeState.STALE
