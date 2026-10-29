@@ -713,36 +713,58 @@ bash 那条查"后面是否非 ASCII"，PowerShell 那条查"后面是否是字�
 
 ### 验证覆盖到哪一步（诚实说明）
 
-分成三档，别混着看：
+**截至 2026-10-29，Windows 部署链路已在真机全流程跑通。**
+下表区分"怎么验的"——静态检查、行为测试、实机执行，强度依次递增：
 
 | 项 | 状态 | 怎么验的 |
 |---|---|---|
 | `.ps1` **语法** | ✅ 已验证 | 真实 PowerShell 解析器（`Parser::ParseFile`），CI 里也跑 |
-| 脚本**静态约定** | ✅ 已验证 | `tests/test_deploy_scripts.py`：括号配对、`$var` 污染、变量赋值、CA 顺序 |
-| `-Check` / `-WriteEnv` / 探活 | ✅ 已验证 | 在 macOS 的 pwsh 7.5.4 上实际执行过 |
-| Windows 上 `--dry-run` | ✅ 已验证 | 在公司电脑上实际跑通（注册成功、被批准） |
-| Windows 上 `-InstallTask` | ⚠ **未验证** | 计划任务的创建/自启/重启尚无实机结果 |
-| Windows 上 `-Uninstall` | ⚠ **未验证** | 同上 |
+| 脚本**静态约定** | ✅ 已验证 | `tests/test_deploy_scripts.py`：括号配对、`$var` 污染、变量赋值、CA 顺序、PS 5.1 兼容 |
+| PowerShell **5.1** 兼容 | ✅ 已验证 | 用户在 Windows 自带 5.1 上实机跑通（v1.0.5 修过一个守卫 bug） |
+| `-Check` / `-WriteEnv` / 探活 | ✅ 已验证 | macOS 的 pwsh 7.5.4 + Windows 5.1 上都执行过 |
+| Windows 上 `--dry-run` | ✅ 已验证 | 在公司电脑上实际跑通 |
+| Windows 上 `-InstallTask` | ✅ **已验证**（2026-10-29） | 实机创建成功；`Start-ScheduledTask` 后节点变 `alive`，心跳实时 |
+| Windows 上 `-Uninstall` | ✅ 已验证 | 实机执行过（删任务、保留凭据） |
+| 常驻后**真的能干活** | ✅ 已验证 | 该节点已完成 9 个 `work.query`，`failed=0` |
 
-⚠ **最后两项是本文件当前唯一的空白。** 计划任务那段代码是按
-Task Scheduler 的标准用法写的（`-AtLogOn` + `-ExecutionTimeLimit 0`
-+ `RestartCount`），但没有在真实 Windows 上跑过。
+> **验证记录（2026-10-29）**：`-InstallTask` 后 `Get-ScheduledTaskInfo`
+> 正常，`Start-ScheduledTask` 拉起进程，日志出现
+> `注册结果：outcome=unchanged approved=True` 与 `开始常驻`，
+> 服务器侧 `state=alive`、心跳与服务器时钟同步。
 
-第一次执行 `-InstallTask` 后，建议按这个顺序确认：
+### ⚠ 装完不会自动跑 —— 这是 `-AtLogOn` 的必然结果
+
+计划任务用 **`-AtLogOn`** 触发（不用 `-AtStartup`，见下面「为什么」）。
+所以创建完的那一刻它**不会立刻运行**，要等下一次登录。
+
+如果你现在就想要它跑：
 
 ```powershell
-# 1) 任务是否建出来、状态如何
-Get-ScheduledTask -TaskName NexusMesh-<节点ID> | Format-List
-Get-ScheduledTaskInfo -TaskName NexusMesh-<节点ID>
-
-# 2) 手动起一次，看日志（计划任务不捕获控制台输出，只能看文件）
 Start-ScheduledTask -TaskName NexusMesh-<节点ID>
-Get-Content "$HOME\.nexus-mesh\logs\<节点ID>.log" -Tail 20
-
-# 3) 注销再登录，确认 AtLogOn 触发（这条最容易出意外）
 ```
 
-若某一步不对，用 `-Uninstall` 退回干净状态再排查。
+**这个坑很隐蔽**：`Get-ScheduledTaskInfo` 显示 `Ready`、日志文件是空的、
+WebUI 上节点显示 `stale` —— 看起来像"装失败了"，其实只是还没触发。
+
+### 看日志（中文乱码已修，但旧文件要处理）
+
+```powershell
+Get-Content "$HOME\.nexus-mesh\logs\<节点ID>.log" -Tail 25
+```
+
+v1.0.6 起日志写 **UTF-8 带 BOM**，PowerShell 5.1 的 `Get-Content`
+会自动识别，**不需要加 `-Encoding`**。
+
+⚠ 但 **v1.0.5 及更早版本产生的旧日志是无 BOM 的**，读出来仍是乱码。
+处理方式二选一：
+
+```powershell
+# 方式一：读旧文件时显式指定（一次性）
+Get-Content "$HOME\.nexus-mesh\logs\<节点ID>.log" -Encoding UTF8 -Tail 25
+
+# 方式二：删掉重来（日志会重新生成，带 BOM）
+Remove-Item "$HOME\.nexus-mesh\logs\<节点ID>.log"
+```
 
 ### 一个可能的阻塞：公司电脑没装 Python
 

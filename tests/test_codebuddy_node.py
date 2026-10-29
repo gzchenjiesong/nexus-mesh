@@ -1450,3 +1450,142 @@ class TestHostEnvPollution:
         assert "env" in src, "_probe_once 不支持 env 参数"
         # 必须真的传给 subprocess
         assert "env=env" in src, "env 参数没传给 subprocess.run"
+
+
+class TestLogFileIsWindowsReadable:
+    r"""★★ 日志文件必须能被 Windows 自带的 PowerShell 5.1 正确显示。
+
+    ⚠⚠ **这是用户在真机上报告的问题（v1.0.6 修）。**
+
+    用户按提示执行::
+
+        Get-Content "$HOME\.nexus-mesh\logs\work-desktop.log" -Tail 25
+
+    拿到的是::
+
+        10:26:56 INFO  codebuddy-node 路 鐗堟湰锛?.178.0
+
+    ## 根因
+
+    **日志写的没错**（UTF-8），错在**读的方式**：
+    PowerShell 5.1 的 ``Get-Content`` 默认按系统 ANSI 编码解码 ——
+    中文 Windows 上是 GBK / 代码页 936。
+
+    实测对照："版本" 的 UTF-8 字节 ``e7 89 88 e6 9c ac`` 按 GBK 解码
+    正好是 ``鐗堟湰``；``·``（``c2 b7``）是 ``路``。完全吻合。
+
+    ## 修法：写 BOM
+
+    PS 5.1 的 ``Get-Content`` 用
+    ``StreamReader(detectEncodingFromByteOrderMarks)`` ——
+    **有 BOM 就识别为 UTF-8**，用户不需要加任何参数。
+
+    ## 为什么不用 utf-8-sig
+
+    ``RotatingFileHandler`` 以 **append** 模式打开文件，而 ``utf-8-sig``
+    编码器**每次打开都写 BOM** → 追加时会往文件中间插 BOM，更糟。
+
+    所以重写 ``_open()``：只在新文件/刚轮转出的文件为空时写一次。
+
+    这条测试验三个场景：首次创建、追加不重复、轮转后仍有 BOM。
+    """
+
+    BOM = b"\xef\xbb\xbf"
+
+    def _handler(self, path, max_bytes=5 * 1024 * 1024):
+        import importlib
+        import sys as _sys
+        from pathlib import Path as _P
+
+        _sys.path.insert(0, str(_P(__file__).resolve().parent.parent))
+        from examples import codebuddy_node as cn
+        importlib.reload(cn)
+        h = cn._BomUtf8RotatingFileHandler(
+            path, maxBytes=max_bytes, backupCount=1, encoding="utf-8")
+        h.setFormatter(__import__("logging").Formatter("%(message)s"))
+        return h
+
+    @covers("M14.F8")
+    def test_bom_written_on_new_file(self, workdir):
+        """首次创建的文件必须带 UTF-8 BOM。"""
+        import logging
+
+        p = workdir / "a.log"
+        h = self._handler(p)
+        lg = logging.getLogger("bomtest1")
+        lg.setLevel(logging.INFO)
+        lg.addHandler(h)
+        lg.info("版本 1.0.5")
+        h.close()
+
+        raw = p.read_bytes()
+        assert raw.startswith(self.BOM), (
+            f"新日志文件没有 BOM（前 3 字节 {raw[:3].hex(' ')}）——\n"
+            "  PowerShell 5.1 的 Get-Content 会按 GBK 解码，中文全乱码"
+        )
+        # 确认内容确实能解出中文
+        text = p.read_text(encoding="utf-8-sig")
+        assert "版本" in text, f"用 utf-8-sig 读不到原文：{text!r}"
+
+    @covers("M14.F8")
+    def test_bom_not_duplicated_on_append(self, workdir):
+        """追加到已有文件时不能重复写 BOM。
+
+        ⚠ 这是 ``encoding="utf-8-sig"`` 做不到的事 ——
+        那个编码器每次打开都写 BOM，追加会在文件中间插入 BOM。
+        """
+        import logging
+
+        p = workdir / "b.log"
+        h1 = self._handler(p)
+        lg1 = logging.getLogger("bomtest2a")
+        lg1.setLevel(logging.INFO)
+        lg1.addHandler(h1)
+        lg1.info("第一行")
+        h1.close()
+
+        # 第二次打开（模拟进程重启）
+        h2 = self._handler(p)
+        lg2 = logging.getLogger("bomtest2b")
+        lg2.setLevel(logging.INFO)
+        lg2.propagate = False
+        lg2.addHandler(h2)
+        lg2.info("第二行")
+        h2.close()
+
+        raw = p.read_bytes()
+        assert raw.count(self.BOM) == 1, (
+            f"文件里 BOM 出现 {raw.count(self.BOM)} 次（应为 1）——\n"
+            "  追加时重复写了 BOM，文件中间会多出不可见字符"
+        )
+        assert raw.startswith(self.BOM), "文件不再以 BOM 开头"
+
+        lines = p.read_text(encoding="utf-8-sig").splitlines()
+        assert len(lines) == 2, f"行数应为 2，实际 {len(lines)}：{lines}"
+
+    @covers("M14.F8")
+    def test_bom_present_after_rotation(self, workdir):
+        """轮转产生的新文件也必须带 BOM。
+
+        ⚠ 容易被忽略的场景：轮转时父类会在新路径上重新 ``_open()``，
+        如果只在第一次创建时写 BOM，轮转后用户看到的又是乱码。
+        """
+        import logging
+
+        p = workdir / "c.log"
+        h = self._handler(p, max_bytes=200)
+        lg = logging.getLogger("bomtest3")
+        lg.setLevel(logging.INFO)
+        lg.addHandler(h)
+        for i in range(20):
+            lg.info(f"第 {i:02d} 行 —— 用来触发轮转的填充内容" + "x" * 20)
+        h.close()
+
+        rotated = sorted(workdir.glob("c.log*"))
+        assert len(rotated) >= 2, f"没触发轮转，只产生 {[f.name for f in rotated]}"
+
+        raw = p.read_bytes()
+        assert raw.startswith(self.BOM), (
+            f"轮转后的新文件没有 BOM（前 3 字节 {raw[:3].hex(' ')}）——\n"
+            "  用户看到的最新日志会是乱码"
+        )

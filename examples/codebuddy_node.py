@@ -69,6 +69,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import logging.handlers   # 显式导入：RotatingFileHandler 在子模块里
 import os
 import shutil
 import subprocess
@@ -1381,6 +1382,66 @@ def check_tools(bin_path: str, logger: logging.Logger) -> int:
 # 主流程
 # ---------------------------------------------------------------------------
 
+class _BomUtf8RotatingFileHandler(logging.handlers.RotatingFileHandler):
+    r"""写 UTF-8 **带 BOM** 的轮转文件处理器。
+
+    ## 为什么必须带 BOM
+
+    日志文件本身是 UTF-8 写的（这点没错），但 **Windows 自带的
+    PowerShell 5.1 的 ``Get-Content`` 默认按系统 ANSI 编码解码** ——
+    中文 Windows 上是 GBK / 代码页 936。
+
+    于是用户执行最自然的那条命令::
+
+        Get-Content "$HOME\.nexus-mesh\logs\work-desktop.log" -Tail 25
+
+    拿到的全是乱码::
+
+        10:26:56 INFO  codebuddy-node 路 鐗堟湰锛?.178.0
+
+    实测对照（"版本" 的 UTF-8 字节 ``e7 89 88 e6 9c ac`` 按 GBK 解码）::
+
+        鐗堟湰   ← 正是用户看到的样子
+
+    ## BOM 为什么能解决
+
+    PowerShell 5.1 的 ``Get-Content`` 内部用
+    ``StreamReader(detectEncodingFromByteOrderMarks)`` ——
+    **有 BOM 就正确识别为 UTF-8**，不需要用户加任何参数。
+
+    ## 为什么不用「让用户加 -Encoding UTF8」
+
+    那等于把问题推给用户。而且实际上没人会记得加 ——
+    我自己在写这条命令时就没想到。**默认就对**才是对的。
+
+    ## 为什么不用 utf-8-sig 编码器图省事
+
+    直接用 ``encoding="utf-8-sig"`` 有个陷阱：``RotatingFileHandler``
+    以 **append 模式**打开文件，而 ``utf-8-sig`` 每次打开都会写 BOM ——
+    **追加到已有文件时会往文件中间插一个 BOM**，反而更糟。
+
+    所以这里重写 ``_open()``：**只在新文件（或轮转后的新文件）为空时
+    写一次 BOM**。这样：
+      · 首次创建 → 有 BOM
+      · 重启后追加 → 不重复写
+      · 轮转后的新文件 → 有 BOM（``super()._open()`` 会在新路径上重开）
+    """
+
+    _BOM = "\ufeff"
+
+    def _open(self):  # noqa: D102 - 继承自父类
+        stream = super()._open()
+        try:
+            # append 模式下 tell() 就是文件末尾位置。
+            # 为 0 说明是空文件（新建 / 刚轮转出的新文件）→ 需要 BOM。
+            if stream.tell() == 0:
+                stream.write(self._BOM)
+                stream.flush()
+        except Exception:  # noqa: BLE001 - 写不了 BOM 不该让日志挂掉
+            pass
+        return stream
+
+
 def _setup_logging(verbose: bool, log_file: str) -> None:
     """配置日志：**始终写 stderr**，可选再写一个轮转文件。
 
@@ -1429,15 +1490,16 @@ def _setup_logging(verbose: bool, log_file: str) -> None:
         root.addHandler(stream)
 
         if log_file:
-            from logging.handlers import RotatingFileHandler
-
             path = Path(log_file).expanduser()
             path.parent.mkdir(parents=True, exist_ok=True)
-            file_handler = RotatingFileHandler(
+            # 用带 BOM 的处理器 —— 见 _BomUtf8RotatingFileHandler 的说明。
+            # 不加 BOM 的话，PowerShell 5.1 的 Get-Content 会按 GBK 解码，
+            # 中文全是乱码。
+            file_handler = _BomUtf8RotatingFileHandler(
                 path,
                 maxBytes=5 * 1024 * 1024,   # 5 MB
                 backupCount=3,              # 共 4 个文件，最多 20 MB
-                encoding="utf-8",           # ⚠ 显式 UTF-8：Windows 默认 GBK
+                encoding="utf-8",           # BOM 由 _open() 单独写
             )
             file_handler.setFormatter(formatter)
             file_handler._nxs_node_handler = True   # type: ignore[attr-defined]
