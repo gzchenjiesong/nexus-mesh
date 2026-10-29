@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **735** 个测试方法（已声明覆盖）· **137** 个纵向编号项（114 功能点 + 23 模块需求）
+共 **736** 个测试方法（已声明覆盖）· **137** 个纵向编号项（114 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -235,7 +235,7 @@ _（未实现，暂无功能点）_
 | **M14.F2** | 远程批准节点（绑定当前那张角色卡） | `nxs/edge/gateway.py:_Handler._handle_ops（approve）` | G3 | P0 | — | 6 |
 | **M14.F3** | 远程吊销（注册表与认证层同时生效） | `nxs/edge/gateway.py:_Handler._handle_ops（revoke）` | G3 | P0 | S10 | 33 |
 | **M14.F4** | 远程释放过期租约 | `nxs/edge/gateway.py:_Handler._handle_ops（release）` | G3 | P1 | — | 10 |
-| **M14.F5** | 节点状态查询（含未批准节点） | `nxs/edge/gateway.py:_Handler._handle_ops（nodes）` | G3 | P1 | — | 3 |
+| **M14.F5** | 节点状态查询（含未批准节点） | `nxs/edge/gateway.py:_Handler._handle_ops（nodes）` | G3 | P1 | — | 4 |
 | **M14.F6** | 运维动作审计（谁在何时给谁放了行） | `nxs/edge/gateway.py:Gateway.record_ops` | G3 | P0 | — | 1 |
 | **M14.F7** | 运维 CLI（nxs ops） | `nxs/__main__.py:cmd_ops` | G3 | P1 | — | 7 |
 | **M14.F8** | 部署自检（nxs doctor：持久化／权限／TLS／运维通道） | `nxs/__main__.py:cmd_doctor` | G3 | P1 | — | 88 |

@@ -264,6 +264,55 @@ class TestOpsWorks:
         pending = [r for r in rows if not r["approved"]]
         assert any(r["node_id"] == "work-laptop" for r in pending)
 
+    @covers("M14.F5")
+    def test_nodes_exposes_permission_fields(self, gateway, node_client):
+        """★★ `ops nodes` 必须输出 `can_issue_types` / `can_receive_from`。
+
+        ⚠ **实测踩到的坑（v1.0.7 修）。**
+
+        排查「为什么节点 A 发不了任务给 B」时，真正的判据只有两个：
+
+          · `can_issue_types` → ``MX-ISSUER-01``（发不出去）
+          · `can_receive_from` → ``MX-RECEIVE-01``（收不进来）
+
+        而这两个字段**原来根本不输出**。于是我只能去翻配置文件，
+        看到一个空值就误判成「配置里没配发布权」——
+        实际配了，只是这个观测接口没给。
+
+        **一个缺字段的观测接口会主动误导人**：它让排查者以为
+        「查过了，没有」，而不是「查不到」。这比报错更糟。
+
+        同类问题在 `bytes_per_response` 上也出现过一次
+        （文档说生效、实际不生效），所以这条测试专门守住。
+        """
+        from tests.test_ops import make_card as _mk
+
+        node_client.register(_mk())
+        ops = OpsClient(gateway.base_url, secret=OPS_SECRET)
+        rows = ops.nodes()
+        assert rows, "ops nodes 返回空"
+
+        for row in rows:
+            assert "can_issue_types" in row, (
+                f"{row.get('node_id')} 的输出缺少 can_issue_types ——\n"
+                "  MX-ISSUER-01 的判据看不到，排障会被误导"
+            )
+            assert "can_receive_from" in row, (
+                f"{row.get('node_id')} 的输出缺少 can_receive_from ——\n"
+                "  MX-RECEIVE-01 的判据看不到"
+            )
+            assert isinstance(row["can_issue_types"], list)
+            assert isinstance(row["can_receive_from"], list)
+
+        # 具体值也要对得上角色卡
+        mine = [r for r in rows if r["node_id"] == "work-laptop"]
+        if mine:
+            card = _mk()
+            assert mine[0]["can_issue_types"] == list(
+                card.constraints.can_issue_types), (
+                "输出的 can_issue_types 与角色卡不一致"
+            )
+
     @covers("M14.F6")
     def test_ops_actions_are_audited(self, gateway, node_client, app):
         """运维动作必须留痕 —— 否则"谁给谁放了行"无法回答。"""

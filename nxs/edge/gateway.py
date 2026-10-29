@@ -1136,6 +1136,18 @@ class _Handler(BaseHTTPRequestHandler):
                     },
                     "capabilities": [c.type for c in rec.card.capabilities],
                     "max_response_level": str(rec.card.constraints.max_response_level),
+                    # ⚠ **这两个必须输出，否则排障时会走弯路。**
+                    #
+                    #   `can_issue_types` 是 `MX-ISSUER-01`（发不出去）的
+                    #   唯一判据；`can_receive_from` 是 `MX-RECEIVE-01`
+                    #   （收不进来）的唯一判据。
+                    #
+                    #   实测踩过：排查"为什么 A 发不了任务给 B"时，
+                    #   `ops nodes --json` 里没有这两个字段，于是误判成
+                    #   "配置里没配发布权" —— 而实际配了，只是输出没给。
+                    #   一个缺字段的观测接口会主动误导人。
+                    "can_issue_types": list(rec.card.constraints.can_issue_types),
+                    "can_receive_from": list(rec.card.constraints.can_receive_from),
                 }
                 for rec in self.gw.app.registry.all_records()
             ]})
