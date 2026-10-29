@@ -593,8 +593,16 @@ if ($CbPath) {
 # ------------------------------------------------------------------ 白名单
 Say ""
 Say "-> 工具白名单（决定这个节点能做什么）"
-if ($env:CODEBUDDY_ALLOWED_TOOLS) {
-    Ok "已配置: $($env:CODEBUDDY_ALLOWED_TOOLS)"
+# ⚠ 用 $AllowedTools（param），不要直接读 $env:CODEBUDDY_ALLOWED_TOOLS。
+#
+#   param 已经做了"命令行优先、环境变量兜底"：
+#     [string]$AllowedTools = $(if ($env:CODEBUDDY_ALLOWED_TOOLS) { ... })
+#   而这一段原来**绕过 param 直接读环境变量** —— 于是命令行传
+#   -AllowedTools "Read,Grep" 时，校验段完全不看，走"未配置"分支
+#   （打印一大段配置指引），而 envPairs 那边又确实用了 $AllowedTools。
+#   **同一个值两处来源，用户会以为传参无效。**
+if ($AllowedTools) {
+    Ok "已配置: $AllowedTools"
 
     # ⚠ **必须校验里面的 CLI 真的存在。**
     #
@@ -607,7 +615,7 @@ if ($env:CODEBUDDY_ALLOWED_TOOLS) {
     #   实测背景：我最初连这个校验都没有 —— 三个偶然的字符串匹配
     #   让静态检查以为"已校验"，实际代码里一行都没有。
     $toolNames = @()
-    foreach ($m in [regex]::Matches($env:CODEBUDDY_ALLOWED_TOOLS, 'Bash\(\s*([A-Za-z0-9_.\-]+)')) {
+    foreach ($m in [regex]::Matches($AllowedTools, 'Bash\(\s*([A-Za-z0-9_.\-]+)')) {
         $n = $m.Groups[1].Value
         if ($n -and $toolNames -notcontains $n) { $toolNames += $n }
     }
@@ -646,7 +654,7 @@ if ($env:CODEBUDDY_ALLOWED_TOOLS) {
     #   '\\b' 是"反斜杠 + b"两个字面量字符，正则引擎会把它当成
     #   转义后的反斜杠，而不是单词边界 \b。结果：永远匹配不到，
     #   于是明明有 Read/Grep 也会警告"没有"。
-    if ($env:CODEBUDDY_ALLOWED_TOOLS -notmatch '\b(Read|Grep|Glob|Write)\b') {
+    if ($AllowedTools -notmatch '\b(Read|Grep|Glob|Write)\b') {
         Warn "白名单里没有 Read/Grep —— Agent 可能读不了文件"
         Say "       如果你只打算让它调命令行工具，可以忽略这条。"
     }

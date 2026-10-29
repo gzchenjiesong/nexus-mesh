@@ -2310,3 +2310,64 @@ class TestNoBareQuoteInsidePsString:
             + "\n".join(f"    {n}:{ln}  {s}" for n, ln, s in problems)
             + "\n  修法：中文里改用全角引号「」，或在需要字面引号时用 `\""
         )
+
+
+class TestParamIsSingleSourceOfTruth:
+    """★★ 同一个配置值只能有一个来源（param），不能某段绕过它读环境变量。
+
+    ⚠ **实测踩到的具体 bug**：`setup-work-node.ps1` 的白名单校验段
+    直接读 ``$env:CODEBUDDY_ALLOWED_TOOLS``，而 param 是
+    ``[string]$AllowedTools = $(if ($env:...) { ... })``。
+
+    于是命令行传 ``-AllowedTools "Read,Grep"`` 时：
+      · 校验段完全不看 → 走"未配置"分支，打印一大段配置指引
+      · envPairs 那段又确实用了 ``$AllowedTools`` → 写进了环境变量
+
+    **同一份输入，两处行为不同。** 用户看到的是"我明明传了参数，
+    它却说我没配" —— 而实际配上了。
+
+    这类问题的根源是"param 已经做了兜底，但下游不信任它"。
+    判据：shell/ps1 脚本里，某段若已由 param 接收，就不要再读同名环境变量。
+    """
+
+    @covers("M14.F8")
+    def test_whitelist_reads_param_not_env(self):
+        """白名单校验段必须用 $AllowedTools，不能直接读环境变量。"""
+        import re
+
+        text = (DEPLOY / "setup-work-node.ps1").read_bytes().decode("utf-8-sig")
+        lines = text.splitlines()
+
+        # ⚠ **只排除"整行是一条给用户看的提示"**，不能"行内有单引号就跳过"。
+        #
+        #   初版写成 ``if "'" in s and ...: continue`` —— 结果
+        #   ``if ($env:CODEBUDDY_ALLOWED_TOOLS -notmatch '\b(Read...'`` 
+        #   这行也含单引号（正则字面量），被误当成提示文本跳过，
+        #   于是**注入真 bug 后守护依然是绿的**（反向验证才发现）。
+        #
+        #   判据改为：只有 ``Say``/``Ok``/``Bad``/``Warn`` 开头、
+        #   且整个参数是单引号字符串的行，才算提示文本。
+        helper_re = re.compile(r"^(?:Say|Ok|Bad|Warn)\s+'[^']*'\s*$")
+
+        offenders = []
+        for lineno, line in enumerate(lines, 1):
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            if helper_re.match(s):
+                continue            # 纯提示文本
+            if s.startswith("[string]$AllowedTools"):
+                continue            # param 默认值，唯一合法来源
+            if re.search(r"\$env:CODEBUDDY_ALLOWED_TOOLS\s*(-notmatch|-match)", s):
+                offenders.append((lineno, s[:90]))
+            elif "[regex]::Matches($env:CODEBUDDY_ALLOWED_TOOLS" in s.replace(" ", ""):
+                offenders.append((lineno, s[:90]))
+            elif re.match(r"^if\s*\(\s*\$env:CODEBUDDY_ALLOWED_TOOLS\s*\)", s):
+                offenders.append((lineno, s[:90]))
+
+        assert not offenders, (
+            "这些地方绕过 param 直接读 $env:CODEBUDDY_ALLOWED_TOOLS：\n"
+            + "\n".join(f"    {n}: {s}" for n, s in offenders)
+            + "\n  统一用 $AllowedTools —— param 已经做了"
+              "「命令行优先、环境变量兜底」"
+        )
