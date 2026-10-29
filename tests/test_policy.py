@@ -225,22 +225,77 @@ class TestTripleCeiling:
 # ---------------------------------------------------------------------------
 
 class TestPublishPermission:
+    """发布权：**只看角色，不看类型**。
+
+    ⚠ 权限模型改造后行为有变（Step 3）：
+
+        旧：issuer 标志 + can_issue_types 逐类型白名单
+        新：role.can_issue 一个判断
+
+    「能发哪些类型」不再是**发布权**的维度 —— 类型由 Mesh 全局定义，
+    "这个类型存不存在"是 `check_delivery` 的事（`WL-TYPE-404`）。
+
+    所以原来这条 `test_coordinator_cannot_publish_outside_its_allowlist`
+    被改写为下面两条：一条验发布权只看角色，一条验未知类型在投递层被拦。
+    **保护的性质没丢，只是换了检查点。**
+    """
+
     @covers("M5.F6")
-    def test_coordinator_can_publish_wildcard_covered_type(self, policy: PolicyEngine):
+    def test_driver_can_publish(self, policy: PolicyEngine):
         policy.check_publish("coordinator", "demo.echo")
         policy.check_publish("coordinator", "demo.synthesize")
 
     @covers("M5.F6")
-    def test_node_without_issuer_role_cannot_publish(self, policy: PolicyEngine):
+    def test_worker_cannot_publish(self, policy: PolicyEngine):
+        """worker 角色的节点不能发布任何任务。
+
+        这是 `work-desktop`（内网执行者）的核心边界 ——
+        它只能被委托，不能主动发起。
+        """
         with pytest.raises(PolicyDenied) as ei:
             policy.check_publish("node-a", "demo.echo")
         assert ei.value.rule_id == RuleId.MX_ISSUER_NOT_ALLOWED
 
     @covers("M5.F6")
-    def test_coordinator_cannot_publish_outside_its_allowlist(self, policy: PolicyEngine):
+    def test_publish_permission_is_type_agnostic(self, policy: PolicyEngine):
+        """★ 发布权与类型无关 —— 这是新模型与旧模型的关键差异。
+
+        driver 发一个**未定义**的类型也能过发布权检查；
+        它会在 `check_delivery` 被 `WL-TYPE-404` 拦住。
+
+        实测确认这一点很重要：如果这里报 MX-ISSUER-01，
+        说明类型白名单还在参与发布权判定，改造没生效。
+        """
+        policy.check_publish("coordinator", "other.thing")   # 不抛
+
+    @covers("M5.F6")
+    def test_undefined_type_blocked_at_delivery_not_publish(self, policy: PolicyEngine):
+        """★ 未知类型的拦截点从发布权移到了投递检查。
+
+        原来：`check_publish` 报 MX-ISSUER-01
+        现在：`check_publish` 放行，`check_delivery` 报 WL-TYPE-404
+
+        **保护没丢** —— 未定义的类型依然发不出去，只是理由更准确：
+        不是"你没权限"，而是"这个类型不存在"。
+        """
         with pytest.raises(PolicyDenied) as ei:
-            policy.check_publish("coordinator", "other.thing")
-        assert ei.value.rule_id == RuleId.MX_ISSUER_NOT_ALLOWED
+            policy.check_delivery("coordinator", "node-a", "other.thing")
+        assert ei.value.rule_id == RuleId.WL_TYPE_NOT_REGISTERED
+
+    @covers("M5.F6")
+    def test_role_is_used_not_legacy_flags(self, policy: PolicyEngine):
+        """确认判定真的走 role，而不是悄悄退回旧路径。
+
+        配置里的 coordinator 是 driver（can_issue=True），
+        node-a 是 worker（can_issue=False）。若判定还在读
+        `roles.issuer`，那么把两者的 role 互换后行为不会变 ——
+        这条测试能抓到那种"以为切了其实没切"。
+        """
+        coord = policy._card("coordinator")
+        role = policy.role_of(coord)
+        assert role is not None, "配置有 roles 表时必须能解析出角色"
+        assert role.can_issue is True
+        assert coord.role == "driver" or coord.derived_role() == "driver"
 
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..core.errors import PolicyDenied, RuleId
 from ..core.models import Artifact, Capability, Level, RoleCard, Task
-from ..mgmt.config import MatrixRule, NexusConfig
+from ..mgmt.config import MatrixRule, NexusConfig, RoleDecl
 
 #: 单个自由文本字段的字节上限。
 #: 自由文本是提示注入的主要载体，也是唯一无法用字段白名单约束的内容形态，
@@ -94,6 +94,33 @@ class PolicyEngine:
     # 查询辅助
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # 角色解析（权限模型改造 Step 3）
+    # ------------------------------------------------------------------
+
+    def role_of(self, card: RoleCard) -> RoleDecl | None:
+        """这张卡片以什么角色接入。
+
+        ★ **返回 None 表示"尚未迁移到角色模型"**，调用方应退回旧判据。
+
+        取值顺序：
+
+          ① 卡片显式声明的 ``role`` → 从配置的角色表里查
+          ② 卡片未声明（旧卡片）→ 用 ``derived_role()`` 从旧标志推导，
+             再去角色表里查
+
+        第 ② 步是过渡期的桥：让还没改配置的部署也能走新判定。
+        Step 5 删除旧标志后，这一步一起删。
+        """
+        if not self._cfg.roles:
+            return None          # 配置里没有角色表 → 无从判定
+
+        name = card.role or card.derived_role()
+        if not name:
+            return None          # 既无声明也无从推导（无角色）
+
+        return self._cfg.roles.get(name)
+
     @property
     def registered_types(self) -> frozenset[str]:
         """全部已注册的任务类型。
@@ -126,13 +153,40 @@ class PolicyEngine:
     # ------------------------------------------------------------------
 
     def check_publish(self, node_id: str, task_type: str) -> None:
-        """校验节点是否有权发布该类型的任务。
+        """校验节点是否有权发布任务。
 
-        两种失败共用 ``MX-ISSUER-01``，不区分"角色没开"与"类型不在白名单"——
-        对调用方而言两者都是"你不能发这个"，区分只会增加探测面。
+        ## 权限模型改造后才变成现在这样
+
+        判据从「issuer 标志 + 逐类型白名单」简化成「角色的 can_issue」。
+
+        以前是两道：先看 `roles.issuer`，再看 `can_issue_types` 是否含该类型。
+        现在只有一道：角色允不允许发布。**类型不再作为发布权的维度** ——
+        类型由 Mesh 全局定义，能发什么不再是"谁的权限"，而是
+        "这个类型存不存在"（由 ``check_delivery`` 判）。
+
+        ## 向后兼容
+
+        配置里没有 ``roles`` 表时（尚未迁移的部署）退回旧判据。
+        Step 5 删除旧字段后，这条回退路径一起删。
+
+        ## 错误信息
+
+        失败时**不区分**"角色不允许"与"类型不存在" ——
+        对调用方而言都是"你不能发这个"，区分只会增加探测面。
         """
         card = self._card(node_id)
 
+        role = self.role_of(card)
+        if role is not None:
+            # ---- 新路径：角色说了算 ----
+            if role.can_issue:
+                return
+            raise PolicyDenied(
+                RuleId.MX_ISSUER_NOT_ALLOWED,
+                f"{node_id} role={role.name!r} cannot issue",
+            )
+
+        # ---- 旧路径：尚未迁移的部署（Step 5 删除）----
         if not card.roles.issuer:
             raise PolicyDenied(
                 RuleId.MX_ISSUER_NOT_ALLOWED, f"{node_id} roles.issuer=false"

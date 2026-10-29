@@ -216,21 +216,58 @@ Step 2 **只记录现状**（`role: driver`，与旧行为一致），没有改�
 
 ---
 
-### Step 3 · 判定切到 role
+### Step 3 · 判定切到 role ✅ 已完成（2026-10-29）
 
 **改**
 
 - `check_publish()` → 读 `role.can_issue`
-- 删 `policy.py` 里按 `can_issue_types` 逐类型比对的逻辑
-- 删 `providers_of` / `registered_types`（类型全局定义后天然唯一）
-- `MX-ISSUER-01` 的 message 改成「role X 不允许发布」
+- 新增 `PolicyEngine.role_of(card)` —— 卡片 → 角色的解析
+- `MX-ISSUER-01` 的 message 改成「role X cannot issue」
 
-**这步开始有行为变化，但应当是等价的**（Step 2 的测试已证明）。
+**⚠ 一处与原计划的偏离（有意为之）**
+
+原计划写了「删 `providers_of` / `registered_types`」。**没有在 Step 3 做，挪到了 Step 4。**
+
+理由：这两个是**类型路由**的基础设施，而 Step 3 只切「发布权」。
+如果在 Step 3 就删掉，「目标节点是否提供该能力」这个检查会失去依据 ——
+那会让 `WL-TYPE-404` 失效，属于**权限漏洞**，不是简化。
+
+正确的顺序是：Step 4 让类型真正由配置全局定义、`providers_of`
+改成从 `role.serves` 计算，那时才能谈删除。
+
+**核心行为变化（这是设计的必然结果，不是意外）**
+
+| 场景 | Step 2 之前 | Step 3 之后 |
+|---|---|---|
+| driver 发**已定义**类型 | ✓ | ✓ |
+| driver 发**未定义**类型 | ✗ `MX-ISSUER-01` | ✓ 过发布权检查 → ✗ 在 `check_delivery` 报 `WL-TYPE-404` |
+| worker 发任何类型 | ✗ `MX-ISSUER-01` | ✗ `MX-ISSUER-01` |
+
+**关键点：未知类型的拦截点从"发布权"移到了"投递检查"。**
+保护没丢 —— 未定义的类型依然发不出去，只是理由更准确：
+不是「你没权限」，而是「这个类型不存在」。
+
+**实测确认**
+
+```
+coordinator (driver)  发 other.thing  → 发布权通过
+node-a      (worker)  发 demo.echo    → MX-ISSUER-01
+coordinator → node-a  other.thing     → WL-TYPE-404
+coordinator → node-a  demo.echo       → 放行，上限=METADATA
+```
 
 **判据**
 
-- Step 2 的等价测试仍绿（此时它验新判定与固化下来的旧行为常量表）
-- 手工：`work-desktop` 尝试发布 → 仍被拒，错误码仍是 `MX-ISSUER-01`
+- `work-desktop` 类节点（worker）尝试发布 → 仍被拒，`MX-ISSUER-01`
+- 发布权检查与类型无关（新增专项测试）
+- 未定义类型仍在投递层被拦（新增专项测试）
+- 反向验证：强制 `role_of` 返回 None（退回旧路径）→ 2 条测试 FAILED
+
+**测试改动**
+
+原 `test_coordinator_cannot_publish_outside_its_allowlist` **被改写而非删除** ——
+它保护的性质（不能发任意类型）仍然重要，只是检查点变了，所以拆成两条：
+一条验"发布权只看角色"，一条验"未知类型在投递层被拦"。
 
 ---
 
