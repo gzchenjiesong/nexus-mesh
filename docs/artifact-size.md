@@ -13,10 +13,10 @@
 | 限制 | 配的位置 | 值 | 实际作用 |
 |---|---|---|---|
 | `max_body_bytes` | `server` | 256 KB | ✅ **真正的天花板** |
-| `bytes_per_response` | 节点 `quota` | 64 KB | ❌ **从未生效**（见下） |
+| 单次应答字节上限 | 节点 `self_limits` | 由节点自定 | ❌ **从未生效**（见下） |
 | `MAX_FREETEXT_BYTES` | 代码常量 | 4 KB | 只作用于声明的自由文本字段 |
 
-> ⚠ **`bytes_per_response` 是个死配置。** `check_quota(planned_bytes=...)`
+> ⚠ **单次应答字节上限是个死配置。** `check_quota(planned_bytes=...)`
 > 这个参数在全部代码里**没有任何调用点**，所以它永远收到默认值 0。
 > 换句话说：你把它配成 64 KB 或 64 MB，行为完全一样。
 > 这是 v0.1 就登记在 `UNIMPLEMENTED` 里的遗留项，本文档顺带确认了它。
@@ -159,7 +159,18 @@ python examples/probe_artifact_size.py
 
 ---
 
-## 附：为什么 `bytes_per_response` 不生效是有道理的（暂时）
+## 附：这两个配置项的最终处置
+
+⚠ **本节描述的是改造前的状态。权限模型改造后，这类"节点配额"配置项会被删除**
+（见 [`design/06-agent-role-model.md`](design/06-agent-role-model.md) §6）。
+
+理由：限额是节点自己的防御机制，Mesh 无法强制（命令在节点本机执行）。
+节点正确的表达方式是自报 `self_limits`，额度用完时主动申报 `paused`。
+
+真正的体积硬上限始终是 `server.max_body_bytes` —— 那个是 Mesh 自己的传输层限制，
+一直都在生效。
+
+## 附：为什么单次应答上限不生效是有道理的（暂时）
 
 配额的设计意图是"限制单个节点的产出体积"。但**体积检查需要知道产物大小**，
 而那要先把产物序列化——在边界校验**之前**序列化一次，
@@ -168,5 +179,5 @@ python examples/probe_artifact_size.py
 而且 `max_body_bytes` 已经在传输层挡了硬上限，
 所以这个配额缺失的实际风险很小。这也是它一直没被优先补的原因。
 
-同期登记的另一个未实现项 `bytes_per_day`（按日累计）风险类似。
+同期登记的另一个未实现项是「按日字节累计」，风险类似。
 两者都记在 `nxs/mgmt/config.py` 的 `UNIMPLEMENTED` 里，不会被静默遗忘。

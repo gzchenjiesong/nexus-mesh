@@ -283,35 +283,54 @@ effective = min( 域间矩阵上限, 节点自约束上限, 能力声明等级 )
 | `AU-REPLAY-02` | 时间戳超窗 / nonce 重复 |
 | `AU-CRED-03` | 凭据已吊销 |
 | `AU-NODE-04` | 节点未注册 |
-| `MX-ISSUER-01` | 无发布权（角色关闭或类型不在白名单） |
-| `MX-DOMAIN-02` | 矩阵无对应规则（**默认拒绝**） |
-| `MX-RECEIVE-03` | 接收方不接受来自该域的委托 / 未批准 |
-| `MX-DELEGATE-04` | 二次委托被禁 |
-| `WL-TYPE-404` | 任务类型未注册 / 目标不提供该能力 |
-| `WL-FIELD-001` | 产出含白名单外字段 |
+| `AU-APPROVE-05` | 节点尚未批准 / 不可路由（**准入问题，不是投递问题**） |
+| `MX-ISSUER-01` | 发布方 role 不允许发布（含：广播但 `may_broadcast=false`） |
+| `MX-DOMAIN-02` | 矩阵无对应规则（**默认拒绝**）／目标域对源域不可达 |
+| `WL-TYPE-404` | 任务类型未在 Mesh 定义 |
+| `WL-FIELD-001` | 产出含类型定义外的字段 |
 | `WL-LEVEL-002` | 产出等级超过上限 |
 | `WL-FREETEXT-003` | 自由文本超长或类型错误 |
-| `QT-TASK-01` | 按日任务数用尽 |
-| `QT-BYTE-02` | 单次应答字节超限 |
-| `QT-BYTE-03` | 按日字节数用尽 |
-| `QT-RATE-04` | 速率超限 |
-| `QT-CONC-05` | 并发已满 |
-| `QT-CONN-06` | 传输层连接/请求并发超限（**与 `QT-CONC-05` 是两件事**：那是业务配额，这是传输层自保） |
+| `QT-RATE-04` | 速率超限（**Mesh 自我保护**） |
+| `QT-CONN-06` | 传输层连接超限（**Mesh 自我保护**） |
+| `QT-BACKLOG-07` | 目标信箱已达 `self_limits.max_backlog` |
 | `LF-LEASE-01` | 任务已被领取 |
 | `LF-EXPIRE-02` | 任务 TTL 已过 |
 | `LF-STATE-03` | 非法状态迁移 |
 | `LF-IDEM-04` | 幂等键重复 |
 | `LF-TASK-404` | 任务不存在，**或调用方看不到它**（两种情况刻意不区分，见下） |
 
+### `MX-RECEIVE-03` 为什么被拆成三份 <!-- ok:describes-removed -->
+
+它原来是一个"什么都管"的错误码，实际承担了三种完全不同的语义
+（`delivery not permitted`）：
+
+| 原调用点 | 真实语义 | 新归属 |
+|---|---|---|
+| `policy.py` 的 `can_receive_from` 检查 <!-- ok:describes-removed --> | 域不可达 | `MX-DOMAIN-02` |
+| `mailbox.py` / `registry.py` 的未批准、不可路由 | **准入问题** | `AU-APPROVE-05` |
+| `gateway.py` / `task.py` 的任务不属于调用方 | **任务归属问题** | `LF-TASK-404` |
+
+第三项尤其值得注意：`gateway.py` 的原注释写着
+
+> 不存在与不属于自己**返回同一个错误**，避免通过状态码枚举别人有哪些任务。
+
+而 `LF-TASK-404` 的定义正好就是「任务不存在，或调用方看不到它」——
+**两者是同一个语义**，分开只是因为历史原因。
+
+一个错误码覆盖三种问题，会让排障时必须先读代码才知道
+"这次的 RECEIVE-03 到底是谁不许谁"。
+
 ### 每次投递的检查顺序
 
 越靠前的检查越基础，**失败即停，不留下任何痕迹**：
 
-1. 发布方有权发布该类型 → `MX-ISSUER-01`
-2. 目标节点可路由（未吊销、已批准、alive）→ `AU-*` / `MX-RECEIVE-03`
-3. 域间矩阵允许这次投递且类型在范围内 → `MX-DOMAIN-02`
-4. 目标接受来自该域的委托 → `MX-RECEIVE-03`
-5. 配额充足 → `QT-*`
+1. 发布方 role 允许发布 → `MX-ISSUER-01`
+2. 广播需 `may_broadcast=true` → `MX-ISSUER-01`
+3. 目标节点可路由（未吊销、已批准）→ `AU-*` / `AU-APPROVE-05`
+4. 域间矩阵允许源域到达目标域 → `MX-DOMAIN-02`
+5. 目标 role 可服务该类型 → `WL-TYPE-404`
+6. 目标 `state=available`（广播跳过，单播报错）→ `AU-APPROVE-05`
+7. 目标信箱未满 → `QT-BACKLOG-07`
 
 **通过后才写入队列。** 被拒的任务不会在队列里留下任何痕迹。
 
@@ -352,7 +371,7 @@ POST /nxs/register            # 请求签名（无任务可签）
     "outcome": "created" | "unchanged" | "card_changed",
     "approved": false,
     "revision": 1,
-    "domain": "zone-work",
+    "domain": "work",
     "hint": "waiting for operator approval"
   }
 ```
@@ -562,7 +581,7 @@ POST /nxs/register            # 请求签名（无任务可签）
 
 | 情形 | 错误码 | 调用方应该做什么 |
 |---|---|---|
-| 任务不属于你 / 不存在 | `MX-RECEIVE-03` | 停止，**不要**再执行 |
+| 任务不属于你 / 不存在 | `LF-TASK-404` | 停止，**不要**再执行 |
 | 任务已落终态（别人已完成） | `LF-STATE-03` | 停止，丢弃产出 |
 | 租约已过期、任务回到队列 | `LF-EXPIRE-02` | 停止，丢弃产出 |
 

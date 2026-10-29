@@ -329,7 +329,7 @@ FEATURES: tuple[Feature, ...] = (
             "nxs/control/policy.py:PolicyEngine.check_delivery（rule 查找）",
             ("G2",), "P0", ("S3",)),
     Feature("M5.F3", "接收方约束校验",
-            "nxs/control/policy.py:PolicyEngine.check_delivery（can_receive_from）",
+            "nxs/control/policy.py:PolicyEngine.check_delivery（域矩阵可达性）",
             ("G2",), "P0", ("S3",)),
     Feature("M5.F4", "应答字段白名单（含列表递归）",
             "nxs/control/policy.py:PolicyEngine.check_response",

@@ -79,7 +79,7 @@ policy:
 nodes:
   - node_id: coordinator
     constraints:
-      can_issue_types: ["work.*", "agent.ask"]   # ← 不加则报 MX-ISSUER-01
+      role: driver                                 # ← 用 driver 才有发布权
 ```
 
 ```bash
@@ -191,7 +191,7 @@ coord.publish(
 
 | 限制 | 说明 |
 |---|---|
-| **每条任务烧 token** | deepseek-v4-pro。`quota.tasks_per_day: 100` 是刻意的成本闸门 |
+| **每条任务烧 token** | deepseek-v4-pro。`self_limits.max_backlog: 20` 防止任务堆积烧穿额度 |
 | **延迟 9–10 秒起** | 靠 SDK 自动续租（5 秒一次），不靠调大租约 |
 | **会写 Hermes 会话历史** | `-z` 每次一个 session。跑多了要清理（`hermes sessions`） |
 | **与 gateway 并存** | 短进程 vs 常驻服务，共享 `HERMES_HOME` 的记忆，会话互不干扰 |
@@ -202,6 +202,6 @@ coord.publish(
 ## 七、还没做的
 
 - **反向协作**：目前是"协调节点 → hermes-working"单向。
-  要让公司电脑的节点直接问它，需要加 `zone-work → cloud` 的 `agent.ask` 规则。
+  要让公司电脑的节点（`work` 域）直接问它（`cloud` 域），需要在域矩阵里加一条 `work → cloud`。
 - **多轮对话**：现在是无状态单次问答。多轮要靠 `--resume`，会引入会话管理。
 - **成本观测**：没有记录每条任务的 token 用量。要做的话应该记进审计（元数据，不含内容）。

@@ -102,7 +102,7 @@ traceability/MATRIX.md         ← 自动生成，勿手工编辑
 | **能力** | Capability | 一个具名的任务类型，含参数 schema 与应答字段白名单 | ~~技能~~ |
 | **任务** | Task | 一次协作的载体，有状态机、租约、幂等键 | ~~请求~~ · ~~消息~~ |
 | **用户** | User | 需求的提出者与决策者。**不是节点** | ~~人~~ · ~~人类~~ |
-| **信任域** | domain | 一组共享信任前提的节点。如 `zone-a`、`cloud` | ~~安全域~~ |
+| **信任域** | domain | 数据暴露围栏。如 `work`、`invest`、`common` | ~~安全域~~ |
 | **应答边界** | Response Boundary | 节点侧强制执行产出过滤的模块 | ~~出口闸门~~ · ~~Egress Guard~~ |
 | **协调节点** | coordinator | 承担总线/注册/策略职责的那个节点 | ~~主节点~~ |
 
@@ -133,7 +133,7 @@ traceability/MATRIX.md         ← 自动生成，勿手工编辑
 | **运维身份** | `__ops__` | 代码常量 | 保留标识，任何节点都不能占用它 |
 
 **为什么节点 ID 与域名刻意不同名**：`to_node` 匹配**节点**，
-`can_receive_from` 匹配**域**。两者同名时，这两个参数的区别在配置里
+域矩阵的匹配维度是**域**而不是节点 ID。两者的区别在配置里
 彻底看不出来——而它们的语义差别是安全边界的一部分。
 
 **``hub`` 是已废弃的叫法**，不得再作为节点 ID 或域名出现
@@ -177,7 +177,7 @@ Adapter(edge) → Core(core/control/data) → Port(ports) ← Backend(backends)
 # ✗ 绝对禁止
 if node_id == "node-a":
     ...
-if domain == "zone-a" and task_type.startswith("demo."):
+if domain == "work" and task_type.startswith("demo."):
     ...
 
 # ✓ 正确：一切来自配置数据
@@ -219,7 +219,7 @@ raise PolicyDenied(RuleId.WL_FIELD_NOT_ALLOWED, detail=f"artifact[{i}] has {n} s
 ```python
 # ✓ 正确
 roles: Roles = field(default_factory=Roles)          # 全 False
-can_receive_from: tuple[str, ...] = ()               # 空 = 无人可派
+self_limits: SelfLimits = SelfLimits()               # 节点自律，非配额
 ```
 
 漏配不能变成放行。反过来做（默认放行 + 黑名单）在安全上站不住。

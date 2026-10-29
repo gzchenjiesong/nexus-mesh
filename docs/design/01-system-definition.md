@@ -1,5 +1,14 @@
 System Definition · v1.2
 
+> ⚠ **本文的角色与权限模型（§7）已被
+> [`06-agent-role-model.md`](06-agent-role-model.md) 取代。**
+>
+> 系统定位、命名、协议模型、协作模型仍然有效；
+> **§7.1–7.3 的角色定义与卡片示例请以 06 为准。**
+> 保留原文是为了留存设计演进过程 —— §7.4 的推理依然成立，
+> 只是当时的实现方式没有跟上它自己的结论。
+
+
 # Nexus Mesh nxs Agent 协作网络 · 独立基础设施系统定义
 
 一个与任何具体 Agent 都无耦合的协作网络。Agent 以配置好的角色接入，声明自己的能力，按约定的协议模型发布任务或执行任务。**它是独立系统，主 Agent 只是它的一个节点。**
@@ -157,7 +166,7 @@ Nexus工程名：Nexus Mesh已定案
 
 | 特殊之处 | 为什么现在特殊 | 怎么表达（关键） |
 |---|---|---|
-| **它是唯一人机入口** | 你只通过 IM 渠道 与主 Agent 交互，所以所有需求都从它进入网络 | 由角色卡的 roles.human_interface = true 表达。**将来若要加第二个入口（如手机端），只需多配一个节点，不改架构。** |
+| **它是唯一人机入口** | 你只通过 IM 渠道 与主 Agent 交互，所以所有需求都从它进入网络 | 由它选用的角色表达（`driver` 且 `may_broadcast`）。**将来若要加第二个入口（如手机端），只需多接入一个节点，不改架构。** |
 | **它是唯一跨域聚合点** | 只有它有"跨域合成"这个能力，所以跨域行为都经它 | 由能力声明 capability: cross-domain.aggregate + 权限矩阵表达。**如果将来某个 Agent 也具备这个能力，它也能成为聚合点——这是配置变更，不是架构变更。** |
 | **它托管了 Nexus** | 当前 Nexus 与主 Agent 跑在同一台云服务器上 | 这纯粹是**部署巧合**，不是架构关系。**10.1 的部署演进路径就是为了让这一点变得随时可改。** |
 
@@ -445,73 +454,71 @@ v1.0 里我写了"Core 里出现一行 import sqlite3，可迁移性就当场归
 
 ### 7.2 各角色的语义定义
 
-| 角色 | 语义 | 对 Nexus 的要求 | 典型用途 |
-|---|---|---|---|
-| **Issuer**<br>发布 | 能把需求拆成任务并投递到网络；可以是任务的来源，也可以是任务链中的一环 | 需要 can_issue_types 白名单；**配额按"发布"维度计** | 主 Agent（人机入口）、本地 Agent（自主发现需补充能力时） |
-| **Executor**<br>执行 | 能接收任务、执行、回传结果（含 input_required 追问） | 需要能力声明 + can_receive_from + 应答等级上限 | 所有节点。这是最普遍的角色 |
-| **Relay**<br>中转 | 不执行业务，只做转发。**在当前部署里这个角色由 Nexus 自身承担**，所以没有节点需要它 | 需要 relay_targets 白名单 | 预留：将来若做多总线联邦、或某节点需为另一域代收任务 |
-| **Observer**<br>只读 | 只能读取元数据（任务状态、注册表、指标），**不能发布也不能执行** | 只读权限；看不到业务内容（Nexus 本来就不存） | 预留：监控 Agent、审计 Agent、看板 |
+> ⚠ **本节已被 06 取代。** 当前定义（三个角色）：
 
-> **关于 Relay 多说一句：**在 v1.3 的设计里，Coordinator 承担了"中转"这个角色。但按现在的定位，**中转是 Nexus 自身的能力，不是某个节点的角色**。所以 Relay 在当前配置里是空的——保留它是为了两种将来的场景：① 多总线联邦（一个总线把任务转给另一个总线）；② 某节点在特定网络分区内为其他节点代收任务。
+| 角色 | 可发布 | 可广播 | 可执行 | 典型用途 |
+|---|---|---|---|---|
+| `worker` | ✗ | ✗ | ✓ | 内网执行者、检索节点 |
+| `driver` | ✓ | 由 `may_broadcast` 决定 | ✓ | 主 Agent，能派活也能干活 |
+| `publisher` | ✓ | 由 `may_broadcast` 决定 | ✗ | 通知源、CI 触发器 |
 
-### 7.3 角色卡（Role Card）
+**原设计的四个"正交维度"为什么被放弃**
 
-节点接入时提交的声明。它是 A2A Agent Card 的对应物，但**显式增加了"信任约束"这一维**——因为 A2A 假设参与方是对等的跨组织伙伴，而这里三个节点的信任等级根本不同。
+| 原角色 | 问题 |
+|---|---|
+| Issuer / Executor | 可任意组合 → 4 种组合各需单独校验，而实测下来这 4 个标志**全部不参与判定** |
+| Relay | 从未实现。原文说"中转是 Nexus 自身的能力"——这句话本身就是信号：它不是节点角色 |
+| Observer | 没有只读订阅通道。看板走 ops 通道，不需要节点身份 |
 
-```
-// Nexus 角色卡 · 节点身份与能力的唯一权威声明
+**关键改变**：Agent 不再逐项申请权限，而是**从三个角色里选一个**。
+审批只需回答「允许这个 Agent 以这个角色加入这个域吗」。
+
+### 7.3 两张卡：AgentCard 与 RoleCard
+
+> ⚠ **本节示例已按新模型重写。** 完整定义见
+> [`06-agent-role-model.md`](06-agent-role-model.md) §2。
+
+原设计叫「角色卡（Role Card）」，把身份、能力、约束、配额全塞在一张卡里。
+新模型把它拆成两张，因为**它们的定义方和变更频率完全不同**：
+
+| | AgentCard（身份） | RoleCard（角色） |
+|---|---|---|
+| 回答 | 我是谁 | 我能做什么 |
+| 定义方 | **节点自己** | **运维** |
+| 变更 | 改 `role`/`domain` 才需重批 | 改一次，影响所有该角色的节点 |
+
+**节点接入时提交 AgentCard，并从 Mesh 预设的角色里选一个填进 `role`。**
+
+```jsonc
+// AgentCard · 节点接入时提交
 {
-  "card_version": "1.0.0",              // 卡片自身格式版本
+  "card_version": "2.0.0",
   "node_id": "work-agent",
-  "display_name": "工作 Agent",          // 给人看的名称，上限 100 字符
-  "description": "处理日历、待办与周报",  // 一句简介，上限 500 字符
-  "domain": "work",                      // 信任域：work | home | cloud
-  "reachability": "egress-only",        // 仅主动出站（当前所有节点都是）
-  "heartbeat_interval": 60,              // 秒；超过 3 倍视为 stale
+  "display_name": "工作 Agent",
+  "description": "处理日历、待办与周报。能查会议纪要、候选人进度，不碰财务数据。",
+  // ↑ 自由文本，像一份 skill 文档。不结构化 —— 不同 Agent 能力差异太大
 
-  // —— 维度一：任务流向
-  "roles": {
-    "issuer":   true,                   // 能力上可以，但受下面 can_issue_types 限制
-    "executor": true,
-    "relay":    false,
-    "observer": false,
-    "human_interface": false          // ★ 是否为人机入口（当前仅主 Agent 为 true）
+  "domain": "work",              // 数据围栏，不是通信分区
+  "role": "worker",              // ★ 从 Mesh 预设角色里选，不逐项申请权限
+  "may_broadcast": false,
+
+  "self_limits": {               // ★ 自律，不是配额
+    "max_backlog": 20,           // 信箱最多攒 20 个，超了拒收
+    "max_response_level": "summary"
   },
+  "capacity": 1,                 // 排程提示（不用于限制）
 
-  // —— 维度二：能力供给
-  "capabilities": [
-    { "type": "query.calendar",          "level": "summary", "mode": "sync",
-      "params_schema": { "date": "date", "scope": "mine|all" },
-      "response_fields": ["time", "topic", "attendee_count"] },   // ★ 字段白名单
-
-    { "type": "query.interview_status",   "level": "summary", "mode": "sync",
-      "params_schema": { "candidate": "string" },
-      "response_fields": ["stage", "scheduled_at"] },
-
-    { "type": "summarize.todo",           "level": "summary", "mode": "async",
-      "params_schema": { "range": "today|week" },
-      "response_fields": ["items", "freetext_summary"] }        // ★ 含自由文本字段，需标注
-  ],
-
-  // —— 维度三：信任约束（★ 独立于能力）
-  "constraints": {
-    "max_response_level": "summary",            // 硬上限：片段级 / 原文级 在实现层不存在路径
-    "can_issue_types": [],                // ★ 空数组 = 作为 Issuer 时不可发布任何类型（Q9 待定）
-    "can_receive_from": ["cloud"],        // 谁可以给它派任务
-    "can_delegate_to": [],                // 不做二次委托
-    "quota": {
-      "tasks_per_day": 200,
-      "bytes_per_response": 65536,
-      "bytes_per_day": 4194304,
-      "concurrent_tasks": 1            // 单并发：工作机资源有限
-    }
-  }
+  "tools": ["Read", "Grep", "Glob"],   // 自律项，仅记录 + 留痕
+  "state": "available"                  // available | paused
 }
 ```
 
-> **卡片里两处最关键的字段，实现时不要省：① response_fields——字段白名单写在卡片里。**这意味着"这个任务类型能返回哪些字段"是**节点注册时声明的**，而不是运行时判断的。这让 片段级 / 原文级 的不可达成为**结构事实**而非运行时判断。
+**能力不再写在卡里。** 它由 `role` 决定：`worker` 能服务哪些任务类型，
+是运维在角色表里定义的，对所有 worker 一致。
 
-**② can_issue_types: []——Issuer 能力的实际开关。**roles.issuer = true 只是"能力上可以"，真正的权限由这个白名单决定。当前为空，意味着 Work 不能发布任何任务。**这是 Q9 待你决策的那个点。**
+**为什么这样更好**：原设计里每个节点各自声明 `capabilities`，
+于是同一个 `work.query` 在两个节点上可以有两套 `response_fields`，
+系统不报错。改造后 TaskType 全局定义，**一个名字只有一种含义**。
 
 ### 7.4 复杂度控制：用角色代替点对点授权
 
@@ -665,7 +672,7 @@ Nexus 提供**六种基本交互模式**作为原语，以及一个**会话容�
 | /nxs/poll | GET | 拉取本节点待办任务 | 返回即打租约；空队列 204；**不做长轮询** |
 | /nxs/ack | POST | 确认接收、续租、回传进度 | 长任务需定期调用续租 |
 | /nxs/result | POST | 回传结果 artifact | Nexus 侧再做 schema 校验 + semantics=data 强制改写 |
-| /nxs/publish | POST | **发布任务**（Issuer 角色用） | 需 can_issue_types 白名单；支持 to（Direct）或 require（能力匹配） |
+| /nxs/publish | POST | **发布任务** | 需 role 允许发布；支持 to（单播）或按交付模式展开 |
 | /nxs/session | GET | 查询会话下的任务图与状态 | 只读 |
 | /nxs/denied | POST | 告知某任务被策略拒绝 | **只传 rule_id，不传被拒内容** |
 | /nxs/artifact | GET | 数据面：按一次性令牌取大产物 | 令牌限单 artifact、单次使用、短有效期 |

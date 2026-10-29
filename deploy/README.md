@@ -98,7 +98,7 @@ sudo -e /etc/nexus-mesh/local.yaml     # 按需修改
 |---|---|
 | `server.host` | 保持 `127.0.0.1`（前面放代理）；没有代理才改 `0.0.0.0` |
 | `stores.data_dir` | `/var/lib/nexus-mesh` |
-| `domains` | 你的真实信任域（如 `zone-work`） |
+| `domains` | 你的真实信任域（如 `work` / `invest` / `common`） |
 | `policy.matrix` | 你的真实任务类型与等级上限 |
 | `policy.auto_approve_domains` | **留空**（`[]`） |
 
@@ -107,7 +107,7 @@ memory 后端跑起来完全正常，但重启后所有节点注册、所有在�
 节点要重新注册、重新批准。`nxs doctor --production` 会拦住这个错误。
 
 ⚠ **`domains` 段不能省。** 工作电脑上的节点是自注册的——它在协调节点
-启动时还不存在。域必须显式声明，否则矩阵里写不出 `coordinator → zone-work`。
+启动时还不存在。域必须显式声明，否则矩阵里写不出 `cloud → work`。
 
 ---
 
@@ -231,26 +231,27 @@ from nxs.core.models import Level, RoleCard
 from nxs.edge.client import HttpTransport
 from nxs.sdk import NodeClient, NodeConfig
 
-# ⚠ 角色卡必须**确定性生成**：不要放时间戳或随机串。
+# ⚠ AgentCard 必须**确定性生成**：不要放时间戳或随机串。
 #   卡片一变，中心侧会把批准撤销——每次重启都要重新批准，很快就没人管审批了。
+#   （改 description 不会撤销批准；改 role 或 domain 会。）
 CARD = RoleCard.from_dict({
+    "card_version": "2.0.0",
     "node_id": "work-laptop",
-    "domain": "zone-work",
+    "domain": "work",                 # 数据围栏
     "display_name": "Company Laptop",
+    "description": "公司笔记本。能查日历与会议纪要，不碰财务。",  # 自由文本
     "heartbeat_interval": 30,
-    "roles": {"executor": True, "issuer": False},
-    "capabilities": [{
-        "type": "work.calendar",
-        "level": "summary",           # ← 声明即承诺：实现必须真的只产这个等级
-        "mode": "sync",
-        "response_fields": ["events", "level"],
-    }],
-    "constraints": {
+
+    "role": "worker",                 # ★ 从预设角色选，不逐项申请权限
+    "may_broadcast": False,
+
+    "self_limits": {                  # ★ 自律，非配额
+        "max_backlog": 20,            # 信箱最多攒 20 个
         "max_response_level": "summary",
-        "can_receive_from": ["coordinator"],
-        "can_issue_types": [],
-        "quota": {"tasks_per_day": 200, "concurrent_tasks": 2},
     },
+    "capacity": 2,                    # 排程提示，不用于限制
+    "tools": ["Read", "Grep", "Glob"],   # 自律项，仅记录 + 留痕
+    "state": "available",
 })
 
 def handle_calendar(params):
@@ -329,7 +330,7 @@ nxs ops nodes --url https://nxs.example.com/nxs
 ```
 节点            域          状态      批准  版本  能力
 coordinator             coordinator         alive    ✓    1     work.summary
-work-laptop     zone-work   alive    ✓    1     work.calendar
+work-laptop     work        alive    ✓    1     work.calendar
 ```
 
 再确认"谁能干某类活"（自动投递的前提）：
@@ -342,7 +343,7 @@ nxs candidates --type work.calendar --from-node coordinator \
 ```
 候选执行者 · work.calendar  （来源 coordinator）
   #  节点          域          等级      负载    同域
-  1  work-laptop   zone-work   summary   0/2     -
+  1  work-laptop   work        summary   0/2     -
 排序依据：① 同域优先 ② 等级刚好够用 ③ 负载率（工作/并发上限）④ 节点 ID 字典序
 ```
 
@@ -363,7 +364,7 @@ nxs metrics --url https://nxs.example.com/nxs
 
 节点
   节点          域          状态      收到    完成    失败    待办    执行中   水位    字节
-  work-laptop   zone-work   alive     42      40      0       0       0        0.0×    3500
+  work-laptop   work        alive     42      40      0       0       0        0.0×    3500
 
 系统级关联异常：无
 ```
@@ -426,9 +427,9 @@ ssh -N -L 8080:127.0.0.1:8080 root@你的服务器
 |---|---|
 | 节点注册返回 **401 `AU-SIG-01`** | **最常见**：服务端 `/etc/nexus-mesh/nxs.env` 里没有这个节点的 `NXS_SECRET_<ID>`。注意 ID 转大写下划线：`work-laptop` → `NXS_SECRET_WORK_LAPTOP`。加完**必须重启服务** |
 | 节点注册返回 401 | 两边的 `NXS_SECRET_<节点ID>` 是否一致；节点 ID 拼写（含大小写与连字符） |
-| coordinator 发不出任务 `MX-RECEIVE-03` | **coordinator 自己没批准**。`auto_approve_domains: []` 时谁都要批，先 `nxs ops approve coordinator` |
+| 节点收发被拒 `AU-APPROVE-05` | **该节点还没批准**。`auto_approve_domains: []` 时谁都要批，先 `nxs ops approve <节点ID>` |
 | 注册成功但一直"未批准" | `nxs ops nodes` 看有没有待批准；批准后节点下一次心跳会变 ✓ |
-| 任务投递被拒 `MX-DOMAIN-02` | 矩阵里有没有 `coordinator → zone-work` 这条规则；`allow_types` 是否覆盖该类型 |
+| 任务投递被拒 `MX-DOMAIN-02` | 矩阵里有没有 `cloud → work` 这条规则 |
 | 任务投递被拒 `WL-TYPE-404` | 节点的角色卡里有没有声明该能力；声明后要重新批准 |
 | **自动投递总报 `WL-TYPE-404`** | 用 `nxs candidates --type <类型>` 看候选。若显示"无候选"且提示有节点待批准，先去 `nxs ops approve`。注意：候选全被矩阵拒绝时**也**报这个码（防止泄漏"有人但不给你"），所以要去 coordinator 的审计日志里看真实的拒绝码 |
 | 产出被拒 `WL-FIELD-001` | 产出的字段是否都在 `response_fields` 里（**只报数量不报字段名**，去节点侧日志看） |

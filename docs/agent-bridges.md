@@ -70,7 +70,7 @@ Agent 本身对 mesh 一无所知 —— 它只收到一个 prompt。
 桥接只做 `executor`。给 `issuer` 意味着它能把任务参数当外发通道 —
 而参数是从别的节点来的，那是一条不该存在的路。
 
-### ⑤ `can_receive_from` 写**域名**，不是节点 ID
+### ⑤ 域矩阵写**域名**，不是节点 ID
 
 这个参数在 `policy.py` 里匹配的是 `src.domain`。
 写节点 ID 会永远匹配不上，而**症状是"任务被拒"而不是配置报错**。
@@ -111,9 +111,9 @@ state 在 `/root/.openclaw`）。
 | 层 | 控制 |
 |---|---|
 | 谁有发布权 | 只有 `coordinator` 有 `issuer`；其余节点发布需运维批准其角色卡 |
-| 矩阵 | `zone-work → cloud` 只放行 `work.*`，**不含 `agent.ask`** — 外部域派不进来 |
-| 日配额 | `tasks_per_day: 100`，失控循环烧不了无限次 |
-| 并发 | `concurrent_tasks: 1`，同一 agent 不会并行自我干扰 |
+| 域矩阵 | `work → cloud` 是否可达决定内网节点能否回连云端 |
+| 信箱深度 | `max_backlog: 20`，失控循环不会无限堆积 |
+| 排队 | 信箱按序执行，同一 agent 不会并行自我干扰 |
 | 审计 | 每次投递记元数据，可事后追溯 |
 | **工具面** | **未限制** ← 唯一的缺口 |
 
@@ -229,7 +229,7 @@ export NXS_CA_FILE=/etc/nexus-mesh/tls/ca.pem
 
 | 限制 | 说明 |
 |---|---|
-| 每条任务烧 token | deepseek-v4-pro。`tasks_per_day: 100` 是刻意的成本闸门 |
+| 每条任务烧 token | deepseek-v4-pro。`max_backlog: 20` 防止堆积烧穿额度 |
 | 无状态单次问答 | 多轮要靠 `--resume` / `--session-id`，会引入会话管理 |
 | Agent 不知道自己在一个 mesh 里 | prompt 只说"来自任务总线"。要它做跨节点判断时，得在问题里带上背景 |
 | 无 token 用量统计 | 要做的话应记进审计（元数据，不含内容） |
@@ -249,7 +249,7 @@ export NXS_CA_FILE=/etc/nexus-mesh/tls/ca.pem
 | 盲区 | 后果 |
 |---|---|
 | 同一台机器、同一 IP | 跨网络延迟、断连重连、TLS 路径都没测 |
-| 都在 `cloud` 域 | **信任域的真实边界没被检验** — `zone-work → cloud` 一条规则都没跑过 |
+| 都在 `cloud` 域 | **域的真实边界没被检验** — `work → cloud` 一条规则都没跑过 |
 | 共享宿主环境 | 测不出状态目录隔离问题 |
 
 所以：**同机跑通 ≠ 接入没问题**。跨网络那一层必须补验。
@@ -266,7 +266,7 @@ export NXS_CA_FILE=/etc/nexus-mesh/tls/ca.pem
 |---|---|---|
 | 1 | 身份接入（角色卡、心跳） | 桥接进程 |
 | 2 | 收任务、执行、交付 | 桥接进程 |
-| 3 | **发布权**（`issuer: true` + `can_issue_types`） | 角色卡 |
+| 3 | **发布权**（`role: driver` 或 `publisher`） | 角色 |
 | 4 | **可调用的工具**（`nxs-cli` + 凭据 + 上下文） | `nxs-cli` + AGENTS.md |
 
 第 3、4 项是 v0.17 补的 —— 在此之前 Agent 只能被动应答，
@@ -336,7 +336,7 @@ OpenClaw 的 `exec` 工具跑在 gateway 里（PID 3446），不在桥接的子�
 
 我踩过一次：批准时桥接还在崩溃循环（提交的是旧卡片），
 桥接修好起来后提交了新卡片 → 卡片变了 → **批准自动撤销** →
-报 `MX-RECEIVE-03`，而那看起来像"域不匹配"，实际是"没批准"。
+报 `AU-APPROVE-05`，语义明确是"没批准"。
 
 正确顺序：
 
@@ -353,7 +353,7 @@ nxs-cli --as hermes-working whoami    # 批准：是
 ```
 
 > 桥接在未批准时会持续轮询被拒。实测一次部署里累积了 **309 次**
-> `MX-RECEIVE-03` —— 数字很大但无害，只是说明客户端重试较密。
+> `AU-APPROVE-05` —— 数字很大但无害，只是说明客户端重试较密。
 > 看监控时别被这个数字吓到。
 
 ---
@@ -595,8 +595,8 @@ nxs ops approve work-laptop --url ... --ca-file ...
 ### 矩阵改动（v0.19）
 
 ```yaml
-cloud      → zone-work   allow: [..., "work.query", "work.*"]
-zone-work  → cloud       allow: ["work.*", "agent.ask"]
+cloud  → work    # 可达即可，不再列类型
+work   → cloud
 ```
 
 第二条是新加的：原先只放行 `work.*`，意味着公司电脑**不能主动问云端**

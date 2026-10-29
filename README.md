@@ -123,7 +123,7 @@ make demo-net      # 同一套九步断言，走真实 HTTP
        对外响应不含字段名、不含内容——详情仅入本地审计
 
 [6/9] ★ 安全断言③  控制是逐层收窄的（角色 → 白名单 → 矩阵）
-       REJECTED  MX-ISSUER-01  node-a  roles.issuer=false → 角色层拦截
+       REJECTED  MX-ISSUER-01  node-a  role=worker → 角色层拦截
        REJECTED  MX-DOMAIN-02  node-b → node-a  有发布权，但矩阵无规则
        ★ 角色层放行、矩阵层拦截——两层互相独立，这是关键性质
 ```
@@ -326,7 +326,7 @@ post-deploy self-check and getting a FAIL on a working system.
 **v0.11.1** — two bugs that only show up on a real deployment.
 `nxs verify` derived its domain set from node cards and ignored the explicit
 `domains:` block — so the shipped production template **failed verification
-on step one**, because it declares `zone-work` with no node in it (work
+on step one**, because it declares `work` with no node in it (work
 machines self-register later). It now calls `cfg.known_domains()`. The
 template also contradicted itself: a capability at `summary` level with
 `max_response_level: metadata`. 480 tests missed both because they tested the
@@ -366,10 +366,10 @@ contract. Proposed: a separate read-only UI process on `127.0.0.1`,
 data fetched **through the ops endpoints** (never the storage layer), auth by
 SSH tunnel + a per-start token. Three decisions are left open.
 
-**v0.9.1** — `roles.executor` is a label, not a gate. A probe confirmed a
+**v0.9.1** — 执行者角色标志是个标签，不是闸门。实测确认一个
 node with `executor: false` but declared capabilities still completes the full
 loop; the real gate is `capabilities` (no declaration → `WL-TYPE-404`).
-Registered alongside `roles.relay` / `roles.observer` / `roles.human_interface`
+与中继 / 观察者 / 人机入口三个标志一起登记
 as parse-but-inert, and locked the behaviour with tests. There is also **no web
 UI at all** — zero frontend files, every endpoint returns JSON — now guarded by
 a test so that claim can't quietly go stale.
@@ -377,10 +377,10 @@ a test so that claim can't quietly go stale.
 **v0.9.0** — an acceptance guide, and a script that checks it.
 `docs/acceptance-guide.md` lists what can be verified (six groups, per-item
 pass criteria), what **cannot** (mTLS, A2A, DAG, Web UI…), and what
-**parses but does nothing** (`bytes_per_response`, `roles.relay`…).
+**解析了但什么都不做**（当时的字节配额、中继标志等）。
 `examples/acceptance_drill.py` runs 21 of those checks for real — and it
 caught two mistakes **in the guide itself** on first run. Also fixed a
-dangerous doc error: the old text claimed `bytes_per_response` was enforced
+危险的文档错误：旧文声称字节配额被强制执行
 by the policy layer; its `planned_bytes` argument has no caller anywhere.
 
 **v0.8.1** — a docs audit. This project is vibecoding: the requirement docs
