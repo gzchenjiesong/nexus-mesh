@@ -44,7 +44,7 @@ DEAD_VOCAB: dict[str, str] = {
     "MX-RECEIVE-03": "并入 MX-DOMAIN-02",
     "MX-DELEGATE-04": "删除（先不做二次委托）",
     "QT-CONC-05": "删除（并发不设上限）",
-    "QT-TASK-01": "删除（按日任务数属节点自律）",
+    "QT-TASK-01": "删除（按日任务数属节点自律）"
 }
 
 #: **尚未改完**的文档。改完一个删一行。
@@ -67,7 +67,7 @@ SELF_REFERENTIAL: set[str] = {
     "docs/design/06-agent-role-model.md",
     "docs/design/07-permission-model-implementation.md",
     # 测试清单：它的职责正是"列出哪些测试绑定了旧模型"，必然要写出这些词
-    "docs/design/08-test-inventory.md",
+    "docs/design/08-test-inventory.md"
 }
 
 

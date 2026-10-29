@@ -283,11 +283,6 @@ def build_card(node_id: str, domain: str, *,
         "tools": list(allowed_tools) if allowed_tools else [],
 
         # ---- 旧字段（待 Step 5 删除）----
-        "roles": {
-            "executor": True,
-            # ★ 给发布权：需要能主动问云端 Agent（比如"这个数据该按什么口径取"）
-            "issuer": True,
-        },
         "capabilities": [
             {
                 "type": "work.query",
@@ -302,26 +297,6 @@ def build_card(node_id: str, domain: str, *,
                 "freetext_fields": ["answer"],
             },
         ],
-        "constraints": {
-            # 摘要级 —— 与 SUMMARY_LIMIT 配合，构成双层限制
-            "max_response_level": "summary",
-            # ⚠ ``can_receive_from`` 是「**谁可以派任务给我**」，
-            #   不是「我自己属于哪个域」。
-            #
-            #   初版写成了 ``[domain]``（即 zone-work），于是云端
-            #   （cloud 域）派任务过来直接被拒：
-            #
-            #       PolicyDenied: denied[MX-RECEIVE-03]
-            #
-            #   而错误码看起来像"域不匹配 / 卡片不一致"，很难联想到
-            #   是这一项写错了方向。实际语义是"接收白名单"。
-            #
-            #   这个节点的用途就是**接受云端派来的查询任务**，
-            #   所以必须允许 cloud。自己的域也保留（同域调试用）。
-            "can_receive_from": sorted({domain, "cloud"}),
-            "can_issue_types": ["agent.ask"],
-            "can_delegate_to": [],
-        },
     })
 
 

@@ -55,7 +55,7 @@ HISTORICAL_SNAPSHOTS = {
         "2026-10-08 的审查快照，记录当时的 44 条需求与证据强度，刻意不改写",
     "docs/design/04-mvp-plan.md":
         "2026-10-07 的 MVP 规划快照，用当时的 8 模块编号，刻意不改写"
-        "（模块编号对照见 03 §6.5）",
+        "（模块编号对照见 03 §6.5）"
 }
 
 
@@ -386,7 +386,7 @@ class TestAcceptanceGuideClaims:
             "运维接口": "M14 已实现",
             "可观测": "M13 已实现",
             "节点自注册": "M3.F8 已实现",
-            "续租": "M7.F9-F11 已实现",
+            "续租": "M7.F9-F11 已实现"
         }
         wrongly = [f"{name}（{why}）" for name, why in already_done.items()
                    if f"**{name}" in body]
@@ -452,7 +452,7 @@ class TestUnimplementedList:
         "Capability-Match": "M4 匹配器（v0.6）",
         "可观测": "M13 可观测（v0.8）",
         "运维接口": "M14 运维接口（v0.3）",
-        "自动匹配": "M4 匹配器（v0.6）",
+        "自动匹配": "M4 匹配器（v0.6）"
     }
 
     @covers("M11.F1")
@@ -769,7 +769,7 @@ class TestDocumentedPathsExist:
     #: 这些路径由用户创建，不存在才是正常
     USER_CREATED = frozenset({
         "config/local.yaml", "config/secrets.yaml", "config/members.yaml",
-        "config/nxs.yaml", "deploy/local.yaml",
+        "config/nxs.yaml", "deploy/local.yaml"
     })
 
     @covers("M11.F1")
@@ -1053,7 +1053,7 @@ class TestCliCommandClaims:
             [_sys.executable, "-m", "nxs", "--help"],
             capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
         ).stdout
-        subs = re.findall(r"^    ([a-z][a-z-]*)\s{2,}", out, re.M)
+        subs = re.findall(r"^    ([a-z][a-z-]*)\s{2}", out, re.M)
         assert subs, "取不到 nxs 子命令列表"
         actual = len(subs)
 
@@ -1083,7 +1083,7 @@ class TestCliCommandClaims:
             [_sys.executable, "-m", "nxs", "--help"],
             capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
         ).stdout
-        subs = re.findall(r"^    ([a-z][a-z-]*)\s{2,}", out, re.M)
+        subs = re.findall(r"^    ([a-z][a-z-]*)\s{2}", out, re.M)
 
         broken = []
         for s in subs:

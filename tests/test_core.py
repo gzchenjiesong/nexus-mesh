@@ -75,7 +75,7 @@ class TestStrictValidation:
         with pytest.raises(ConfigError, match="必须同时出现在"):
             Capability.from_dict({
                 "type": "a.b", "level": "summary",
-                "response_fields": ["x"], "freetext_fields": ["y"],
+                "response_fields": ["x"], "freetext_fields": ["y"]
             })
 
     @covers("C6")
@@ -86,7 +86,7 @@ class TestStrictValidation:
                 "capabilities": [
                     {"type": "a.b", "level": "summary"},
                     {"type": "a.b", "level": "summary"},
-                ],
+                ]
             })
 
 
@@ -94,17 +94,43 @@ class TestDefaultsAreDeny:
     """默认值必须落在"拒绝"一侧——漏配不能变成放行。"""
 
     @covers("C5")
-    def test_roles_default_false(self):
-        r = RoleCard.from_dict({"node_id": "m", "domain": "d"})
-        assert not any([r.roles.issuer, r.roles.executor,
-                        r.roles.relay, r.roles.observer])
+    def test_role_is_mandatory_not_defaulted(self):
+        """★ 默认拒绝的最强形式：**没有默认角色**。
+
+        ⚠ 这条替换了原来的 `test_roles_default_false`。
+
+        旧版测「roles 五个布尔默认 false，所以漏配等于不能干」。
+        现在连"默认某个角色"都不允许 —— 必须显式声明。
+
+        为什么更严：留一个"不写就当 worker"的默认，会让
+        「忘记声明」和「故意选 worker」看起来一样，而审批时
+        看不出区别。
+        """
+        from nxs.core.errors import ConfigError
+
+        with pytest.raises(ConfigError, match="必填"):
+            RoleCard.from_dict({"node_id": "m", "domain": "d"})
 
     @covers("C5")
-    def test_constraints_default_empty(self):
-        r = RoleCard.from_dict({"node_id": "m", "domain": "d"})
-        assert r.constraints.can_issue_types == ()
-        assert r.constraints.can_receive_from == ()
-        assert r.constraints.can_delegate_to == ()
+    def test_role_decl_defaults_deny(self):
+        """角色声明本身的默认值也落在"拒绝"一侧。
+
+        ⚠ 这条替换了原来的 `test_constraints_default_empty`。
+        `constraints` 类已删除，那三串白名单各有归宿；现在
+        「默认拒绝」由角色的两个字段承担。
+        """
+        from nxs.mgmt.config import RoleDecl
+
+        # ⚠ 不能省到"既不发也不收" —— 那是空角色，会被显式拒绝
+        #   （批准一个什么都做不了的角色，等于让运维以为放权了）。
+        #   所以这里给一个最小但有效的形态：只发不收。
+        r = RoleDecl.from_dict({"name": "p", "can_issue": True}, "roles[0]")
+        assert r.serves == (), "不写 serves 就不服务任何类型"
+        assert not r.serves_type("anything.at.all")
+
+        # can_issue 不写就是 false —— 默认拒绝
+        w = RoleDecl.from_dict({"name": "w", "serves": ["demo.echo"]}, "roles[1]")
+        assert w.can_issue is False, "不写 can_issue 就不能发布"
 
     @covers("C5")
     def test_level_ordering(self):

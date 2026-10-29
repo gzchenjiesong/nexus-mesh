@@ -111,13 +111,14 @@ class PolicyEngine:
         Step 5 删除旧标志后，这一步一起删。
         """
         if not self._cfg.roles:
-            return None          # 配置里没有角色表 → 无从判定
+            # 配置里没有角色表 —— 这个部署尚未定义任何角色。
+            # 注意：这不是"退回旧判据"，而是"谁都发不出东西"（默认拒绝）。
+            # 启动时的 `nxs verify` 会提示这一点。
+            return None
 
-        name = card.role or card.derived_role()
-        if not name:
-            return None          # 既无声明也无从推导（无角色）
-
-        return self._cfg.roles.get(name)
+        # ⚠ Step 5c 起 `role` 必填，`derived_role()` 已删除 ——
+        #   不再有"从旧 roles 布尔推导"的回退路径。
+        return self._cfg.roles.get(card.role)
 
     @property
     def registered_types(self) -> frozenset[str]:
@@ -207,26 +208,22 @@ class PolicyEngine:
         card = self._card(node_id)
 
         role = self.role_of(card)
-        if role is not None:
-            # ---- 新路径：角色说了算 ----
-            if role.can_issue:
-                return
+        if role is None:
+            # 角色表里查不到这个角色的名字 —— 两种可能：
+            #   ① 配置里没有 roles: 段（部署未定义任何角色）
+            #   ② 卡片声明的 role 不在角色表里（配置疏漏）
+            # 两者都是"无从判断权限"，按默认拒绝处理。
             raise PolicyDenied(
                 RuleId.MX_ISSUER_NOT_ALLOWED,
-                f"{node_id} role={role.name!r} cannot issue",
+                f"{node_id} role={card.role!r} not found in config.roles",
             )
 
-        # ---- 旧路径：尚未迁移的部署（Step 5 删除）----
-        if not card.roles.issuer:
-            raise PolicyDenied(
-                RuleId.MX_ISSUER_NOT_ALLOWED, f"{node_id} roles.issuer=false"
-            )
-
-        if not _match_any(card.constraints.can_issue_types, task_type):
-            raise PolicyDenied(
-                RuleId.MX_ISSUER_NOT_ALLOWED,
-                f"{node_id} can_issue_types={card.constraints.can_issue_types}",
-            )
+        if role.can_issue:
+            return
+        raise PolicyDenied(
+            RuleId.MX_ISSUER_NOT_ALLOWED,
+            f"{node_id} role={role.name!r} cannot issue",
+        )
 
     # ------------------------------------------------------------------
     # ② 投递侧：这对域之间允许什么
@@ -283,22 +280,26 @@ class PolicyEngine:
                 f"no matrix rule for {src.domain} → {dst.domain}",
             )
 
-        # ---- ④ 应答上限：多方独立来源取最小 ----
+        # ---- ④ 应答上限：三重独立来源取最小 ----
         #
-        # 新路径：min(角色上限, 节点自限)
-        # 旧路径：min(节点约束, 能力声明) —— 尚未迁移的部署
+        # ⚠ 这个"多处取最小"的性质是整个模型防越界的支点，不能简化成单源：
+        #
+        #     role.max_response_level          运维定的"这类角色最多给多细"
+        #     self_limits.max_response_level   节点自己愿意给多细
+        #     capability.level                 这个能力的承诺
+        #
+        # 三者来源不同、各自只能收紧不能放宽。任何一方配错都不会放开整体。
         role = self.role_of(dst)
-        if role is not None:
-            cap = dst.capability(task_type)
-            parts = [role.max_response_level, dst.self_limits.max_response_level]
-            if cap is not None:      # 旧卡片仍声明了能力等级，一并收紧
-                parts.append(cap.level)
-            effective = Level(min(p.value for p in parts))
-        else:
-            cap = dst.capability(task_type)
-            assert cap is not None, "旧路径下前面已确认目标提供该能力"
-            effective = Level(min(dst.constraints.max_response_level.value,
-                                  cap.level.value))
+        if role is None:
+            raise PolicyDenied(
+                RuleId.AU_NOT_APPROVED,
+                f"{to_node} role={dst.role!r} not found in config.roles",
+            )
+        cap = dst.capability(task_type)
+        parts = [role.max_response_level, dst.self_limits.max_response_level]
+        if cap is not None:
+            parts.append(cap.level)
+        effective = Level(min(p.value for p in parts))
 
         return DeliveryDecision(
             rule=rule, effective_max_level=effective, task_type=task_type
@@ -340,23 +341,25 @@ class PolicyEngine:
                 f"no matrix rule for {src_card.domain} → {card.domain}",
             )
 
-        # ---- 等级上限：多方独立来源取最小 ----
+        # ---- 等级上限：三重独立来源取最小 ----
         #
-        # 改造后：min(角色上限, 节点自限, 这次能力的产出等级)
-        # 旧路径：min(节点约束, 能力产出等级)
+        # ⚠ 这里与 check_delivery 的 ④ 是**两道独立的闸门**，不是重复：
         #
-        # 矩阵不再参与 —— 它只管可达性，不管能到多细。
+        #     check_delivery  → 投递前算"这个任务最多能拿回多细"
+        #     check_response  → 回传时核"实际给的有没有越界"
         #
-        # ⚠ 保留"多处取最小"这个性质本身是必须的：
-        #   它是防止单点配错导致越界的唯一保障。
+        # 前者是承诺，后者是验收。只保留前者会被恶意/有 bug 的节点绕过。
+        #
+        # 矩阵不参与 —— 它只管可达性，不管能到多细。
         role = self.role_of(card)
-        if role is not None:
-            ceiling = Level(min(role.max_response_level.value,
-                                card.self_limits.max_response_level.value,
-                                cap.level.value))
-        else:
-            ceiling = Level(min(card.constraints.max_response_level.value,
-                                cap.level.value))
+        if role is None:
+            raise PolicyDenied(
+                RuleId.AU_NOT_APPROVED,
+                f"{node_id} role={card.role!r} not found in config.roles",
+            )
+        ceiling = Level(min(role.max_response_level.value,
+                            card.self_limits.max_response_level.value,
+                            cap.level.value))
 
         for i, art in enumerate(task.artifacts):
             # -- 检查 1 & 2：等级 --
@@ -435,23 +438,14 @@ class PolicyEngine:
                 f"{node_id} pending={pending}/{limit}",
             )
 
-    # ------------------------------------------------------------------
-    # ⑤ 委托链
-    # ------------------------------------------------------------------
-
-    def check_delegation(self, node_id: str, target_domain: str) -> None:
-        """校验节点能否向指定域二次委托。默认禁止（白名单为空即拒绝）。"""
-        card = self._card(node_id)
-        if not card.constraints.can_delegate_to:
-            raise PolicyDenied(
-                RuleId.MX_DELEGATION_TOO_DEEP,
-                f"{node_id} can_delegate_to is empty",
-            )
-        if target_domain not in card.constraints.can_delegate_to:
-            raise PolicyDenied(
-                RuleId.MX_DELEGATION_TOO_DEEP,
-                f"{target_domain} not in {card.constraints.can_delegate_to}",
-            )
+    # ⚠ `check_delegation()` 已删除（权限模型改造 Step 5c）。
+    #
+    #   它连同 `constraints.can_delegate_to` 一起删。原文自己的注释写着
+    #   "v0.1 只在任务已标记为'来自二次委托'时检查，链深逻辑见 v0.2" ——
+    #   也就是说它一直只有一半。
+    #
+    #   删而不是补：**二次委托现在没有真实需求。** 广播/群组落地时
+    #   如果需要转发再设计；留一个半实现的检查只会让人以为已经支持了。
 
 
 # ---------------------------------------------------------------------------

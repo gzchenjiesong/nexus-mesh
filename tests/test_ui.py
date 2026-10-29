@@ -406,7 +406,8 @@ class TestDataPath:
         node_b = by_id["node-b"]
         assert node_b["display_name"] == "工作笔记本"
         assert node_b["description"] == "处理日历与待办，人在公司时在线"
-        assert "roles" in node_b
+        # ⚠ Step 5c：roles 五布尔换成单一 role
+        assert "role" in node_b, "面板要显示它是什么角色"
 
     @covers("M15.F5")
     def test_metrics_shape_for_summary_tiles(self, live_ui):
@@ -441,7 +442,7 @@ class TestDataPath:
         assert nodes
         for node in nodes:
             for field in ("node_id", "display_name", "description", "domain",
-                          "state", "approved", "roles", "capabilities"):
+                          "state", "approved", "role", "capabilities"):
                 assert field in node, f"节点行缺少 {field}，页面会显示空白"
 
     @covers("M15.F3")

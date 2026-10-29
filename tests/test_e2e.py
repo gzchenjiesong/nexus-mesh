@@ -98,7 +98,7 @@ def deployed(workdir):
                                  secret=COORDINATOR_SECRET.encode()),
             "ops": OpsClient(gw.base_url, secret=OPS_SECRET),
             "node": HttpTransport(gw.base_url, node_id="work-laptop",
-                                  secret=NODE_SECRET.encode()),
+                                  secret=NODE_SECRET.encode())
         }
     finally:
         gw.stop()
@@ -110,7 +110,10 @@ def work_card() -> RoleCard:
         "node_id": "work-laptop",
         "domain": "zone-work",
         "display_name": "Company Laptop",
-        "roles": {"executor": True, "issuer": False},
+        "role": "worker",
+        # ⚠ 必须显式声明自限。不写的话默认 FULL_TEXT —— 而这张卡的
+        #   语义是"内网执行者只给摘要"，不是"愿意给全文"。
+        "self_limits": {"max_backlog": 20, "max_response_level": "summary"},
         "capabilities": [
             {"type": "work.calendar", "level": "summary", "mode": "sync",
              "params_schema": {"day": "string"},
@@ -119,13 +122,7 @@ def work_card() -> RoleCard:
              "params_schema": {"date": "string"},
              "response_fields": ["summary", "count", "level"],
              "freetext_fields": ["summary"]},
-        ],
-        "constraints": {
-            "max_response_level": "summary",
-            "can_receive_from": ["cloud"],
-            "can_issue_types": [],
-        },
-    })
+        ]})
 
 
 def calendar_handler(params: dict) -> dict:

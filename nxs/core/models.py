@@ -252,6 +252,30 @@ def _parse_role_name(value: Any, where: str) -> str:
     return name
 
 
+def _require_role(obj: Mapping[str, Any], where: str) -> str:
+    """角色是**必填项**（Step 5c 起）。
+
+    ⚠ 为什么必填而不是"留空即默认某角色"
+
+    角色是能力与权限的唯一来源。留空意味着网络无从判断这个节点
+    能发布什么、能服务什么 —— 那它注册成功也什么都干不了。
+
+    **"接入即失败"比"注册成功但静默无效"好**：后者的症状是
+    "派了活没反应"，看起来像网络故障。
+
+    错误信息要指出改哪、以及为什么，否则读者只知道自己写错了。
+    """
+    raw = obj.get("role")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raise ConfigError(
+            f"{where}.role: 必填 —— 每个 Agent 必须声明以什么角色接入。\n"
+            f"  可用的角色由 Mesh 在配置的 `roles:` 段定义（如 worker / driver / publisher）。\n"
+            f"  角色决定了「能不能发布任务」与「能服务哪些类型」——\n"
+            f"  没有它，网络无法判断该给你什么权限，只能一律拒绝。"
+        )
+    return _parse_role_name(raw, f"{where}.role")
+
+
 def _parse_capacity(value: Any, where: str) -> int:
     """排程提示。0 表示未声明（此时按 1 算，让负载率可算）。"""
     if value is None:
@@ -286,28 +310,16 @@ def _parse_state(value: Any, where: str) -> str:
 # 角色与约束
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class Roles:
-    """维度一：任务流向。空值一律视为 False（默认拒绝的体现）。"""
-
-    issuer: bool = False
-    executor: bool = False
-    relay: bool = False
-    observer: bool = False
-    #: 是否为人机入口。当前仅有一个人机入口，但**由配置表达而非架构特例**，
-    #: 这样将来加入第二个入口只是多配一个节点，不改代码。
-    human_interface: bool = False
-
-    _FIELDS = ("issuer", "executor", "relay", "observer", "human_interface")
-
-    @classmethod
-    def from_dict(cls, obj: Mapping[str, Any] | None, where: str = "roles") -> "Roles":
-        obj = obj or {}
-        if not isinstance(obj, Mapping):
-            raise ConfigError(f"{where}: 期望映射")
-        _reject_unknown(obj, cls._FIELDS, where)
-        kwargs = {k: bool(obj.get(k, False)) for k in cls._FIELDS}
-        return cls(**kwargs)
+# ⚠ `Roles` 类已删除（权限模型改造 Step 5c）。
+#
+#   它承载 5 个布尔标志：issuer / executor / relay / observer / human_interface。
+#   实测下来**只有 issuer 参与过放行判断**，其余 4 个从未被读取。
+#
+#   而 issuer 的语义也被 `role.can_issue` 取代了 —— 角色是"能力与权限的
+#   预设组合"，比"每个节点自己勾选 5 个复选框"更清楚：审批时只需回答
+#   "允许它以这个角色加入吗"，而不是逐项核对每个布尔值。
+#
+#   一个需要专门写测试去锁定「某字段不生效」的字段，本身就是设计问题。
 
 
 @dataclass(frozen=True)
@@ -472,39 +484,21 @@ class SelfLimits:
         }
 
 
-@dataclass(frozen=True)
-class Constraints:
-    """维度三：信任约束。**与能力正交——能力不能突破约束。**
-
-    "能力很强的 Agent" 不等于 "权限很大的 Agent"，这个区分就落在这个类上。
-    """
-
-    max_response_level: Level = Level.SUMMARY
-    #: 作为 Issuer 时可发布的任务类型。**空元组 = 完全不可发布**。
-    can_issue_types: tuple[str, ...] = ()
-    #: 谁可以给它派任务（按信任域）。**空元组 = 无人可派**。
-    can_receive_from: tuple[str, ...] = ()
-    #: 允许二次委托的目标域。**空元组 = 不做二次委托**（当前默认）。
-    can_delegate_to: tuple[str, ...] = ()
-    _FIELDS = (
-        "max_response_level", "can_issue_types", "can_receive_from",
-        "can_delegate_to",
-    )
-
-    @classmethod
-    def from_dict(cls, obj: Mapping[str, Any] | None, where: str = "constraints") -> "Constraints":
-        obj = obj or {}
-        if not isinstance(obj, Mapping):
-            raise ConfigError(f"{where}: 期望映射")
-        _reject_unknown(obj, cls._FIELDS, where)
-        return cls(
-            max_response_level=Level.parse(
-                obj.get("max_response_level", "summary"), f"{where}.max_response_level"
-            ),
-            can_issue_types=_as_str_list(obj.get("can_issue_types"), f"{where}.can_issue_types"),
-            can_receive_from=_as_str_list(obj.get("can_receive_from"), f"{where}.can_receive_from"),
-            can_delegate_to=_as_str_list(obj.get("can_delegate_to"), f"{where}.can_delegate_to"),
-        )
+# ⚠ `Constraints` 类已删除（权限模型改造 Step 5c）。
+#
+#   它承载"维度三：信任约束"，四个字段各有归宿：
+#
+#     can_issue_types  → role.can_issue（角色整体决定能否发布）
+#     can_receive_from → 域矩阵（运维定义围栏，不归节点自报）
+#     can_delegate_to  → 删除（不做二次委托）
+#     max_response_level → self_limits.max_response_level（同一个语义）
+#
+#   前三个都是"节点自己声明权限"—— 那是旧模型"逐项申请"的思路，
+#   权力归属不清楚。而最后一个与 self_limits 完全重复。
+#
+#   删掉之后，节点侧的自我约束只有一处：`self_limits`。语义诚实：
+#   那里面的东西都是节点**为自己的利益**设的（别烧穿额度、别给太细），
+#   不是"向网络申请许可"。
 
 
 @dataclass(frozen=True)
@@ -530,18 +524,18 @@ class RoleCard:
     #: 可达性。当前所有节点均为 egress-only（无入站端口）。
     reachability: str = "egress-only"
     heartbeat_interval: int = 60
-    roles: Roles = field(default_factory=Roles)
     capabilities: tuple[Capability, ...] = ()
-    constraints: Constraints = field(default_factory=Constraints)
 
-    # ---- 权限模型改造 Step 2 新增 ----
-    #
-    # ⚠ 这些字段现在**只承载数据，不参与判定**。判定在 Step 3/4 才切换。
-    #   每个字段都标了它当前的读取点，避免又出现
-    #   「定义了却没人用」的静默欺骗（见 test_every_config_field_is_read_somewhere）。
-
-    #: 以什么角色接入。空 = "尚未声明"（旧卡片），由 :meth:`derived_role` 推导。
-    #: 读取点：`to_public_dict` 暴露给其他 Agent；`derived_role` 做一致性核对。
+    #: **以什么角色接入。必填。**
+    #:
+    #: ⚠ Step 5c 起改必填 —— 旧卡片靠 `derived_role()` 从 roles 布尔推导，
+    #:   那个路径已随 `Roles` 类一起删除。
+    #:
+    #: 为什么必填：角色是**能力与权限的唯一来源**。没有它就无从判断
+    #: "能不能发布""能服务什么"，网络对该节点只能一律拒绝 —— 那不如
+    #: 在接入时就明确拒绝，而不是让它注册成功却什么都干不了。
+    #:
+    #: 读取点：`PolicyEngine.role_of()` 查角色表；`to_public_dict` 对外暴露。
     role: str = ""
     #: 是否被允许广播。**独立 flag，不是角色属性** —— 广播能触达全网，
     #: 做成 flag 才能在审批时区分"普通 driver"与"被批准广播的 driver"。
@@ -562,10 +556,9 @@ class RoleCard:
 
     _FIELDS = (
         "card_version", "node_id", "display_name", "description", "domain",
-        "reachability", "heartbeat_interval", "roles", "capabilities",
-        "constraints",
-        # Step 2 新增
+        "reachability", "heartbeat_interval",
         "role", "may_broadcast", "self_limits", "capacity", "tools", "state",
+        "capabilities",
     )
 
     @classmethod
@@ -611,11 +604,8 @@ class RoleCard:
             card_version=str(obj.get("card_version", "1.0.0")),
             reachability=str(obj.get("reachability", "egress-only")),
             heartbeat_interval=hb,
-            roles=Roles.from_dict(obj.get("roles"), f"{where}.roles"),
             capabilities=caps,
-            constraints=Constraints.from_dict(obj.get("constraints"), f"{where}.constraints"),
-            # ---- Step 2 新增字段 ----
-            role=_parse_role_name(obj.get("role"), f"{where}.role"),
+            role=_require_role(obj, where),
             may_broadcast=bool(obj.get("may_broadcast", False)),
             self_limits=SelfLimits.from_dict(
                 obj.get("self_limits"), f"{where}.self_limits"),
@@ -628,52 +618,32 @@ class RoleCard:
     # Step 2 新增字段的派生与计算
     # ------------------------------------------------------------------
 
-    def derived_role(self) -> str:
-        """从旧的 roles 布尔推导出等价角色。
-
-        ⚠ **这是过渡期的辅助，不是权威。** 存在的目的只有一个：
-        在切判定之前，能拿它和卡片上显式声明的 `role` 对账，
-        确认"我对旧行为的理解是对的"。
-
-        推导规则：
-
-            issuer  executor  →  role
-            True    True      →  driver
-            False   True      →  worker
-            True    False     →  publisher
-            False   False     →  ""（无角色）
-
-        Step 5 删除旧字段后本方法一起删。
-        """
-        if self.roles.issuer and self.roles.executor:
-            return "driver"
-        if self.roles.issuer:
-            return "publisher"
-        if self.roles.executor:
-            return "worker"
-        return ""
-
-    def role_is_consistent(self) -> bool:
-        """卡片声明的 role 与旧标志推导出的角色是否一致。
-
-        未声明 role 的旧卡片视为一致（无从对账）。
-        """
-        if not self.role:
-            return True
-        return self.role == self.derived_role()
+    # ⚠ `derived_role()` 与 `role_is_consistent()` 已删除（Step 5c）。
+    #
+    #   它们是过渡期的桥：从旧的 roles 布尔推导角色，让还没改配置的部署
+    #   也能走新判定。`Roles` 删了，桥的两端都没了。
+    #
+    #   它们的价值已经用完了 —— Step 2 那张「四种组合等价表」就是靠
+    #   `derived_role()` 建起来的，用来在改判定前确认对旧行为的理解。
+    #   现在判定已切完，那张表的历史使命结束。
 
     def effective_max_level(self) -> Level:
-        """实际可用的应答上限 = min(旧约束上限, 节点自限)。
+        """节点侧愿意给出的上限 = 自己的自限。
 
-        ⚠ Step 2 阶段：角色上限（来自配置）还没接进来，
-        所以这里是两重取 min；Step 4 才会变成
-        min(角色上限, 节点自限)。
+        ⚠ Step 5c 起 `constraints` 已删除，节点侧的等级约束只剩
+        `self_limits.max_response_level` 一处 —— 原来这里取
+        min(constraints, self_limits)，而两者语义相同（都叫"节点愿意给多细"），
+        合并成一个。
 
-        保留"多方独立来源、各自只能收紧"这个性质本身是必须的 ——
-        它是防止单点配错导致越界的唯一保障。
+        **真正的多重取最小发生在投递时**（`PolicyEngine.check_delivery`）：
+
+            min(role.max_response_level,      # 运维定的这类角色上限
+                self_limits.max_response_level,  # 节点自限（本方法）
+                capability.level)                # 这个能力的承诺
+
+        那三层来源不同、各自只能收紧，那个性质没有丢。
         """
-        return Level(min(self.constraints.max_response_level.value,
-                          self.self_limits.max_response_level.value))
+        return self.self_limits.max_response_level
 
     def effective_capacity(self) -> int:
         """排程用的并发提示。
@@ -700,22 +670,17 @@ class RoleCard:
             "display_name": self.display_name,
             "description": self.description,
             "domain": self.domain,
-            "roles": {
-                "issuer": self.roles.issuer,
-                "executor": self.roles.executor,
-                "human_interface": self.roles.human_interface,
-            },
+            #: 以什么角色接入。对方据此判断"它能发布吗、能服务什么"。
+            "role": self.role,
+            "may_broadcast": self.may_broadcast,
             "capabilities": [
                 {"type": c.type, "level": str(c.level), "mode": c.mode}
                 for c in self.capabilities
             ],
-            # ⚠ 对外摘要给的是**实际生效**的上限，不是某一个原始字段。
-            #   调用方关心"我能拿到多细"，而不是"哪几个值取了 min"。
+            #: 这个节点**自己愿意**给出多细。实际能拿到多细还要与角色上限取 min，
+            #: 那是投递时才算的（见 PolicyEngine.check_delivery）——
+            #: 对外报自己这一侧的值，语义更清楚：这是它对自己的承诺。
             "max_response_level": str(self.effective_max_level()),
-            # ---- Step 2 新增：这些是其他 Agent 需要知道的 ----
-            #: 以什么角色接入（未声明的旧卡片给推导值，便于对方判断）
-            "role": self.role or self.derived_role(),
-            "may_broadcast": self.may_broadcast,
             #: 它声明会用哪些工具。**自律项** —— 对方要知道，但不构成限制。
             "tools": list(self.tools),
             #: available / paused。paused 表示"活着但暂时不接单"。
@@ -738,13 +703,12 @@ class RoleCard:
             "domain": self.domain,
             "reachability": self.reachability,
             "heartbeat_interval": self.heartbeat_interval,
-            "roles": {
-                "issuer": self.roles.issuer,
-                "executor": self.roles.executor,
-                "relay": self.roles.relay,
-                "observer": self.roles.observer,
-                "human_interface": self.roles.human_interface,
-            },
+            "role": self.role,
+            "may_broadcast": self.may_broadcast,
+            "self_limits": self.self_limits.to_dict(),
+            "capacity": self.capacity,
+            "tools": list(self.tools),
+            "state": self.state,
             "capabilities": [
                 {
                     "type": c.type,
@@ -757,20 +721,6 @@ class RoleCard:
                 }
                 for c in self.capabilities
             ],
-            "constraints": {
-                "max_response_level": str(self.constraints.max_response_level),
-                "can_issue_types": list(self.constraints.can_issue_types),
-                "can_receive_from": list(self.constraints.can_receive_from),
-                "can_delegate_to": list(self.constraints.can_delegate_to),
-            },
-            # ---- Step 2 新增 ----
-            # 必须能 from_dict 原样读回，所以新字段也要完整输出
-            "role": self.role,
-            "may_broadcast": self.may_broadcast,
-            "self_limits": self.self_limits.to_dict(),
-            "capacity": self.capacity,
-            "tools": list(self.tools),
-            "state": self.state,
         }
 
 

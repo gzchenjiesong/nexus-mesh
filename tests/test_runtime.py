@@ -70,7 +70,7 @@ def _build_stack(config):
     return {
         "config": config, "registry": registry, "policy": policy,
         "queue": queue, "lifecycle": lifecycle, "mailbox": mailbox,
-        "boundary": boundary, "audit": audit,
+        "boundary": boundary, "audit": audit
     }
 
 
@@ -309,8 +309,9 @@ class TestRegistry:
         reg = stack["registry"]
         original = reg.require_card("node-a")
         # node-a 原本 max_response_level=summary，改成 metadata（收紧一档）
-        tightened = replace(original, constraints=replace(
-            original.constraints, max_response_level=Level.METADATA))
+        # ⚠ constraints 已删（Step 5c），节点自限现在在 self_limits
+        tightened = replace(original, self_limits=replace(
+            original.self_limits, max_response_level=Level.METADATA))
         assert tightened != original, "测试自身要求两张卡片必须不同"
         reg.register(tightened, approved=True)
         after = reg.record("node-a")

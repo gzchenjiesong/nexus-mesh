@@ -67,7 +67,6 @@ class RuleId(str, Enum):
     #:
     #: 一个码覆盖三种语义，排障时必须读代码才知道这次是谁不许谁。
     AU_NOT_APPROVED = "AU-APPROVE-05"
-    MX_DELEGATION_TOO_DEEP = "MX-DELEGATE-04"
 
     # ---------- WL- 白名单 ----------
     WL_TYPE_NOT_REGISTERED = "WL-TYPE-404"
@@ -114,7 +113,6 @@ _SAFE_MESSAGES: dict[RuleId, str] = {
     RuleId.MX_DOMAIN_FORBIDDEN: "delegation not permitted",
     RuleId.MX_ISSUER_NOT_ALLOWED: "publish not permitted",
     RuleId.AU_NOT_APPROVED: "not approved",
-    RuleId.MX_DELEGATION_TOO_DEEP: "delegation not permitted",
     RuleId.WL_TYPE_NOT_REGISTERED: "task type not available",
     RuleId.WL_FIELD_NOT_ALLOWED: "response rejected",
     RuleId.WL_LEVEL_EXCEEDED: "response rejected",

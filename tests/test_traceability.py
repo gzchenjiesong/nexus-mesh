@@ -45,7 +45,7 @@ PATTERNS = {
     "R": re.compile(r"^M\d+\.R\d+$"),
     "C": re.compile(r"^C\d+$"),
     "N": re.compile(r"^N\d+$"),
-    "S": re.compile(r"^S\d+$"),
+    "S": re.compile(r"^S\d+$")
 }
 
 

@@ -233,7 +233,6 @@ _STATUS_BY_RULE: dict[RuleId, int] = {
     RuleId.MX_DOMAIN_FORBIDDEN: 403,
     RuleId.MX_ISSUER_NOT_ALLOWED: 403,
     RuleId.AU_NOT_APPROVED: 403,
-    RuleId.MX_DELEGATION_TOO_DEEP: 403,
     RuleId.WL_TYPE_NOT_REGISTERED: 404,
     RuleId.WL_FIELD_NOT_ALLOWED: 403,
     RuleId.WL_LEVEL_EXCEEDED: 403,
@@ -1071,6 +1070,26 @@ class _Handler(BaseHTTPRequestHandler):
     # 端点：运维（M14）
     # ------------------------------------------------------------------
 
+    def _role_definition(self, role_name: str) -> dict[str, Any] | None:
+        """查某个角色在配置里的定义，供 `ops nodes` 输出。
+
+        ⚠ 为什么要内联展开而不是只给角色名
+
+        运维排查"为什么它发不出任务"时，光看到 `role: worker` 还得去
+        翻配置文件才知道 worker 能不能发布。**观测接口应该一次把话说完。**
+
+        查不到返回 None（角色名拼错、或配置里没有 roles: 段）——
+        这本身就是重要信息：它解释了"为什么这个节点什么都干不了"。
+        """
+        decl = self.gw.app.config.roles.get(role_name)
+        if decl is None:
+            return None
+        return {
+            "can_issue": decl.can_issue,
+            "serves": list(decl.serves),
+            "max_response_level": str(decl.max_response_level),
+        }
+
     def _handle_ops(self, action: str, method: str, full_path: str) -> None:
         """运维动作。**必须由运维身份签名**，且不经节点配额。
 
@@ -1133,27 +1152,27 @@ class _Handler(BaseHTTPRequestHandler):
                     "approved": rec.approved,
                     "revision": rec.revision,
                     "last_seen": rec.last_seen,
-                    "roles": {
-                        "issuer": rec.card.roles.issuer,
-                        "executor": rec.card.roles.executor,
-                        "relay": rec.card.roles.relay,
-                        "observer": rec.card.roles.observer,
-                        "human_interface": rec.card.roles.human_interface,
-                    },
+                    # ---- 权限模型改造 Step 5c ----
+                    #
+                    # ⚠ 原来的 roles 五个布尔 + can_issue_types + can_receive_from
+                    #   全部换成了三个字段。这不是"少给信息"，是**给的更准**：
+                    #
+                    #     旧：5 个布尔（其中 4 个从不参与判定）+ 两串白名单，
+                    #         运维要自己在脑子里组合出"它到底能干什么"
+                    #     新：角色名 + 该角色在配置里的定义 + 能不能广播
+                    #
+                    #   排查"为什么 A 发不了任务给 B"时，现在只需看 role ——
+                    #   driver 能发、worker 不能，一眼就清楚。
+                    "role": rec.card.role,
+                    #: 该角色在配置里的定义（能否发布 / 服务哪些类型 / 上限）。
+                    #: 直接给出，省得运维再去翻配置 —— 缺字段的观测接口会误导人。
+                    "role_definition": self._role_definition(rec.card.role),
+                    "may_broadcast": rec.card.may_broadcast,
                     "capabilities": [c.type for c in rec.card.capabilities],
-                    "max_response_level": str(rec.card.constraints.max_response_level),
-                    # ⚠ **这两个必须输出，否则排障时会走弯路。**
-                    #
-                    #   `can_issue_types` 是 `MX-ISSUER-01`（发不出去）的
-                    #   唯一判据；`can_receive_from` 是 `MX-RECEIVE-01`
-                    #   （收不进来）的唯一判据。
-                    #
-                    #   实测踩过：排查"为什么 A 发不了任务给 B"时，
-                    #   `ops nodes --json` 里没有这两个字段，于是误判成
-                    #   "配置里没配发布权" —— 而实际配了，只是输出没给。
-                    #   一个缺字段的观测接口会主动误导人。
-                    "can_issue_types": list(rec.card.constraints.can_issue_types),
-                    "can_receive_from": list(rec.card.constraints.can_receive_from),
+                    #: 节点**自己**愿意给多细（角色上限与实际生效值见 role_definition）
+                    "max_response_level": str(rec.card.effective_max_level()),
+                    #: 节点自律限额 —— 只记录不强制，但排障时要知道它会不会拒收
+                    "self_limits": rec.card.self_limits.to_dict(),
                 }
                 for rec in self.gw.app.registry.all_records()
             ]})

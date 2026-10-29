@@ -18,10 +18,9 @@ from .errors import (
 from .models import (
     Artifact,
     Capability,
-    Constraints,
     Level,
     RoleCard,
-    Roles,
+    SelfLimits,
     Semantics,
     Task,
     TaskMode,
@@ -30,7 +29,7 @@ from .models import (
 
 __all__ = [
     "ENVELOPE_VERSION", "Artifact", "AuthFailed", "Capability", "ConfigError",
-    "Constraints", "Envelope", "Level", "NexusError", "PolicyDenied",
-    "RoleCard", "Roles", "RuleId", "Semantics", "Task", "TaskExecutionError",
+    "Envelope", "Level", "NexusError", "PolicyDenied",
+    "RoleCard", "RuleId", "SelfLimits", "Semantics", "Task", "TaskExecutionError",
     "TaskMode", "TaskStatus", "canonical_bytes", "envelope_for", "safe_message",
 ]

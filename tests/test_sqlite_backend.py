@@ -61,8 +61,9 @@ class TestPersistence:
         # 角色卡的所有维度都要完整还原
         card = rec.card
         assert card.domain == "zone-a"
-        assert card.roles.executor and not card.roles.issuer
-        assert card.constraints.max_response_level.value == 1
+        # ⚠ Step 5c：roles / constraints 已删，改查 role 与 self_limits
+        assert card.role == "worker", "落盘后 role 必须完整还原"
+        assert card.self_limits.max_response_level.value == 1
         assert [c.type for c in card.capabilities] == ["demo.echo", "demo.count"]
         assert card.capability("demo.echo").response_fields == ("echo", "level")
         s2.close()

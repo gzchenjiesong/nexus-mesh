@@ -34,17 +34,10 @@ def _card(node_id: str = "node-a", *, backlog: int = 20) -> RoleCard:
         "node_id": node_id,
         "domain": "zone-a",
         "display_name": "A",
-        "roles": {"executor": True},
-        "capabilities": [{
+        "role": "worker","capabilities": [{
             "type": "demo.echo", "level": "summary", "mode": "sync",
-            "response_fields": ["echo", "level"],
-        }],
-        "constraints": {
-            "max_response_level": "summary",
-            "can_issue_types": [],
-            "can_receive_from": ["cloud"],
-        },
-        "self_limits": {"max_backlog": backlog},
+            "response_fields": ["echo", "level"]
+        }],"self_limits": {"max_backlog": backlog}
     })
 
 
@@ -93,11 +86,8 @@ class TestBacklogIsEnforced:
         """
         card = RoleCard.from_dict({
             "node_id": "n", "domain": "d", "display_name": "N",
-            "roles": {"executor": True},
-            "capabilities": [{"type": "demo.echo", "level": "summary",
-                              "mode": "sync", "response_fields": ["echo"]}],
-            "constraints": {"max_response_level": "summary"},
-        })
+            "role": "worker","capabilities": [{"type": "demo.echo", "level": "summary",
+                              "mode": "sync", "response_fields": ["echo"]}]})
         assert card.self_limits.max_backlog == 20
 
         eng = _engine([card])
@@ -164,17 +154,22 @@ class TestQuotaIsGone:
     """
 
     @covers("M5.F7")
-    def test_constraints_has_no_quota_field(self):
-        import dataclasses
+    def test_constraints_class_is_gone(self):
+        """★ `Constraints` 整个类都没了（Step 5c），不只是 quota 字段。
 
-        from nxs.core.models import Constraints
+        它另外三个字段也有归宿：can_issue_types → role.can_issue、
+        can_receive_from → 域矩阵、can_delegate_to → 删除。
+        """
+        import nxs.core.models as m
 
-        names = {f.name for f in dataclasses.fields(Constraints)}
-        assert "quota" not in names, (
-            "`constraints.quota` 又出现了。\\n"
-            "  那几项配额从未生效（Mesh 无法强制节点本地资源），\\n"
-            "  要做限额请用 self_limits —— 它是节点自律，语义诚实。"
+        assert not hasattr(m, "Constraints"), (
+            "`Constraints` 又回来了。它的字段各有归宿，"
+            "重建它等于把那套「节点逐项申请权限」的思路装回来。"
         )
+        from nxs.core.models import SelfLimits
+
+        assert SelfLimits().max_backlog == 20, "限额归 self_limits，默认 20"
+
 
     @covers("M5.F7")
     def test_quota_error_codes_are_gone(self):

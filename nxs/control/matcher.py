@@ -149,11 +149,22 @@ class Matcher:
         **只返回可路由的节点**（已批准 + alive）——未批准或已吊销的节点
         不该出现在候选里，那是"我能不能干"层面的基本前提。
 
-        三个过滤条件，全部来自**节点自己的角色卡**：
+        ## 两个过滤条件
 
-        ① 声明了该能力
-        ② 能提供的等级 ≥ ``req.min_level``
-        ③ 接受来自 ``req.from_domain`` 的委托（``can_receive_from`` 通配匹配）
+            ① 声明了该能力
+            ② 能提供的等级 ≥ ``req.min_level``
+
+        ⚠ **Step 5c 删掉了第三个条件**（`can_receive_from` 通配匹配）。
+
+        那个字段是"节点自己声明谁能给我派活"—— 属于旧模型"逐项申请权限"
+        的思路。现在"能不能到达"由运维的域矩阵决定，而这个模块
+        **刻意不知道矩阵存在**（见 select() 的说明）。
+
+        所以 `candidates()` 现在返回的是**能力层面的候选**，
+        域可达性由 `select()` 的 accept 回调（即 `check_delivery`）判。
+
+        代价：自动匹配时可能先试到"能力够但域不可达"的节点，多一次校验。
+        收益：职责边界干净 —— 匹配器管"谁能干"，矩阵管"能不能到"。
         """
         out: list[Candidate] = []
         for rec in self._registry.all_records():
@@ -166,14 +177,11 @@ class Matcher:
 
             # 需求等级：调用方要不到比自己需要更低的东西没有意义，
             # 但候选必须**至少**能给到那么多
-            provided = min(card.constraints.max_response_level, cap.level)
+            # ⚠ constraints 已删（Step 5c）—— 节点侧上限只剩 self_limits。
+            #   注意这里**不**算角色上限：角色上限在 check_delivery 里统一判，
+            #   匹配器只负责"这个节点能给出多细"的粗筛。
+            provided = min(card.effective_max_level(), cap.level)
             if provided < req.min_level:
-                continue
-
-            # 节点自己声明的"谁可以给我派活"
-            if req.from_domain and not _match_any(
-                card.constraints.can_receive_from, req.from_domain
-            ):
                 continue
 
             out.append(Candidate(

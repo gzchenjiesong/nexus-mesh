@@ -43,18 +43,14 @@ def make_card(*, level: str = "summary", max_level: str = "summary",
         "level": level,
         "mode": "sync",
         "response_fields": response_fields if response_fields is not None
-        else ["events", "level"],
+        else ["events", "level"]
     }
     if freetext_fields:
         cap["freetext_fields"] = freetext_fields
     return RoleCard.from_dict({
         "node_id": "node-x",
         "domain": "zone-x",
-        "roles": {"executor": True},
-        "capabilities": [cap],
-        "constraints": {"max_response_level": max_level,
-                        "can_receive_from": ["cloud"]},
-    })
+        "role": "worker","capabilities": [cap]})
 
 
 def make_task(task_type: str = "work.calendar") -> Task:
@@ -194,7 +190,7 @@ class TestNothingLeavesTheNode:
                 "node-x",
                 handlers={"work.calendar": lambda p: {
                     "events": ["a"], "level": "summary",
-                    "internal_note": "泄露",
+                    "internal_note": "泄露"
                 }},
                 levels={"work.calendar": Level.SUMMARY},
                 card=make_card(),
@@ -219,7 +215,7 @@ class TestNothingLeavesTheNode:
             NodeConfig(
                 "node-x",
                 handlers={"work.calendar": lambda p: {
-                    "events": [], "level": "full_text",
+                    "events": [], "level": "full_text"
                 }},
                 # 实现声明的等级高于角色卡 —— 声明与实现不一致
                 levels={"work.calendar": Level.FULL_TEXT},
@@ -240,7 +236,7 @@ class TestNothingLeavesTheNode:
             NodeConfig(
                 "node-x",
                 handlers={"work.calendar": lambda p: {
-                    "events": ["a"], "level": "summary",
+                    "events": ["a"], "level": "summary"
                 }},
                 levels={"work.calendar": Level.SUMMARY},
                 card=make_card(),

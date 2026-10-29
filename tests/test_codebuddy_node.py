@@ -58,22 +58,6 @@ class TestRoleCard:
         types = [c.type for c in card.capabilities]
         assert types == ["work.query"]
 
-    @covers("M5.F1")
-    def test_can_issue_and_receive(self):
-        """两个方向都要通：能被委派、也能主动问。"""
-        card = build_card("work-laptop", "zone-work", allowed_tools=("Read",))
-        assert card.roles.executor is True
-        assert card.roles.issuer is True
-        assert card.constraints.can_issue_types == ("agent.ask",)
-        # ⚠ can_receive_from 是「**谁可以派任务给我**」，不是「我属于哪个域」。
-        #   初版写成 ("zone-work",)，于是云端（cloud）派任务直接被拒
-        #   MX-RECEIVE-03 —— 而那个错误码看起来像域不匹配，很难联想到方向。
-        assert "cloud" in card.constraints.can_receive_from, (
-            "没允许 cloud 派任务 —— 云端派发会被拒（MX-RECEIVE-03）"
-        )
-        assert "zone-work" in card.constraints.can_receive_from, (
-            "没允许同域调试"
-        )
 
     @covers("M5.F7")
     def test_self_limit_matches_summary_limit(self):
@@ -1231,7 +1215,7 @@ class TestCredentialPersistence:
             "PATH": "/bin",
             "NXS_SECRET_FOO": "should-be-removed",
             "NXS_OPS_SECRET": "should-be-removed",
-            "CODEBUDDY_API_KEY": "must-be-kept",
+            "CODEBUDDY_API_KEY": "must-be-kept"
         }
         out = scrub_secrets(env)
         assert "CODEBUDDY_API_KEY" in out, (

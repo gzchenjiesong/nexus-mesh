@@ -35,7 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 #: ⚠ 权限模型改造期间为 True：文档已改成目标模型，代码还没跟上。
 #: Step 5（删旧字段）完成后改回 False，让一致性检查恢复生效。
-TRANSITION_DOCS_AHEAD = True
+TRANSITION_DOCS_AHEAD = False
 PKG = REPO_ROOT / "nxs"
 
 #: 示例配置里出现的节点名与域名。
@@ -187,7 +187,7 @@ class TestLayerDirection:
         "data": {"core", "ports", "control"},
         "mgmt": {"core", "ports"},
         "edge": {"core", "ports"},
-        "sdk": {"core"},
+        "sdk": {"core"}
     }
 
     def _imports(self, path: Path) -> set[str]:
@@ -362,7 +362,7 @@ class TestTerminology:
     #: 允许出现弃用词的文件与理由
     ALLOWED_IN = {
         # 术语表本身需要列出"不要写成什么"
-        "CONTRIBUTING.md",
+        "CONTRIBUTING.md"
     }
 
     @covers("C1")
@@ -394,7 +394,7 @@ class TestTerminology:
     #: 豁免须写明理由（与 docs-audit 里 HISTORICAL_SNAPSHOTS 的约定一致）。
     HISTORICAL = {
         "03-traceability-review.md": "2026-10-08 的审查快照，刻意不改写",
-        "04-mvp-plan.md": "2026-10-07 的 MVP 规划快照，用它当时的术语",
+        "04-mvp-plan.md": "2026-10-07 的 MVP 规划快照，用它当时的术语"
     }
 
     @covers("C1")
@@ -497,7 +497,7 @@ class TestConfigFieldsAreUsed:
         "reachability": "当前所有节点都是 egress-only，尚无分支逻辑",
         "relay": "角色占位——当前中转由网络自身承担，无节点使用",
         "observer": "角色占位，为将来的监控节点预留",
-        "reader": "同上，Observer 的别名占位",
+        "reader": "同上，Observer 的别名占位"
     }
 
     @staticmethod
@@ -629,7 +629,7 @@ class TestDependencyFootprint:
         "kafka": "N7 不引入消息中间件", "pika": "N7 不引入消息中间件",
         "amqp": "N7 不引入消息中间件", "celery": "N7 不引入消息中间件",
         "nats": "N7 不引入消息中间件", "redis": "N7 不引入消息中间件",
-        "pulsar": "N7 不引入消息中间件",
+        "pulsar": "N7 不引入消息中间件"
     }
 
     @staticmethod

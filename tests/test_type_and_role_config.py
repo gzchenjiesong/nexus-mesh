@@ -26,8 +26,35 @@ def _write(tmp: pathlib.Path, body: str, *, name: str = "c.yaml") -> pathlib.Pat
     return p
 
 
-def _minimal(extra: str = "") -> str:
-    """一份最小的可加载配置（不含 types/roles），用于叠加测试。"""
+#: 默认的角色表 —— **不含任何 serves 模式**。
+#:
+#: ⚠ 为什么不写 serves：许多用例自己声明 `types:`，而角色里若写死
+#:   `serves: [demo.echo]`，一旦测试只声明 `work.query` 就会触发
+#:   "通配匹配不到已定义类型"的校验 —— 那是**正确的**校验，只是与
+#:   这些用例要测的东西无关。
+#:
+#: `driver` / `publisher` 都是 `can_issue: true` 且 `serves` 为空，
+#: 这是合法组合（只发不收），所以不需要任何类型就能通过校验。
+#: 需要 worker（只收不发）的用例自己传 `roles=`。
+_BASE_ROLES = """
+roles:
+  - name: driver
+    can_issue: true
+  - name: publisher
+    can_issue: true
+"""
+
+
+def _minimal(extra: str = "", *, role: str = "driver",
+             roles: str | None = None) -> str:
+    """一份最小的可加载配置，用于叠加测试。
+
+    :param extra: 追加在文件末尾的 YAML 片段（如自定义 types）
+    :param role: 节点 node-a 以什么角色接入（默认 driver —— 它不需要 serves）
+    :param roles: 替换默认角色表。用例声明自己的 types 时要一并给出
+        与之匹配的 roles，否则 serves 模式会匹配不到类型。
+    """
+    roles_yaml = roles if roles is not None else _BASE_ROLES
     return f"""
 server:
   host: 127.0.0.1
@@ -36,22 +63,37 @@ nodes:
   - node_id: node-a
     domain: cloud
     display_name: "A"
-    roles: {{executor: true}}
+    role: {role}
+    self_limits:
+      max_backlog: 20
+      max_response_level: summary
     capabilities:
       - type: demo.echo
         level: summary
         mode: sync
         response_fields: [echo, level]
-    constraints:
-      max_response_level: summary
-      can_issue_types: ["demo.*"]
-      can_receive_from: [cloud]
     secret: {"a" * 40}
 policy:
   matrix:
     - from_domain: cloud
       to_domain: cloud
+{roles_yaml}
 {extra}
+"""
+
+
+#: 声明自定义 types 时配套的 roles —— serves 正好覆盖这些类型。
+def _roles_serving(*types: str) -> str:
+    items = "\n".join(f"    serves: [{', '.join(types)}]" if i == 0
+                      else "" for i in range(1))
+    return f"""
+roles:
+  - name: worker
+    can_issue: false
+    serves: [{", ".join(types)}]
+  - name: driver
+    can_issue: true
+    serves: [{", ".join(types)}]
 """
 
 
@@ -170,12 +212,12 @@ class TestRoleDeclParsing:
 
     @covers("M11.F1")
     def test_worker_defaults(self, workdir):
-        p = _write(workdir, _minimal("""
-types:
-  - name: work.query
+        p = _write(workdir, _minimal(role="worker", extra="""
 roles:
   - name: worker
     serves: [work.query]
+types:
+  - name: work.query
 """))
         r = load_config(str(p)).roles["worker"]
         assert r.can_issue is False, "worker 默认不能发布"
@@ -196,13 +238,13 @@ roles:
 
     @covers("M11.F1")
     def test_wildcard_serves(self, workdir):
-        p = _write(workdir, _minimal("""
-types:
-  - name: work.query
-  - name: work.calendar
+        p = _write(workdir, _minimal(role="worker", extra="""
 roles:
   - name: worker
     serves: ["work.*"]
+types:
+  - name: work.query
+  - name: work.calendar
 """))
         r = load_config(str(p)).roles["worker"]
         assert r.serves_type("work.query")
@@ -280,13 +322,13 @@ roles:
     @covers("M11.F1")
     def test_publisher_with_empty_serves_is_ok(self, workdir):
         """反向：只发布不执行的角色（publisher）是合法的。"""
-        p = _write(workdir, _minimal("""
-types:
-  - name: work.query
+        p = _write(workdir, _minimal(role="publisher", extra="""
 roles:
   - name: publisher
     can_issue: true
     serves: []
+types:
+  - name: work.query
 """))
         r = load_config(str(p)).roles["publisher"]
         assert r.can_issue is True
@@ -307,26 +349,64 @@ roles:
             load_config(str(p))
 
 
-class TestBackwardCompatibility:
-    """★ 省略 types/roles 时，旧配置必须完全照常工作。
+class TestRoleTableIsRequired:
+    """★ 有节点就必须有角色表 —— Step 5c 起这是硬要求。
 
-    Step 1 的纪律是「只加解析、不改判定」。如果这里红了，
-    说明新代码干扰了旧路径 —— 那会让整个改造的第一步就不安全。
+    ⚠ 这个类原来叫 `TestBackwardCompatibility`，测的是「省略 types/roles
+    时旧配置照常工作」。**那个行为已经不存在了**：
+
+        role 现在必填（每个 Agent 必须选一个角色）
+        角色表是它的定义来源，没有角色表 role 就无处可查
+
+    所以从"向后兼容"改成了"角色表必需"。保护的性质也变了：
+
+        旧：新代码不干扰旧配置（Step 1 的纪律）
+        新：缺角色表要**明确报错**，而不是让节点注册成功却什么都干不了
     """
 
     @covers("M11.F1")
-    def test_old_style_config_still_loads(self, workdir):
-        """**完全不含 types/roles 的旧配置**必须照常工作。
+    def test_nodes_without_roles_section_is_rejected(self, workdir):
+        """有节点但没有 roles: 段 → 明确报错。
 
-        ⚠ 不能用 config/nxs.example.yaml 测这条 —— 它已经加了 types/roles。
-        必须构造一份真正的"旧格式"配置。
+        为什么不能容忍：`role` 必填，而角色的定义在 roles 段里。
+        没有角色表，节点的 role 无处可查 —— 网络只能一律拒绝，
+        症状是"注册成功但什么都干不了"，看起来像网络故障。
+
+        **启动时就拦住**，错误信息直接说清该加什么。
         """
-        p = _write(workdir, _minimal())
-        cfg = load_config(str(p))
-        assert cfg.types == {}, "旧配置不该凭空出现类型定义"
-        assert cfg.roles == {}, "旧配置不该凭空出现角色定义"
-        assert cfg.nodes, "节点照常加载"
-        assert cfg.nodes["node-a"].capabilities, "能力仍从卡片读取"
+        p = _write(workdir, """
+server:
+  host: 127.0.0.1
+  port: 0
+nodes:
+  - node_id: node-a
+    domain: cloud
+    display_name: "A"
+    role: worker
+    capabilities: []
+    secret: "%s"
+policy:
+  matrix: []
+""" % ("a" * 40))
+        with pytest.raises(ConfigError) as ei:
+            load_config(str(p))
+        msg = str(ei.value)
+        assert "roles:" in msg, "要告诉读者加哪一段"
+        assert "角色" in msg
+
+    @covers("M11.F1")
+    def test_node_role_not_in_table_is_rejected(self, workdir):
+        """节点的 role 拼错 → 报错并列出可用角色。
+
+        静默接受的话，症状同样是"注册成功但无权做任何事"。
+        """
+        p = _write(workdir, _minimal(role="wroker", extra=""))
+        # _minimal 的默认角色表只有 driver / publisher，没有 wroker
+        with pytest.raises(ConfigError) as ei:
+            load_config(str(p))
+        msg = str(ei.value)
+        assert "wroker" in msg, "要指出是哪个角色名找不到"
+        assert "已定义的角色" in msg, "要列出可选项"
 
     @covers("M11.F1")
     def test_example_config_has_both_sections(self):
@@ -359,7 +439,7 @@ class TestBackwardCompatibility:
         因为此时类型仍由节点 capabilities 提供（旧路径），
         静态核对无从下手。等 Step 3 才强制要求 types。
         """
-        p = _write(workdir, _minimal("""
+        p = _write(workdir, _minimal(role="worker", extra="""
 roles:
   - name: worker
     serves: [demo.echo]

@@ -50,7 +50,7 @@ from nxs.mgmt.config import ServerConfig
 SECRETS = {
     "coordinator": b"coordinator-demo-secret-0123456789abcdef",
     "node-a": b"node-a-demo-secret-0123456789abcdef",
-    "node-b": b"node-b-demo-secret-0123456789abcdef",
+    "node-b": b"node-b-demo-secret-0123456789abcdef"
 }
 
 

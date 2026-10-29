@@ -1333,7 +1333,7 @@ _PS_AUTOMATIC = {
     # ---- PowerShell 6+ 平台判定（只读）----
     "IsWindows", "IsLinux", "IsMacOS", "IsCoreCLR",
     # ---- 其他常用只读/自动变量 ----
-    "PSVersionTable", "PID", "Profile", "NestedPromptLevel", "ExecutionContext",
+    "PSVersionTable", "PID", "Profile", "NestedPromptLevel", "ExecutionContext"
 }
 
 

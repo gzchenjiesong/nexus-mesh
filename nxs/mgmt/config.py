@@ -274,12 +274,6 @@ UNIMPLEMENTED: tuple[tuple[str, str], ...] = (
     ("params_schema",
      "参数 schema 只声明、未校验；格式错误的参数由执行节点自己承担失败。"
      "⚠ Step 6 会真正校验它（TaskType 全局定义后，校验方与定义方是同一个）"),
-    ("roles.relay", "中继角色只声明、无实现逻辑。配 relay=true 不会让节点转发任务"),
-    ("roles.observer", "观察者角色只声明、无实现逻辑（无只读订阅通道）"),
-    ("roles.executor",
-     "执行角色**不构成准入闸门**：设 executor=false 不会阻止该节点领活与执行"),
-    ("roles.human_interface",
-     "人机入口只是分类标签，无实现逻辑。人机交互通过 CLI 与 SDK 进行"),
     ("TypeDecl.delivery",
      "**权限模型改造遗留**：广播（broadcast）的展开逻辑未实现，"
      "当前所有任务都按单播处理。等 group/广播能力落地后接线"),
@@ -574,11 +568,10 @@ class NexusConfig:
         ]
         for mid in sorted(self.nodes):
             c = self.nodes[mid]
-            roles = [n for n in ("issuer", "executor", "relay", "observer", "human_interface")
-                     if getattr(c.roles, n)]
             lines.append(
-                f"  · {mid:<12} domain={c.domain:<8} roles={','.join(roles) or '-':<28} "
-                f"caps={[x.type for x in c.capabilities]} max_level={c.constraints.max_response_level}"
+                f"  · {mid:<12} domain={c.domain:<8} role={c.role:<10} "
+                f"caps={[x.type for x in c.capabilities]} "
+                f"max_level={c.effective_max_level()}"
             )
         types = self.task_types()
         lines.append("")
@@ -839,6 +832,31 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
     declared_types = _parse_types(raw.get("types"), source=resolved.name)
     declared_roles = _parse_roles(raw.get("roles"), source=resolved.name,
                                   types=declared_types)
+
+    # ---- 配置里每个节点的角色必须在 roles 段里定义过 ----
+    #
+    # ⚠ 这道校验是 Step 5c 的必要配套：`role` 改成必填之后，
+    #   写错角色名（或配置里根本没有 roles 段）的症状会是
+    #   "节点注册成功但什么都干不了"—— 而那看起来像网络故障。
+    #
+    #   启动时就拦住，错误信息直接列出可用角色。
+    if nodes:
+        if not declared_roles:
+            raise ConfigError(
+                f"{resolved.name}: 配置里定义了节点，但没有 `roles:` 段。\n"
+                f"  ⚠ 每个节点都必须以某个角色接入 —— 角色决定了它能不能发布任务、\n"
+                f"  能服务哪些类型。没有角色表，所有节点都会被拒。\n"
+                f"  加上 roles: 段（如 worker / driver / publisher），\n"
+                f"  并给每个节点写 `role: <角色名>`。"
+            )
+        bad = {c.node_id: c.role for c in nodes.values()
+               if c.role not in declared_roles}
+        if bad:
+            raise ConfigError(
+                f"这些节点的 role 不在 roles 段里：{bad}\n"
+                f"  已定义的角色：{sorted(declared_roles)}\n"
+                f"  ⚠ 角色名拼错不会被静默接受 —— 那会让节点注册成功但无权做任何事。"
+            )
 
     # ⭐ 严格模式 vs 自注册模式
     #

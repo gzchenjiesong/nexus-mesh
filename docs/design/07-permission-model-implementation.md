@@ -490,6 +490,98 @@ QT-BACKLOG-07  → "它来不及干" → 发布方稍后重试或换节点
 
 ---
 
+### Step 5c · 删旧权限字段 ✅ 已完成（2026-10-29）
+
+**删了两个类**
+
+| 删除 | 原因 |
+|---|---|
+| `Roles`（5 个布尔） | 只有 `issuer` 参与过判定，其余 4 个从未被读取；`issuer` 的语义也被 `role.can_issue` 取代 |
+| `Constraints`（4 个字段） | 前三个是"节点自己声明权限"（旧思路），第四个与 `self_limits` 完全重复 |
+
+**四个字段的归宿**
+
+```
+can_issue_types     → role.can_issue（角色整体决定能否发布）
+can_receive_from    → 域矩阵（运维定义围栏，不归节点自报）
+can_delegate_to     → 删除（不做二次委托）
+max_response_level  → self_limits.max_response_level（同一语义，合并）
+```
+
+**`role` 改为必填**
+
+留一个"不写就当 worker"的默认会让「忘记声明」与「故意选 worker」
+看起来一样，而审批时看不出区别。所以必填，错误信息指向 `roles:` 段。
+
+**新增两道启动校验**
+
+| 校验 | 为什么 |
+|---|---|
+| 有节点就必须有 `roles:` 段 | 没有角色表，`role` 无处可查 → 症状是"注册成功但什么都干不了" |
+| 节点的 `role` 必须在角色表里 | 拼错名字不该被静默接受 |
+
+**`ops nodes` 输出改为一句话说完**
+
+原来给 5 个布尔 + 两串白名单，运维要自己脑内组合"它到底能干什么"。
+现在给 `role` + `role_definition`（该角色在配置里的定义）+ `may_broadcast`：
+
+```
+旧：role 名要查配置才知道能不能发布
+新：role: worker, role_definition: {can_issue: false, serves: [...]}
+```
+
+**`matcher` 删掉一个预筛条件**
+
+`can_receive_from` 的通配匹配删了。"能不能到达"由域矩阵判，
+而这个模块**刻意不知道矩阵存在**（见 `select()` 的说明）。
+代价是自动匹配时可能先试到"能力够但域不可达"的节点、多一次校验；
+收益是职责边界干净。
+
+**错误码 24 → 23**（删 `MX-DELEGATE-04`）
+
+**`UNIMPLEMENTED`：6 → 2**
+
+删掉 4 项 `roles.*`（字段本身已不存在）。只剩：
+`params_schema`（Step 6 接线）、`TypeDecl.delivery`（广播未做）。
+
+**⚠ 测试改动很大，两类都记下来**
+
+**删除的（测的机制整个不存在了）**
+
+| 文件 | 删了什么 |
+|---|---|
+| `test_agent_card_step2.py` | **整文件重写为 `test_agent_card.py`** —— 里面两组测试分别测 `derived_role()` 和"新字段不影响旧字段"，两者都不存在了 |
+| `test_hermes_node.py` / `test_openclaw_node.py` / `test_codebuddy_node.py` | 各删 1–2 条测 `roles` / `can_receive_from` 的用例 |
+| `test_matcher.py` | 删 2 条测 `can_receive_from` 预筛的用例 |
+
+**改写为"防回归"的（性质重要，但对象变了）**
+
+| 原测试 | 改成 |
+|---|---|
+| `test_roles_default_false` | `test_role_is_mandatory_not_defaulted`（比旧版更严） |
+| `test_constraints_default_empty` | `test_role_decl_defaults_deny` |
+| `test_second_hop_delegation_denied` | `test_second_hop_delegation_is_gone` |
+| `test_constraints_has_no_quota_field` | `test_constraints_class_is_gone` |
+| `TestBackwardCompatibility`（整个类） | `TestRoleTableIsRequired` |
+
+**新增 `TestOldFieldsAreGone`（5 条）**
+
+防止有人把 `Roles` / `Constraints` / `derived_role()` 加回来。
+它们的共同历史是：**定义了、解析了、写进示例配置、然后从未被读取。**
+
+**双向验证**
+
+- 把 `Roles` 类加回来 → `TestOldFieldsAreGone` 1 条 FAILED
+- 让 `role` 变回可选 → `TestRoleIsMandatory` 3 条 FAILED
+
+**顺带恢复文档一致性检查**
+
+`TRANSITION_DOCS_AHEAD` 改回 `False`（文档改造期设的临时豁免），
+让「代码的 `UNIMPLEMENTED` 必须与文档一致」重新生效。
+它立刻抓到一处遗漏：`TypeDecl.delivery` 没写进 `architecture.md`。
+
+---
+
 ### Step 6 · 新功能：`paused` 状态 + schema 校验
 
 **改**

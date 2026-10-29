@@ -55,11 +55,14 @@ def build_card(node_id: str, domain: str) -> RoleCard:
         "domain": domain,
         "display_name": "Company Laptop",
         "heartbeat_interval": 30,
-        "roles": {
-            "executor": True,       # 能执行别人派来的任务
-            "issuer": False,        # ⚠ 默认不给发布权：
-                                    #   开放它会让"任务参数"成为数据外流通道
-        },
+
+        # ★ 以什么角色接入（必填）
+        #
+        #   worker = 只执行、不发布。这台是内网执行机，只接受派活。
+        #   角色名必须能在 Mesh 的 `roles:` 段里找到 —— 拼错会在
+        #   注册时被拒（而不是"注册成功但什么都干不了"）。
+        "role": "worker",
+
         "capabilities": [
             {
                 "type": "work.calendar",
@@ -81,13 +84,6 @@ def build_card(node_id: str, domain: str) -> RoleCard:
                 "freetext_fields": ["summary"],
             },
         ],
-        "constraints": {
-            # ★ 硬上限。超过它的产出在**节点侧**就会被拦下，根本不会发出去。
-            "max_response_level": "summary",
-            "can_receive_from": ["coordinator"],    # 只有协调域能给我派活
-            "can_issue_types": [],          # 空 = 我不发任何任务
-            "can_delegate_to": [],          # 不做二次委托
-        },
 
         # ★ 节点自律限额（不是配额 —— 见 docs/design/06 §6）
         #

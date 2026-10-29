@@ -42,14 +42,6 @@ class TestRoleCard:
         b = build_card("taskflow", "cloud", agent_id="taskflow", tools_note="x")
         assert a.to_dict() == b.to_dict()
 
-    @covers("M5.F1")
-    def test_only_executor_role(self):
-        """只给执行权。``issuer`` 会让任务参数变成外发通道。"""
-        card = build_card("taskflow", "cloud", agent_id="taskflow", tools_note="x")
-        assert card.roles.executor is True
-        # v0.17：开放发布权（A2A 前提），但类型收窄在 agent.ask
-        assert card.roles.issuer is True
-        assert card.constraints.can_issue_types == ("agent.ask",)
 
     @covers("M5.F1")
     def test_answer_declared_freetext(self):
@@ -58,11 +50,6 @@ class TestRoleCard:
         assert "answer" in cap.freetext_fields
         assert "answer" in cap.response_fields
 
-    @covers("M5.F1")
-    def test_can_receive_from_is_domain(self):
-        """★ 这个参数匹配的是**域**，不是节点 ID。"""
-        card = build_card("taskflow", "cloud", agent_id="taskflow", tools_note="x")
-        assert card.constraints.can_receive_from == ("cloud",)
 
     @covers("M5.F7")
     def test_concurrency_is_one(self):
@@ -123,8 +110,8 @@ class TestExtractAnswer:
             "result": {
                 "meta": {"terminalReply": {"disposition": "visible",
                                            "text": "答案甲"}},
-                "payloads": [{"text": "答案乙"}],
-            },
+                "payloads": [{"text": "答案乙"}]
+            }
         }
         assert extract_answer(payload) == "答案甲"
 
@@ -132,7 +119,7 @@ class TestExtractAnswer:
     def test_falls_back_to_payloads(self):
         """terminalReply 缺失时用 payloads[0].text。"""
         payload = {
-            "result": {"meta": {}, "payloads": [{"text": "兜底答案"}]},
+            "result": {"meta": {}, "payloads": [{"text": "兜底答案"}]}
         }
         assert extract_answer(payload) == "兜底答案"
 
@@ -181,7 +168,7 @@ class TestRunner:
     def test_success_path(self, workdir):
         envelope = {
             "status": "ok",
-            "result": {"meta": {"terminalReply": {"text": "正常的答案"}}},
+            "result": {"meta": {"terminalReply": {"text": "正常的答案"}}}
         }
         runner = self._runner(
             workdir,

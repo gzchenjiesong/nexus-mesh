@@ -547,6 +547,7 @@ coordinator 侧取 `min(矩阵上限, 节点上限, 能力等级)`。两级取�
 | 配置项 | 缺什么 | 影响 |
 |---|---|---|
 | `params_schema` | 参数校验未实现 | **格式错误的参数会被投递出去**，由执行节点自己承担失败 |
+| `TypeDecl.delivery` | 广播展开未实现 | 配 `delivery: broadcast` **不会真的广播** —— 所有任务都按单播处理。等 group/广播能力落地后接线 |
 
 ### 权限模型改造后的变化（进行中） <!-- ok:describes-removed -->
 

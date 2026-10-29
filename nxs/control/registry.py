@@ -275,7 +275,7 @@ class Registry:
             lines.append(
                 f"  · {c.node_id:<12} domain={c.domain:<8} "
                 f"state={rec.state:<8} caps={len(c.capabilities)}"
-                f" max_level={c.constraints.max_response_level}{suffix}"
+                f" max_level={c.effective_max_level()}{suffix}"
             )
         return "\n".join(lines)
 

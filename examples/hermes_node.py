@@ -118,11 +118,10 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
         ),
         "heartbeat_interval": 30,
 
-        # ---- 权限模型改造 Step 2：新字段 ----
+        # ---- 权限模型：角色与自律 ----
         #
-        # ⚠ 与下面 roles/can_issue_types 并存一个版本周期。
-        #   Step 3 切判定、Step 5 删旧字段后，只剩这里。
-        #   过渡期两者必须一致 —— 由 role_is_consistent() 核对。
+        # `role` 必填（Step 5c 起）—— 旧的 roles 布尔与 can_issue_types
+        # 已全部删除，角色是能力与权限的唯一来源。
         "role": "driver",          # 能发也能收
         "may_broadcast": False,    # 不广播：它只做点对点问答
         "self_limits": {
@@ -135,17 +134,6 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
         "tools": [f"hermes:{toolsets}"],
 
         # ---- 旧字段（待 Step 5 删除）----
-        "roles": {
-            "executor": True,
-            # ★ v0.17：开放发布权。
-            #
-            # 这是 A2A 协作的前提 —— Agent 之间要能互相问话，而"问话"
-            # 就是一次任务投递。不给 issuer，它只能被动等 coordinator
-            # 中转，那就不是 mesh 而是消息队列。
-            #
-            # 范围收在 can_issue_types（见下），只放行 agent.ask 一种。
-            "issuer": True,
-        },
         "capabilities": [
             {
                 "type": "agent.ask",
@@ -159,17 +147,6 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
                 "freetext_fields": ["answer"],
             },
         ],
-        "constraints": {
-            # ★ 硬上限：超过它的产出在**节点侧**就被拦，根本发不出去
-            "max_response_level": "summary",
-            # 只接受协调域派来的活。写域名而不是节点 ID ——
-            # 这个参数匹配的是 src.domain。
-            "can_receive_from": [domain],
-            # ★ 只放行 agent.ask —— 不写 ["*"]。
-            # 白名单越窄，"它能把什么发出去"就越确定。
-            "can_issue_types": ["agent.ask"],
-            "can_delegate_to": [],
-        },
     })
 
 

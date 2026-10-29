@@ -127,14 +127,62 @@ domains:
 #   例外：如果你想让某个节点的**信任域由配置锁定**（不让它自报），
 #   就在这里登记它的 node_id 与 domain（哪怕其余字段简写）。
 #   配置里有的节点，domain 一律以配置为准。
+# ==============================================================================
+# 角色（权限模型改造 · Step 5c 起为必需）
+# ==============================================================================
+#
+# ⭐ **Agent 不逐项申请权限，而是从这里选一个。**
+#
+# 审批只需回答一个问题：允许这个 Agent 以这个角色加入这个域吗。
+#
+# 只有 can_issue 需要审批 —— 用哪些工具、自限多少、工作目录，
+# 都是节点自律，Mesh 只记录不拦。
+#
+# ⚠ 角色数量少是这套模型的前提：角色超过 5 个、或某域内 driver 超过 5 个，
+#   就该重新审视分类。
+roles:
+  - name: worker
+    can_issue: false
+    serves: [work.calendar, work.summary]
+    max_response_level: summary
+    description: "只执行任务，不发布。内网执行者"
+
+  - name: driver
+    can_issue: true
+    serves: [work.calendar, work.summary]
+    max_response_level: summary
+    description: "既发布也执行。云端 Agent"
+
+  - name: publisher
+    can_issue: true
+    serves: []
+    max_response_level: summary
+    description: "只发布不执行。通知源、CI 触发器等"
+
 nodes:
   - node_id: coordinator
     domain: cloud
     display_name: "Coordinator"
-    roles:
-      issuer: true
-      executor: true
-      human_interface: true
+
+    # ★ 以什么角色接入（权限模型改造 Step 5c 起为必填）
+    #
+    #   旧模板这里有 roles 的 5 个布尔 + constraints 的两串白名单 ——
+    #   那些已全部删除。现在只回答一个问题：允许它以哪个角色加入？
+    #
+    #   driver = 能发布也能执行。协调节点需要向工作域派活，所以是 driver。
+    role: driver
+    may_broadcast: false
+
+    # ★ 节点自律限额（不是配额）
+    #
+    #   ⚠ max_response_level 必须 ≥ 下方能力的 level（summary），
+    #   否则自相矛盾：声明"我能产出 summary 级结论"却说"我最多给 metadata"。
+    #   这个字段曾是 metadata，导致 nxs verify 直接 FAIL —— 模板自身的 bug。
+    self_limits:
+      max_backlog: 20
+      max_response_level: summary
+    capacity: 4
+
     capabilities:
       - type: work.summary
         level: summary
@@ -143,12 +191,3 @@ nodes:
         params_schema:
           inputs: "string"
         response_fields: [summary, level]
-    constraints:
-      # ⚠ 必须 ≥ 上方能力的 level（summary），否则自相矛盾：
-      #   声明"我能产出 summary 级结论"却说"我最多返回 metadata 级"。
-      #   这个字段曾是 metadata，导致 nxs verify 直接 FAIL —— 模板自身的 bug。
-      max_response_level: summary
-      # 不接收任何人的委托（它是发起方）
-      can_receive_from: []
-      can_issue_types: ["work.*"]
-      can_delegate_to: []

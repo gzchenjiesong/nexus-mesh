@@ -392,7 +392,9 @@ class LocalBoundary:
         连它也没有时退到最保守的 ``metadata`` —— **未知一律最严**。
         """
         if cap is not None and self._card is not None:
-            return min(self._card.constraints.max_response_level, cap.level)
+            # ⚠ 原来是 min(constraints.max_response_level, cap.level)。
+            #   constraints 已删（Step 5c），节点侧的等级只剩 self_limits。
+            return min(self._card.effective_max_level(), cap.level)
         return self._levels.get(task_type, Level.METADATA)
 
 

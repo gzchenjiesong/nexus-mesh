@@ -48,25 +48,6 @@ class TestRoleCard:
         b = build_card("hermes-working", "cloud", toolsets="safe")
         assert a.to_dict() == b.to_dict()
 
-    @covers("M5.F1")
-    def test_card_roles_are_scoped(self):
-        """★ 执行权 + **受限的**发布权。
-
-        v0.17 起开放 ``issuer`` —— 那是 A2A 协作的前提：
-        不给发布权，Agent 只能等 coordinator 中转，那就不是 mesh
-        而是消息队列。
-
-        但范围收在 ``can_issue_types``：**只放行 agent.ask 一种**。
-        不写 ``["*"]`` —— 白名单越窄，"它能发出什么"就越确定。
-        """
-        card = build_card("hermes-working", "cloud", toolsets="safe")
-        assert card.roles.executor is True
-        assert card.roles.issuer is True
-        assert card.roles.relay is False
-        assert card.roles.observer is False
-        # ★ 发布权是收窄的，不是"什么都能发"
-        assert card.constraints.can_issue_types == ("agent.ask",)
-        assert "*" not in card.constraints.can_issue_types
 
     @covers("M5.F1")
     def test_answer_is_declared_freetext(self):
@@ -81,15 +62,6 @@ class TestRoleCard:
         assert "answer" in cap.freetext_fields
         assert "answer" in cap.response_fields
 
-    @covers("M5.F1")
-    def test_can_receive_from_is_a_domain_not_a_node(self):
-        """★ ``can_receive_from`` 匹配的是**域**，不是节点 ID。
-
-        这是项目里最容易写错的一个参数（配置注释也曾写错）。
-        传进去的是 ``domain`` 参数，就该原样出现在约束里。
-        """
-        card = build_card("hermes-working", "cloud", toolsets="safe")
-        assert card.constraints.can_receive_from == ("cloud",)
 
     @covers("M5.F7")
     def test_backlog_is_conservative(self):
@@ -442,7 +414,7 @@ class TestActorInjection:
             "NXS_OPS_SECRET": "o" * 64,
             "NXS_SECRET_HERMES_WORKING": "h" * 64,
             # 一个不该被剔的作对照
-            "NXS_ACTOR_KEEP_ME": "keep",
+            "NXS_ACTOR_KEEP_ME": "keep"
         }
         saved = {k: os.environ.get(k) for k in injected}
         os.environ.update(injected)

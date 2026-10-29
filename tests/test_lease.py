@@ -398,7 +398,7 @@ class TestSdkAutoRenew:
         client = NodeClient(NodeConfig(
             "node-x",
             handlers={"demo.echo": lambda p: {
-                "echo": p["text"], "level": "metadata",
+                "echo": p["text"], "level": "metadata"
             }},
             levels={"demo.echo": Level.METADATA},
             card=None,

@@ -219,11 +219,23 @@ class TestSecurityAssertion3_DefaultDeny:
         assert ei.value.rule_id == RuleId.MX_DOMAIN_FORBIDDEN
 
     @covers("M5.F8")
-    def test_second_hop_delegation_denied(self, policy: PolicyEngine):
-        """默认 can_delegate_to 为空，任何二次委托都被拒。"""
-        with pytest.raises(PolicyDenied) as ei:
-            policy.check_delegation("node-b", "zone-a")
-        assert ei.value.rule_id == RuleId.MX_DELEGATION_TOO_DEEP
+    def test_second_hop_delegation_is_gone(self):
+        """★ 二次委托已整体删除（Step 5c）。
+
+        ⚠ 这条替换了 `test_second_hop_delegation_denied`，它原来验证
+        「`can_delegate_to` 为空 → 二次委托被拒」。
+
+        那个字段和 `check_delegation()` 都删了 —— 原文注释自己写着
+        「v0.1 只在已标记为二次委托时检查，链深逻辑见 v0.2」，
+        也就是**一直只有一半**。
+
+        删而不是补：二次委托现在没有真实需求。留一个半实现的检查
+        只会让人以为已经支持了。
+        """
+        assert not hasattr(PolicyEngine, "check_delegation"), (
+            "`check_delegation()` 又回来了。\n"
+            "  要做二次委托请先设计链深控制，而不是恢复这个半实现的检查。"
+        )
 
     @covers("M3.F6")
     def test_unknown_node_denied(self, policy: PolicyEngine):
@@ -389,7 +401,7 @@ class TestCapabilityDiscovery:
     @covers("M5.F9")
     def test_registered_types(self, policy: PolicyEngine):
         assert policy.registered_types >= {
-            "demo.echo", "demo.count", "demo.search", "demo.slow", "demo.synthesize",
+            "demo.echo", "demo.count", "demo.search", "demo.slow", "demo.synthesize"
         }
 
     @covers("M5.F9")

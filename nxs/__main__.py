@@ -127,10 +127,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
     for card in cfg.nodes.values():
         for cap in card.capabilities:
             name = f"{card.node_id}/{cap.type}"
-            ok = cap.level <= card.constraints.max_response_level
-            checks.append((f"{name} 能力等级 ≤ 节点上限", ok,
-                           "" if ok else
-                           f"{cap.level} > {card.constraints.max_response_level}"))
+            # ⚠ constraints 已删（Step 5c），节点上限只剩 self_limits
+            limit = card.effective_max_level()
+            ok = cap.level <= limit
+            checks.append((f"{name} 能力等级 ≤ 节点自限", ok,
+                           "" if ok else f"{cap.level} > {limit}"))
 
     # 3. 矩阵里引用的域都已定义
     #

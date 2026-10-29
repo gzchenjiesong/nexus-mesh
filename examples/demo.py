@@ -201,9 +201,9 @@ def _run_steps(app: NexusApp, coordinator: Any, transports: dict[str, Any],
         rec = app.registry.record(mid)
         card = rec.card
         caps = ", ".join(f"{cp.type}({cp.level})" for cp in card.capabilities)
-        roles = "executor" + (", issuer" if card.roles.issuer else "")
-        ok(f"{mid:<10} domain={card.domain:<7} roles={roles:<16} "
-           f"max_level={card.constraints.max_response_level}")
+        # ⚠ Step 5c 起用 role 表达（旧的 roles 布尔已删）
+        ok(f"{mid:<10} domain={card.domain:<7} role={card.role:<10} "
+           f"max_level={card.effective_max_level()}")
         detail(f"{'':10} {caps}")
 
     # ---- 3 ----

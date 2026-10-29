@@ -37,31 +37,29 @@ from nxs.mgmt.config import load_config
 
 def card(node_id: str, *, domain: str = "zone-a", task_type: str = "job.run",
          level: str = "summary", max_level: str = "full_text",
-         can_receive_from: tuple[str, ...] = ("cloud",),
          capacity: int = 1) -> RoleCard:
     """造一张最小角色卡。
 
-    ``level``（能力声明的等级）与 ``max_level``（卡片上限）分开给，
-    因为匹配器要取两者的**较小值**——这是最容易写错的地方之一。
+    ``level``（能力声明的等级）与 ``max_level``（节点自限）分开给，
+    因为匹配器要取两者的**较小值** —— 这是最容易写错的地方之一。
 
-    ⚠ 参数名从 ``concurrent`` 改成 ``capacity``（权限模型改造 Step 5b）：
-    旧的 ``quota.concurrent_tasks`` 已删除，并发意图现在由 ``capacity``
-    表达 —— 语义从"配额上限"降级为"排程提示"，但匹配器算负载率时
-    用的是同一个数。
+    ⚠ 两处参数变更：
+      · ``concurrent`` → ``capacity``（Step 5b，配额删除，改为排程提示）
+      · ``max_level`` 现在写进 ``self_limits``，不再是
+        ``constraints.max_response_level``（Step 5c，constraints 已删）
+      · ``can_receive_from`` 已删除 —— "能不能到达"由域矩阵判，
+        匹配器不再做这项预筛
     """
     return RoleCard.from_dict({
         "node_id": node_id,
         "domain": domain,
         "capacity": capacity,
-        "roles": {"executor": True},
+        "role": "worker",
+        "self_limits": {"max_response_level": max_level},
         "capabilities": [{
             "type": task_type, "level": level, "mode": "sync",
             "response_fields": ["result", "level"],
         }],
-        "constraints": {
-            "max_response_level": max_level,
-            "can_receive_from": list(can_receive_from),
-        },
     })
 
 
@@ -94,7 +92,7 @@ def make_matcher(workdir):
         return {
             "registry": registry,
             "queue": queue,
-            "matcher": Matcher(registry, queue),
+            "matcher": Matcher(registry, queue)
         }
 
     return _make
@@ -134,18 +132,30 @@ class TestFiltering:
         s["registry"].revoke("revoked-node")
         assert "revoked-node" not in [c.node_id for c in s["matcher"].candidates(REQ)]
 
-    @covers("M4.F1")
-    def test_provided_level_is_min_of_card_and_capability(self, make_matcher):
-        """能提供的等级 = min(卡片上限, 能力声明等级)。取错任何一边都会越权。"""
+    @covers("M5.F4")
+    def test_provided_level_is_min_of_selflimit_and_capability(self, make_matcher):
+        """★ 节点能提供的等级 = min(节点自限, 能力声明)。
+
+        ⚠ 这条替换了 `test_provided_level_is_min_of_card_and_capability`。
+
+        原来取 min(卡片上限, 能力等级)，其中"卡片上限"是
+        `constraints.max_response_level` —— 那个字段已删（Step 5c），
+        节点侧只剩 `self_limits.max_response_level`。
+
+        **保护的性质没变**：两个来源取小，任一方收紧都生效。
+        角色上限不在这里算 —— 那是 check_delivery 的事，
+        匹配器只做"这个节点能给出多细"的粗筛。
+        """
         s = make_matcher(
-            # 卡片放行全文，但能力只声明摘要 → 只能给摘要
-            card("cap-limits", level="summary", max_level="full_text"),
-            # 能力声明全文，但卡片只放行元数据 → 只能给元数据
-            card("card-limits", level="full_text", max_level="metadata"),
+            card("tight", task_type="job.run", level="summary", max_level="metadata"),
+            card("loose", task_type="job.run", level="summary", max_level="fragment"),
         )
-        got = {c.node_id: c.level for c in s["matcher"].candidates(REQ)}
-        assert got["cap-limits"] == Level.SUMMARY
-        assert got["card-limits"] == Level.METADATA
+        cands = {c.node_id: c for c in s["matcher"].candidates(REQ)}
+        # 能力声明是 summary：tight 的自限（metadata）更紧 → 取 metadata
+        #                    loose 的自限（fragment）更松 → 取能力的 summary
+        assert cands["tight"].level is Level.METADATA, "自限更紧，取自限"
+        assert cands["loose"].level is Level.SUMMARY, "能力更紧，取能力"
+
 
     @covers("M4.F1")
     def test_min_level_filters_insufficient_nodes(self, make_matcher):
@@ -157,42 +167,6 @@ class TestFiltering:
             Requirement(task_type="job.run", min_level=Level.SUMMARY))]
         assert rich == ["rich"], "等级不足的节点不该出现在候选里"
 
-    @covers("M4.F1")
-    def test_respects_can_receive_from(self, make_matcher):
-        """节点自己声明的"谁可以给我派活"要被尊重。"""
-        s = make_matcher(
-            card("open", can_receive_from=("cloud",)),
-            card("closed", can_receive_from=("zone-z",)),
-        )
-        ids = [c.node_id for c in s["matcher"].candidates(
-            Requirement(task_type="job.run", from_domain="cloud"))]
-        assert ids == ["open"]
-
-    @covers("M4.F1")
-    def test_can_receive_from_is_exact_by_default(self, make_matcher):
-        """``can_receive_from`` 默认按**精确域名**匹配。
-
-        ⚠ 这里记录一个既有语义限制（不是本模块引入的）：
-        通配格式是 ``前缀.*``（如 ``demo.*``），而域名习惯写成 ``zone-work``
-        这种带连字符的形式，所以**域这一维实际上只有精确匹配一种可用写法**。
-
-        ``"*"`` 也不表示"接受任何域"——它会被当作字面量域名，
-        永远匹配不上。这是**刻意的**：本系统默认拒绝，
-        留一个"一行配置全放行"的写法只会让配错变成事故。
-        要接受多个域就逐个列出来。
-        """
-        s = make_matcher(
-            card("exact", can_receive_from=("zone-work",)),
-            card("star", can_receive_from=("*",)),
-        )
-        ids = [c.node_id for c in s["matcher"].candidates(
-            Requirement(task_type="job.run", from_domain="zone-work"))]
-        assert ids == ["exact"], "「*」被当成了通配 —— 一个笔误就能全放行"
-
-
-# ---------------------------------------------------------------------------
-# 2. 确定性排序（本文件的核心）
-# ---------------------------------------------------------------------------
 
 class TestDeterministicOrdering:
 
@@ -212,8 +186,8 @@ class TestDeterministicOrdering:
     def test_same_domain_first(self, make_matcher):
         """① 同域优先。跨域数据流动是成本，能力相当时没理由舍近求远。"""
         s = make_matcher(
-            card("far", domain="zone-b", can_receive_from=("zone-a", "zone-b")),
-            card("near", domain="zone-a", can_receive_from=("zone-a", "zone-b")),
+            card("far", domain="zone-b"),
+            card("near", domain="zone-a"),
         )
         req = Requirement(task_type="job.run", from_domain="zone-a")
         assert [c.node_id for c in s["matcher"].candidates(req)] == ["near", "far"]
@@ -470,16 +444,11 @@ class TestAutoDelivery:
         # 一个只在 zone-z 的节点，能干活，但没有 coordinator→zone-z 的矩阵规则
         app.registry.register(RoleCard.from_dict({
             "node_id": "node-z", "domain": "zone-z",
-            "roles": {"executor": True},
-            "capabilities": [{
+            "role": "worker","capabilities": [{
                 "type": "demo.only-z", "level": "metadata", "mode": "sync",
-                "response_fields": ["result", "level"],
+                "response_fields": ["result", "level"]
             }],
-            "constraints": {
-                "max_response_level": "metadata",
-                "can_receive_from": ["cloud"],
-            },
-        }), approved=True)
+            "self_limits": {"max_backlog": 20, "max_response_level": "metadata"}}), approved=True)
 
         # 前提确认：候选确实存在（否则这条测试测的是另一个分支）
         cands = app.transport.candidates(task_type="demo.only-z", from_node="coordinator")

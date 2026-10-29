@@ -63,21 +63,14 @@ def make_card(node_id: str = "work-laptop", *, domain: str = "zone-work",
         "domain": domain,
         "display_name": "Company Laptop",
         "heartbeat_interval": 30,
-        "roles": {"executor": True, "issuer": False},
-        "capabilities": [{
+        "role": "worker","capabilities": [{
             "type": "work.calendar",
             "level": level,
             "mode": "sync",
             "description": "会议安排摘要",
             "params_schema": {"day": "string"},
-            "response_fields": ["events", "level"],
-        }],
-        "constraints": {
-            "max_response_level": level,
-            "can_receive_from": ["cloud"],
-            "can_issue_types": [],
-        },
-    })
+            "response_fields": ["events", "level"]
+        }]})
 
 
 @pytest.fixture
@@ -205,7 +198,7 @@ class TestPrivilegeEscalationBlocked:
         raw = make_card().to_dict()
         raw["capabilities"].append({
             "type": "work.mail", "level": "summary", "mode": "sync",
-            "response_fields": ["mail", "level"],
+            "response_fields": ["mail", "level"]
         })
         result = work_client.register(RoleCard.from_dict(raw))
         assert result["approved"] is False

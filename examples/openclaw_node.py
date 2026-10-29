@@ -135,11 +135,6 @@ def build_card(node_id: str, domain: str, *, agent_id: str,
         "tools": ["openclaw"],
 
         # ---- 旧字段（待 Step 5 删除）----
-        "roles": {
-            "executor": True,
-            # ★ v0.17：开放发布权（A2A 协作的前提，见 hermes_node.py 同处说明）。
-            "issuer": True,
-        },
         "capabilities": [
             {
                 "type": "agent.ask",
@@ -152,15 +147,6 @@ def build_card(node_id: str, domain: str, *, agent_id: str,
                 "freetext_fields": ["answer"],
             },
         ],
-        "constraints": {
-            "max_response_level": "summary",
-            # 只接受本域派来的活。写域名而不是节点 ID ——
-            # 这个参数匹配的是 src.domain。
-            "can_receive_from": [domain],
-            # ★ 只放行 agent.ask
-            "can_issue_types": ["agent.ask"],
-            "can_delegate_to": [],
-        },
     })
 
 

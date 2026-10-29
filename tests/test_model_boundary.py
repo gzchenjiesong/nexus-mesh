@@ -66,7 +66,7 @@ UNAFFECTED = {
     "test_runtime.py",
     "test_skill_doc.py",
     "test_traceability.py",
-    "test_ui.py",
+    "test_ui.py"
 }
 
 

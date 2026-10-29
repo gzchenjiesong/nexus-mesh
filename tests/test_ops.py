@@ -37,14 +37,10 @@ def make_card(node_id: str = "work-laptop", *, domain: str = "zone-work") -> Rol
     return RoleCard.from_dict({
         "node_id": node_id,
         "domain": domain,
-        "roles": {"executor": True},
-        "capabilities": [{
+        "role": "worker","capabilities": [{
             "type": "work.calendar", "level": "summary", "mode": "sync",
-            "response_fields": ["events", "level"],
-        }],
-        "constraints": {"max_response_level": "summary",
-                        "can_receive_from": ["cloud"]},
-    })
+            "response_fields": ["events", "level"]
+        }]})
 
 
 @pytest.fixture
@@ -195,7 +191,7 @@ class TestOpsSurfaceIsOptIn:
             env = {
                 f"NXS_SECRET_{OPS_NODE_ID.upper().replace('_', '_')}": "x" * 32,
                 "NXS_SECRET_NODE_A": "y" * 32,
-                "NXS_SECRET_NODE_B": "z" * 32,
+                "NXS_SECRET_NODE_B": "z" * 32
             }
             with pytest.raises(ConfigError) as excinfo:
                 load_config(path, env=env)
@@ -266,52 +262,46 @@ class TestOpsWorks:
 
     @covers("M14.F5")
     def test_nodes_exposes_permission_fields(self, gateway, node_client):
-        """★★ `ops nodes` 必须输出 `can_issue_types` / `can_receive_from`。
+        """★★ `ops nodes` 必须输出排查权限所需的字段。
 
-        ⚠ **实测踩到的坑（v1.0.7 修）。**
+        ⚠ **这条测试在 Step 5c 改过对象，理由值得记。**
 
-        排查「为什么节点 A 发不了任务给 B」时，真正的判据只有两个：
+        它最初是为了修一个真实缺陷：`ops nodes --json` 里没有
+        `can_issue_types` / `can_receive_from`，于是排查「为什么 A 发不了
+        任务给 B」时我误判成"配置里没配发布权" —— **而实际配了，
+        只是输出没给**。一个缺字段的观测接口会主动误导人。
 
-          · `can_issue_types` → ``MX-ISSUER-01``（发不出去）
-          · `can_receive_from` → ``MX-RECEIVE-01``（收不进来）
+        Step 5c 把那两个字段整个删了（权限归角色），所以判据变成：
+        **必须给出角色名 + 该角色在配置里的定义。**
 
-        而这两个字段**原来根本不输出**。于是我只能去翻配置文件，
-        看到一个空值就误判成「配置里没配发布权」——
-        实际配了，只是这个观测接口没给。
-
-        **一个缺字段的观测接口会主动误导人**：它让排查者以为
-        「查过了，没有」，而不是「查不到」。这比报错更糟。
-
-        同类问题在 `bytes_per_response` 上也出现过一次
-        （文档说生效、实际不生效），所以这条测试专门守住。
+        这样排查时看到的不是两串需要脑内组合的白名单，而是
+        「它是 worker，worker 不能发布」—— 一步到位。
         """
-        from tests.test_ops import make_card as _mk
-
-        node_client.register(_mk())
+        node_client.register(make_card())
         ops = OpsClient(gateway.base_url, secret=OPS_SECRET)
         rows = ops.nodes()
         assert rows, "ops nodes 返回空"
 
         for row in rows:
-            assert "can_issue_types" in row, (
-                f"{row.get('node_id')} 的输出缺少 can_issue_types ——\n"
-                "  MX-ISSUER-01 的判据看不到，排障会被误导"
+            assert "role" in row, (
+                f"{row.get('node_id')} 缺 role —— 这是权限的唯一判据"
             )
-            assert "can_receive_from" in row, (
-                f"{row.get('node_id')} 的输出缺少 can_receive_from ——\n"
-                "  MX-RECEIVE-01 的判据看不到"
+            assert "role_definition" in row, (
+                f"{row.get('node_id')} 缺 role_definition ——\n"
+                "  光给角色名还得去翻配置才知道它能干什么，观测接口该一次说完"
             )
-            assert isinstance(row["can_issue_types"], list)
-            assert isinstance(row["can_receive_from"], list)
+            # 这两个已删除，不该再出现
+            assert "can_issue_types" not in row
+            assert "can_receive_from" not in row
 
-        # 具体值也要对得上角色卡
+        # 角色定义要能查到（配置里有 roles 表时）
         mine = [r for r in rows if r["node_id"] == "work-laptop"]
         if mine:
-            card = _mk()
-            assert mine[0]["can_issue_types"] == list(
-                card.constraints.can_issue_types), (
-                "输出的 can_issue_types 与角色卡不一致"
+            assert mine[0]["role"] == "worker"
+            assert mine[0]["role_definition"]["can_issue"] is False, (
+                "worker 不能发布 —— 这个结论必须一眼可见"
             )
+
 
     @covers("M14.F6")
     def test_ops_actions_are_audited(self, gateway, node_client, app):
