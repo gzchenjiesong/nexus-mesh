@@ -117,6 +117,24 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
             f"工具集：{toolsets}"
         ),
         "heartbeat_interval": 30,
+
+        # ---- 权限模型改造 Step 2：新字段 ----
+        #
+        # ⚠ 与下面 roles/can_issue_types 并存一个版本周期。
+        #   Step 3 切判定、Step 5 删旧字段后，只剩这里。
+        #   过渡期两者必须一致 —— 由 role_is_consistent() 核对。
+        "role": "driver",          # 能发也能收
+        "may_broadcast": False,    # 不广播：它只做点对点问答
+        "self_limits": {
+            # 每次任务都烧 token。队列深度收在 5 ——
+            # 再长等于让调用方白等，不如早点拒绝让它换路径。
+            "max_backlog": 5,
+            "max_response_level": "summary",
+        },
+        "capacity": 2,             # 排程提示：同时处理 2 个
+        "tools": [f"hermes:{toolsets}"],
+
+        # ---- 旧字段（待 Step 5 删除）----
         "roles": {
             "executor": True,
             # ★ v0.17：开放发布权。

@@ -141,7 +141,12 @@ sudo rm -f /var/lib/nexus-mesh/registry.db /var/lib/nexus-mesh/registry.db-shm \
 
 ---
 
-### Step 2 · AgentCard 换字段（判定仍走旧路径）
+### Step 2 · AgentCard 换字段（判定仍走旧路径）✅ 已完成（2026-10-29）
+
+> **完成情况**：`RoleCard` 新增 6 个字段，三个桥接的卡片已声明，
+> `derived_role()` / `effective_max_level()` / `effective_capacity()`
+> 三个派生方法就位。**判定逻辑仍未改** —— `make demo` / `demo-net`
+> 九步全过，`verify` 19 项全过。
 
 **改**
 
@@ -156,15 +161,58 @@ sudo rm -f /var/lib/nexus-mesh/registry.db /var/lib/nexus-mesh/registry.db-shm \
 参数化覆盖四种组合，断言「旧判定」与「role 推导」结论一致：
 
 ```
-(issuer, executor) →  能否发布  能否被执行   推导 role
-(True,  True )     →  True      True          driver
-(False, True )     →  False     True          worker
-(True,  False)     →  True      False         publisher
-(False, False)     →  False     False         无角色
+(issuer, executor) →  推导 role
+(True,  True )     →  driver
+(False, True )     →  worker
+(True,  False)     →  publisher
+(False, False)     →  ""（无角色，既不能发也不能被执行）
 ```
 
 这条测试的作用不是"证明迁移安全"（没有迁移了），而是**在你动判定逻辑之前，
 确认自己对旧行为的理解是对的**。它是一面镜子。
+
+**实际产出**
+
+| 内容 | 位置 |
+|---|---|
+| `SelfLimits`（节点自律限额） | `nxs/core/models.py` |
+| `RoleCard` 新增 6 字段 | `role` / `may_broadcast` / `self_limits` / `capacity` / `tools` / `state` |
+| `derived_role()` | 旧布尔 → 角色推导，**过渡期辅助，Step 5 删** |
+| `role_is_consistent()` | 声明的 role 与推导值对账 |
+| `effective_max_level()` | min(旧约束, 自限) —— 保住"多方取最小"性质 |
+| `effective_capacity()` | 未声明时退回 `quota.concurrent_tasks`，旧卡片零影响 |
+| 三个桥接卡片 | `hermes` / `openclaw` / `codebuddy` 均声明新字段 |
+| 测试 35 条 | `tests/test_agent_card_step2.py` |
+
+**每个新字段都有真实读取点**（避免重蹈 `can_issue` 的覆辙）
+
+| 字段 | 读取点 |
+|---|---|
+| `role` | `to_public_dict` 暴露 + `derived_role` 对账 |
+| `may_broadcast` | `to_public_dict` |
+| `self_limits.max_response_level` | `effective_max_level()` |
+| `self_limits.max_backlog` | ⚠ 暂登记 UNIMPLEMENTED（Step 6 接线） |
+| `capacity` | `effective_capacity()` → 观测层算负载率 |
+| `tools` | `to_public_dict` —— 让其他 Agent 知道它能做什么 |
+| `state` | `to_public_dict` |
+
+**⚠⚠ 一个被显式暴露、但**没有**擅自决定的策略问题**
+
+`work-desktop`（CodeBuddy）旧卡片是 `issuer=True`，等价于 `driver`
+——**它能主动给云端 Agent 派任务**。
+
+而权限模型 review 时，它正是"被批出发布权却没人回头看过"的典型。
+
+Step 2 **只记录现状**（`role: driver`，与旧行为一致），没有改它。
+注释里写清了两个选项：
+
+| 选 | 含义 |
+|---|---|
+| `driver` | 保留"主动问云端口径"的能力，但能发的范围要收窄 |
+| `worker` | 纯执行者，不能主动发起任何任务 |
+
+**这是策略决定，不是技术改造步骤。** 若改为 worker，
+`role_is_consistent()` 会立刻报不一致 —— 那正是我们要的信号。
 
 ---
 

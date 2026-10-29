@@ -123,6 +123,18 @@ def build_card(node_id: str, domain: str, *, agent_id: str,
         "display_name": f"OpenClaw · {agent_id}",
         "description": f"云端 OpenClaw Agent（agent={agent_id}）。{tools_note}",
         "heartbeat_interval": 30,
+
+        # ---- 权限模型改造 Step 2：新字段（与旧字段并存一个版本周期）----
+        "role": "driver",
+        "may_broadcast": False,
+        "self_limits": {
+            "max_backlog": 5,        # agent turn 慢，堆积等于白等
+            "max_response_level": "summary",
+        },
+        "capacity": 1,               # OpenClaw agent turn 不宜并发
+        "tools": ["openclaw"],
+
+        # ---- 旧字段（待 Step 5 删除）----
         "roles": {
             "executor": True,
             # ★ v0.17：开放发布权（A2A 协作的前提，见 hermes_node.py 同处说明）。

@@ -235,6 +235,53 @@ def _as_str_list(value: Any, where: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _parse_role_name(value: Any, where: str) -> str:
+    """角色名。空字符串合法（= 未声明，旧卡片）。"""
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ConfigError(f"{where}: 期望字符串")
+    name = value.strip()
+    if not name:
+        return ""
+    # 角色名是标识符，不允许空格/点号 —— 否则 report 里会看不出是不是拼错
+    if not all(c.isalnum() or c in "_-" for c in name):
+        raise ConfigError(
+            f"{where}: 角色名 '{name}' 只能含字母、数字、下划线、连字符"
+        )
+    return name
+
+
+def _parse_capacity(value: Any, where: str) -> int:
+    """排程提示。0 表示未声明（退回旧的 quota.concurrent_tasks）。"""
+    if value is None:
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ConfigError(f"{where}: 期望整数")
+    if value < 0:
+        raise ConfigError(f"{where}: 不能为负")
+    return value
+
+
+def _parse_state(value: Any, where: str) -> str:
+    """可用性状态。
+
+    ⚠ 这里只有两个值。`stale` **不在这里** —— 那是 Mesh 的观测结果，
+    不是节点自报的。两者混在一起会让"谁说的"变得含糊。
+    """
+    if value is None:
+        return "available"
+    if not isinstance(value, str):
+        raise ConfigError(f"{where}: 期望字符串")
+    s = value.strip().lower()
+    if s not in ("available", "paused"):
+        raise ConfigError(
+            f"{where}: '{value}' 无效；节点只能自报 available 或 paused。\n"
+            f"  stale 是 Mesh 的观测结果，不是自报项 —— 它由心跳超时判定。"
+        )
+    return s
+
+
 # ---------------------------------------------------------------------------
 # 角色与约束
 # ---------------------------------------------------------------------------
@@ -363,6 +410,72 @@ class Quota:
 
 
 @dataclass(frozen=True)
+class SelfLimits:
+    """节点**自己**设定的限额。与 Mesh 无关，也与角色无关。
+
+    ⭐ **这是自律，不是配额。**
+
+    区别很关键：
+
+      · 旧模型的 `quota` 是"网络允许你干多少" —— 而 Mesh 无法强制
+        （命令在节点本机执行），所以那些配额实际从未生效
+      · 这里的 `self_limits` 是"我自己最多干多少" —— 节点为了
+        不把自己烧穿而设的防御，主动申报给网络看
+
+    传导机制（Step 6 接线）：
+
+        节点发现额度耗尽 → 拒绝后续执行 → 主动申报 state=paused
+        → Mesh 不再给它发广播 → 其他 Agent 看到 paused 不再发单播
+
+    ⚠ 当前 Step 2 只做数据结构，**判定仍走旧路径**。
+    """
+
+    #: 信箱最多攒多少个待办。**缺省 20**，不是"不限"。
+    #:
+    #: 为什么不给 None（不限）：留一个"不限"的默认等于让所有人默认
+    #: 不受保护，且这个默认很容易被忘记。20 是保守起点，要放宽就显式写大
+    #: —— 保护默认开启，放宽需要主动声明。
+    #:
+    #: 量级参考：work.query 的 p50 延迟约 1.8 分钟，深度 20 → 最坏等待
+    #: 约 36 分钟。再长，发布方不如换节点。
+    max_backlog: int = 20
+    #: 这个节点自己愿意给出多细的产出。与角色上限**取 min**。
+    max_response_level: Level = Level.SUMMARY
+
+    _FIELDS = ("max_backlog", "max_response_level")
+
+    @classmethod
+    def from_dict(cls, obj: Mapping[str, Any] | None,
+                  where: str = "self_limits") -> "SelfLimits":
+        obj = obj or {}
+        if not isinstance(obj, Mapping):
+            raise ConfigError(f"{where}: 期望映射")
+        _reject_unknown(obj, cls._FIELDS, where)
+
+        backlog = obj.get("max_backlog", 20)
+        if not isinstance(backlog, int) or isinstance(backlog, bool):
+            raise ConfigError(f"{where}.max_backlog: 期望整数")
+        if backlog < 1:
+            raise ConfigError(
+                f"{where}.max_backlog: 必须 ≥1；"
+                f"要「不接收任务」请申报 state=paused，而不是把队列设成 0"
+            )
+
+        return cls(
+            max_backlog=backlog,
+            max_response_level=Level.parse(
+                obj.get("max_response_level", "summary"),
+                f"{where}.max_response_level"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_backlog": self.max_backlog,
+            "max_response_level": str(self.max_response_level),
+        }
+
+
+@dataclass(frozen=True)
 class Constraints:
     """维度三：信任约束。**与能力正交——能力不能突破约束。**
 
@@ -427,10 +540,37 @@ class RoleCard:
     capabilities: tuple[Capability, ...] = ()
     constraints: Constraints = field(default_factory=Constraints)
 
+    # ---- 权限模型改造 Step 2 新增 ----
+    #
+    # ⚠ 这些字段现在**只承载数据，不参与判定**。判定在 Step 3/4 才切换。
+    #   每个字段都标了它当前的读取点，避免又出现
+    #   「定义了却没人用」的静默欺骗（见 test_every_config_field_is_read_somewhere）。
+
+    #: 以什么角色接入。空 = "尚未声明"（旧卡片），由 :meth:`derived_role` 推导。
+    #: 读取点：`to_public_dict` 暴露给其他 Agent；`derived_role` 做一致性核对。
+    role: str = ""
+    #: 是否被允许广播。**独立 flag，不是角色属性** —— 广播能触达全网，
+    #: 做成 flag 才能在审批时区分"普通 driver"与"被批准广播的 driver"。
+    #: 读取点：`to_public_dict`。
+    may_broadcast: bool = False
+    #: 节点自律限额（非配额）。读取点：`effective_max_level`。
+    self_limits: SelfLimits = field(default_factory=SelfLimits)
+    #: 排程提示：最多同时处理几个。0 = 未声明，退回旧的 quota.concurrent_tasks。
+    #: 读取点：`effective_capacity`（观测层用它算负载率）。
+    capacity: int = 0
+    #: 节点会用到哪些工具（Bash/Read/...）。**自律项，Mesh 只记录不限制**。
+    #: 读取点：`to_public_dict` —— 让其他 Agent 知道它能做什么。
+    tools: tuple[str, ...] = ()
+    #: available | paused。paused = "我活着但暂时不接单"（额度耗尽/维护）。
+    #: 读取点：`to_public_dict`；Step 6 才参与投递判定。
+    state: str = "available"
+
     _FIELDS = (
         "card_version", "node_id", "display_name", "description", "domain",
         "reachability", "heartbeat_interval", "roles", "capabilities",
         "constraints",
+        # Step 2 新增
+        "role", "may_broadcast", "self_limits", "capacity", "tools", "state",
     )
 
     @classmethod
@@ -479,7 +619,76 @@ class RoleCard:
             roles=Roles.from_dict(obj.get("roles"), f"{where}.roles"),
             capabilities=caps,
             constraints=Constraints.from_dict(obj.get("constraints"), f"{where}.constraints"),
+            # ---- Step 2 新增字段 ----
+            role=_parse_role_name(obj.get("role"), f"{where}.role"),
+            may_broadcast=bool(obj.get("may_broadcast", False)),
+            self_limits=SelfLimits.from_dict(
+                obj.get("self_limits"), f"{where}.self_limits"),
+            capacity=_parse_capacity(obj.get("capacity"), f"{where}.capacity"),
+            tools=_as_str_list(obj.get("tools"), f"{where}.tools"),
+            state=_parse_state(obj.get("state"), f"{where}.state"),
         )
+
+    # ------------------------------------------------------------------
+    # Step 2 新增字段的派生与计算
+    # ------------------------------------------------------------------
+
+    def derived_role(self) -> str:
+        """从旧的 roles 布尔推导出等价角色。
+
+        ⚠ **这是过渡期的辅助，不是权威。** 存在的目的只有一个：
+        在切判定之前，能拿它和卡片上显式声明的 `role` 对账，
+        确认"我对旧行为的理解是对的"。
+
+        推导规则：
+
+            issuer  executor  →  role
+            True    True      →  driver
+            False   True      →  worker
+            True    False     →  publisher
+            False   False     →  ""（无角色）
+
+        Step 5 删除旧字段后本方法一起删。
+        """
+        if self.roles.issuer and self.roles.executor:
+            return "driver"
+        if self.roles.issuer:
+            return "publisher"
+        if self.roles.executor:
+            return "worker"
+        return ""
+
+    def role_is_consistent(self) -> bool:
+        """卡片声明的 role 与旧标志推导出的角色是否一致。
+
+        未声明 role 的旧卡片视为一致（无从对账）。
+        """
+        if not self.role:
+            return True
+        return self.role == self.derived_role()
+
+    def effective_max_level(self) -> Level:
+        """实际可用的应答上限 = min(旧约束上限, 节点自限)。
+
+        ⚠ Step 2 阶段：角色上限（来自配置）还没接进来，
+        所以这里是两重取 min；Step 4 才会变成
+        min(角色上限, 节点自限)。
+
+        保留"多方独立来源、各自只能收紧"这个性质本身是必须的 ——
+        它是防止单点配错导致越界的唯一保障。
+        """
+        return Level(min(self.constraints.max_response_level.value,
+                          self.self_limits.max_response_level.value))
+
+    def effective_capacity(self) -> int:
+        """排程用的并发提示。
+
+        `capacity` 未声明（0）时退回旧的 `quota.concurrent_tasks` ——
+        这样旧卡片行为完全不变。
+        """
+        if self.capacity > 0:
+            return self.capacity
+        return self.constraints.quota.concurrent_tasks
 
     def capability(self, task_type: str) -> Capability | None:
         for c in self.capabilities:
@@ -507,7 +716,17 @@ class RoleCard:
                 {"type": c.type, "level": str(c.level), "mode": c.mode}
                 for c in self.capabilities
             ],
-            "max_response_level": str(self.constraints.max_response_level),
+            # ⚠ 对外摘要给的是**实际生效**的上限，不是某一个原始字段。
+            #   调用方关心"我能拿到多细"，而不是"哪几个值取了 min"。
+            "max_response_level": str(self.effective_max_level()),
+            # ---- Step 2 新增：这些是其他 Agent 需要知道的 ----
+            #: 以什么角色接入（未声明的旧卡片给推导值，便于对方判断）
+            "role": self.role or self.derived_role(),
+            "may_broadcast": self.may_broadcast,
+            #: 它声明会用哪些工具。**自律项** —— 对方要知道，但不构成限制。
+            "tools": list(self.tools),
+            #: available / paused。paused 表示"活着但暂时不接单"。
+            "state": self.state,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -557,6 +776,14 @@ class RoleCard:
                     "concurrent_tasks": self.constraints.quota.concurrent_tasks,
                 },
             },
+            # ---- Step 2 新增 ----
+            # 必须能 from_dict 原样读回，所以新字段也要完整输出
+            "role": self.role,
+            "may_broadcast": self.may_broadcast,
+            "self_limits": self.self_limits.to_dict(),
+            "capacity": self.capacity,
+            "tools": list(self.tools),
+            "state": self.state,
         }
 
 

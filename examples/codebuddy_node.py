@@ -264,6 +264,37 @@ def build_card(node_id: str, domain: str, *,
             f"{tools_note}"
         ),
         "heartbeat_interval": 30,
+
+        # ---- 权限模型改造 Step 2：新字段（与旧字段并存一个版本周期）----
+        #
+        # ⚠⚠ **这里有一个待定的策略问题，先保持现状、不擅自改。**
+        #
+        # 旧卡片给了这个节点发布权（issuer=True），用途是让它能主动
+        # 问云端 Agent「这个数据该按什么口径取」。所以现状等价于 driver。
+        #
+        # 但它同时是*内网执行者* —— 权限模型 review 时把它列为
+        # 「被批出发布权却没人回头看过」的典型。它到底该是：
+        #
+        #   driver —— 保留"主动问云端"的能力，但能发的范围要收窄
+        #   worker —— 纯粹的执行者，不能主动发起任何任务
+        #
+        # **这是策略决定，不是技术改造步骤。** Step 2 只记录现状
+        # （role=driver，与旧行为一致），改动留给 Step 5 之前单独决策。
+        # 若决定改成 worker，`role_is_consistent()` 会立刻报不一致 ——
+        # 那正是我们希望看到的信号。
+        "role": "driver",
+        "may_broadcast": False,
+        "self_limits": {
+            # 公司电脑单线程执行，队列深度按"任务耗时"定。
+            # 这里取默认 20 —— 若实测单个任务经常超过 2 分钟，
+            # 应调小到 5～10，避免调用方白等。
+            "max_backlog": 20,
+            "max_response_level": "summary",
+        },
+        "capacity": 1,               # CodeBuddy 单会话，不并发
+        "tools": list(allowed_tools) if allowed_tools else [],
+
+        # ---- 旧字段（待 Step 5 删除）----
         "roles": {
             "executor": True,
             # ★ 给发布权：需要能主动问云端 Agent（比如"这个数据该按什么口径取"）
