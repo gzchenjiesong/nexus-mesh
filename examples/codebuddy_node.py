@@ -265,13 +265,29 @@ def build_card(node_id: str, domain: str, *,
         ),
         "heartbeat_interval": 30,
 
-        # ---- 权限模型改造 Step 2：新字段（与旧字段并存一个版本周期）----
+        # ★ 以什么角色接入 —— **worker：只被委托，不能发布任何任务**
         #
-        # `role` 选什么由**部署时**决定 —— 角色定义的是"driver 能干嘛、
-        # worker 能干嘛"，具体某个节点用哪个身份接入不属于代码的事。
-        # 这里跟随旧卡片现状填 driver（与 issuer=True 等价），
-        # 待新部署时再按实际需要选择。
-        "role": "driver",
+        # ⚠ 这里是本轮权限模型改造的**具体落点**，不是随手填的值。
+        #
+        # 旧卡片是 `issuer=true + can_issue_types=["agent.ask"]`，即
+        # 「能主动问云端，但不能给别人派活」。新模型里 `can_issue` 是布尔，
+        # **无法表达"只能发某类"** —— 所以只能二选一：
+        #
+        #     driver  保留 agent.ask，但同时获得「向任意可达域发任意已定义
+        #             类型」的权利
+        #     worker  彻底不能发布，失去 agent.ask
+        #
+        # 选 worker 的理由：「内网机器不能派活」是这轮改造的起点。
+        # 用 driver 会让它理论上能给协调节点派 work.summary —— 那正是
+        # 要根除的情形，不该因为"它代码里只调 agent.ask"就假设不会发生。
+        #
+        # 代价（明确记录）：它失去主动问云端的能力。
+        # 缓解：云端 hermes-working 与 taskflow（角色 agent）仍是
+        # can_issue=true，A2A 双向协作能力不受影响；内网侧只是被动应答。
+        #
+        # 若将来确实需要内网主动询问，正确做法是给模型加细粒度
+        # （role.can_issue_types），而不是把这里改回 driver。
+        "role": "worker",
         "may_broadcast": False,
         "self_limits": {
             # 单线程执行，队列深度按任务耗时定。

@@ -37,6 +37,34 @@ from examples.codebuddy_node import (  # noqa: E402
 
 
 class TestRoleCard:
+    """角色卡：**这台机器是 worker，不能发布任何任务。**"""
+
+    @covers("M5.F7")
+    def test_is_worker_not_driver(self):
+        """★★ 内网执行者必须是 worker —— 这是权限模型改造的具体落点。
+
+        ⚠ 这条守护是 2026-10-30 实机部署时补的，因为我把它从
+        `driver` 改成 `worker` 时，**整个测试文件一条都没红** ——
+        说明角色这个最关键的字段当时没有任何测试看着。
+
+        为什么必须是 worker（而不是"它代码里只调 agent.ask 就够了"）：
+
+            旧卡片 = issuer=true + can_issue_types=["agent.ask"]
+            新模型 = can_issue 是布尔，无法表达"只能发某类"
+
+        所以 driver 会让这台内网机器获得**向任意可达域发任意已定义类型**
+        的权利 —— 包括给协调节点派 work.summary。那正是本轮改造
+        要根除的情形。
+
+        「它只是没这么调用」不是安全边界；**「它没有这个权限」才是。**
+        """
+        card = build_card("work-desktop", "zone-work", allowed_tools=("Read",))
+        assert card.role == "worker", (
+            f"work-desktop 的角色是 {card.role!r}，应为 'worker'。\n"
+            "  改成 driver 会让它能向云端派任意类型 —— 请先读本测试的说明。"
+        )
+
+
     """角色卡：诚实、确定性、不多给能力。"""
 
     @covers("M5.F1")
