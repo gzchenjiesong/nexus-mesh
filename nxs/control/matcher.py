@@ -175,6 +175,15 @@ class Matcher:
             if cap is None:
                 continue
 
+            # 节点自报 paused → 跳过。
+            #
+            # ⚠ 与 routable 检查是两件事：routable 是 Mesh 的观测判断
+            #   （活着 + 已批准），paused 是节点自己说"暂时不接"。
+            #   前者是"能不能到"，后者是"愿不愿意接" —— 都不满足才算，
+            #   但自动匹配时后者也该跳过（省一次注定失败的校验）。
+            if card.state == "paused":
+                continue
+
             # 需求等级：调用方要不到比自己需要更低的东西没有意义，
             # 但候选必须**至少**能给到那么多
             # ⚠ constraints 已删（Step 5c）—— 节点侧上限只剩 self_limits。

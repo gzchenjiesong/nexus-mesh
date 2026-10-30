@@ -72,15 +72,42 @@ class RuleId(str, Enum):
     WL_TYPE_NOT_REGISTERED = "WL-TYPE-404"
     WL_FIELD_NOT_ALLOWED = "WL-FIELD-001"
     WL_LEVEL_EXCEEDED = "WL-LEVEL-002"
-    WL_FREETEXT_NOT_ALLOWED = "WL-FREETEXT-003"    #: 目标信箱已达 depth 上限（节点自报的 self_limits.max_backlog）。
+    WL_FREETEXT_NOT_ALLOWED = "WL-FREETEXT-003"
+
+    # ---------- QT- 资源限制 ----------
+    #
+    # ⚠ 现在只剩三类，各有明确归属：
+    #
+    #     BACKLOG  节点自己的信箱深度（节点自律，不是网络配额）
+    #     RATE     请求速率（Mesh 自保：别把网关打爆）
+    #     CONN     连接数（Mesh 自保：别耗尽文件描述符）
+    #
+    # 「节点还能干多少」那类配额已整体删除 —— Mesh 无法强制节点本地资源。
+
+    #: 目标信箱已达 depth 上限（节点自报的 self_limits.max_backlog）。
     #:
     #: ⚠ 这是**节点自己的防御**，不是网络配额。发布方收到它应该
     #: 稍后重试或换节点 —— 而不是以为"我被限权了"。
     QT_BACKLOG_FULL = "QT-BACKLOG-07"
-    QT_RATE_LIMITED = "QT-RATE-04"    #: v0.2 新增（传输层）：入站并发连接/请求超过 ``server.max_concurrent_requests``。
-    #: 与 ``QT-CONC-05``（某节点任务并发配额）刻意分开：那是业务配额，
+    QT_RATE_LIMITED = "QT-RATE-04"
+    #: v0.2 新增（传输层）：入站并发连接/请求超过
+    #: ``server.max_concurrent_requests``。
+    #:
+    #: 与已删除的「某节点任务并发配额」刻意分开过：那是业务配额，
     #: 这是传输层自保，两者触发源不同、处置也不同。
     QT_CONNECTION_LIMIT = "QT-CONN-06"
+
+    #: 目标节点自报 ``state: paused`` —— 它活着，但**主动**不接单。
+    #:
+    #: ⚠ 与 ``QT-BACKLOG-07``（信箱满）刻意分开，虽然发布方的应对相似
+    #: （换节点 / 稍后重试），但原因完全不同：
+    #:
+    #:     BACKLOG  我忙不过来 —— 做完就恢复，等待有意义
+    #:     PAUSED   我说的不接 —— 恢复时机由它自己决定，别干等
+    #:
+    #: 排障时这个区别很关键：看到 BACKLOG 该看负载，看到 PAUSED 该去问
+    #: 那个节点为什么把自己停了（维护？额度耗尽？人在开会？）。
+    QT_NODE_PAUSED = "QT-PAUSED-08"
 
     # ---------- LF- 生命周期 ----------
     LF_LEASE_HELD = "LF-LEASE-01"
@@ -118,6 +145,7 @@ _SAFE_MESSAGES: dict[RuleId, str] = {
     RuleId.WL_LEVEL_EXCEEDED: "response rejected",
     RuleId.WL_FREETEXT_NOT_ALLOWED: "response rejected",
     RuleId.QT_BACKLOG_FULL: "backlog full",
+    RuleId.QT_NODE_PAUSED: "target paused",
     RuleId.QT_RATE_LIMITED: "rate limited",
     RuleId.QT_CONNECTION_LIMIT: "service busy",
     RuleId.LF_LEASE_HELD: "task unavailable",

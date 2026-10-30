@@ -317,7 +317,7 @@ nodes:
         mode: async
         description: "耗时任务，用于验证租约续期与断电恢复"
         params_schema:
-          seconds: "int"
+          seconds: "number"
         response_fields: [slept, level]
 
     self_limits:

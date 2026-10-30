@@ -434,7 +434,7 @@ class TestDegradationAndShutdown:
         assert result.returncode == 0, (
             "验收命令执行失败：\n" + result.stdout + "\n" + result.stderr
         )
-        assert "九步全部通过" in result.stdout
+        assert "十步全部通过" in result.stdout
         assert "传输：HTTP" in result.stdout, "没有真的走网络"
         # 三条安全断言必须在网络模式下同样复现
         assert "WL-TYPE-404" in result.stdout

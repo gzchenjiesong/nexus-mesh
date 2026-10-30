@@ -91,7 +91,7 @@ git clone https://github.com/gzchenjiesong/nexus-mesh.git
 cd nexus-mesh
 make install
 make demo          # 等价于 nxs demo
-make demo-net      # 同一套九步断言，走真实 HTTP
+make demo-net      # 同一套十步断言，走真实 HTTP
 ```
 
 四个命令：
@@ -100,7 +100,7 @@ make demo-net      # 同一套九步断言，走真实 HTTP
 |---|---|
 | `nxs verify` | 配置自检：校验角色卡、矩阵、凭据的一致性 |
 | `nxs doctor` | **部署前自检**：持久化、权限、TLS、运维通道（加 `--production` 按生产标准） |
-| `nxs demo` | 跑九步验收 demo（**先看这个**）。加 `--net` 改走真实网络 |
+| `nxs demo` | 跑十步验收 demo（**先看这个**）。加 `--net` 改走真实网络 |
 | `nxs serve` | 核心常驻：**真的监听 HTTP 端口** + 定期维护 |
 | `nxs ops` | 远程运维：`approve` / `revoke` / `release` / `nodes` |
 | `nxs candidates` | 查某任务类型的候选执行者**及排序依据**（运维视角，不经 HTTP） |
@@ -112,27 +112,32 @@ make demo-net      # 同一套九步断言，走真实 HTTP
 数据与判断见 [`docs/artifact-size.md`](docs/artifact-size.md)，
 可用 `python examples/probe_artifact_size.py` 复现。
 
-`nxs demo` 跑 **9 步**，其中第 4–6 步是**三条安全断言**（以下是实际输出）：
+`nxs demo` 跑 **10 步**，其中第 4–7 步是**四条安全断言**（以下是实际输出）：
 
 ```
-[4/9] ★ 安全断言①  未注册的任务类型
+[4/10] ★ 安全断言①  未注册的任务类型
        REJECTED  WL-TYPE-404  类型未注册，不进入任何执行逻辑
 
-[5/9] ★ 安全断言②  越界字段（核心收不到内容）
+[5/10] ★ 安全断言②  越界字段（核心收不到内容）
        REJECTED  WL-FIELD-001  对外响应 = {'denied': 'true', 'rule_id': ...}
        对外响应不含字段名、不含内容——详情仅入本地审计
 
-[6/9] ★ 安全断言③  控制是逐层收窄的（角色 → 白名单 → 矩阵）
+[6/10] ★ 安全断言③  控制是逐层收窄的（角色 → 白名单 → 矩阵）
        REJECTED  MX-ISSUER-01  node-a  role=worker → 角色层拦截
        REJECTED  MX-DOMAIN-02  node-b → node-a  有发布权，但矩阵无规则
        ★ 角色层放行、矩阵层拦截——两层互相独立，这是关键性质
+
+[7/10] ★ 安全断言④  参数校验 + 暂停状态
+       REJECTED  FM-PARAM-02   demo.count 要 n: integer，给了 string
+       REJECTED  FM-PARAM-02   夹带 note 参数 → 未声明参数一律拒绝
+       REJECTED  QT-PAUSED-08  node-a 自报 paused → 活着但主动不接单
 ```
 
-第 7–9 步是另外三条断言：**断电恢复**（节点被 kill 后任务回队列）、
+第 8–10 步是另外三条断言：**断电恢复**（节点被 kill 后任务回队列）、
 **自动匹配**（不指定目标也能派出活且可复现）、
 **可观测**（单看都正常的指标，合起来才说明问题）。
 
-**这三条断言是这个项目区别于普通消息传递的地方。** 若它们不能稳定复现地通过，本项目就没有达成设计目标。
+**这四条断言是这个项目区别于普通消息传递的地方。** 若它们不能稳定复现地通过，本项目就没有达成设计目标。
 
 `nxs demo --net` 跑的是**同一段流程代码**，只把传输换成了 HTTP。
 两条命令的审计摘要应当完全一致——这就是"传输可替换"的证明。
@@ -242,7 +247,7 @@ nxs ops approve node-a --url https://coordinator.example.com/nxs
 ```bash
 make install     # 建 venv 并安装（仅 PyYAML 一个运行时依赖）
 make test        # 跑全部测试
-make demo        # 九步验收
+make demo        # 十步验收
 ```
 
 `traceability/MATRIX.md` 是可执行的追溯表 —— 由测试生成，覆盖 137 个

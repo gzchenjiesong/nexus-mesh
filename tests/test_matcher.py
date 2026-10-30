@@ -385,8 +385,10 @@ class TestAutoDelivery:
 
         coordinator = HttpTransport(live["gateway"].base_url, node_id="coordinator",
                             secret=live["app"].config.secrets["coordinator"])
+        # ⚠ params 必须符合 demo.count 的 schema（n: integer）——
+        #   空 params 会被 FM-PARAM-02 拒掉（参数校验已接线，Step 6）
         result = coordinator.publish(from_node="coordinator", task_type="demo.count",
-                             params={}, idempotency_key="auto-2")
+                             params={"n": 3}, idempotency_key="auto-2")
         assert result.task.to_node == "node-a"
 
     @covers("M4.F5", "M4.F2")
@@ -479,7 +481,7 @@ class TestAutoDelivery:
                             secret=app.config.secrets["coordinator"])
 
         first = coordinator.publish(from_node="coordinator", task_type="demo.count",
-                            params={}, idempotency_key="same-key")
+                            params={"n": 3}, idempotency_key="same-key")
         assert first.created is True
 
         # 让候选彻底消失

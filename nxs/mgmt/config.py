@@ -271,9 +271,6 @@ EXAMPLE_CONFIG_PATH = "config/nxs.example.yaml"
 #:
 #: **新增配置项时，要么实现它，要么加到这里。**
 UNIMPLEMENTED: tuple[tuple[str, str], ...] = (
-    ("params_schema",
-     "参数 schema 只声明、未校验；格式错误的参数由执行节点自己承担失败。"
-     "⚠ Step 6 会真正校验它（TaskType 全局定义后，校验方与定义方是同一个）"),
     ("TypeDecl.delivery",
      "**权限模型改造遗留**：广播（broadcast）的展开逻辑未实现，"
      "当前所有任务都按单播处理。等 group/广播能力落地后接线"),
@@ -297,6 +294,27 @@ class DomainDecl:
 
     name: str
     description: str = ""
+
+
+#: 参数 schema 允许的类型名。
+#:
+#: ⚠ **必须白名单校验，不能见到什么就存什么。**
+#:
+#: 之前 `params_schema` 只解析不校验，于是示例配置里写着 `"int"`、
+#: 另一个地方写着 `"integer"` —— 两种写法并存，谁也不知道运行时
+#: 会拿哪个去比对。**类型名拼错的后果是校验永远失败或永远通过，
+#: 两种都是坑，而且从配置上完全看不出来。**
+#:
+#: 用 Python 类型而不是 JSON Schema 的完整语法：这套 schema 只表达
+#: "参数名 → 标量类型"，不需要嵌套与约束（那是 group/多播落地后的事）。
+PARAM_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list, tuple),
+    "object": (dict,),
+}
 
 
 @dataclass(frozen=True)
@@ -378,6 +396,17 @@ class TypeDecl:
         schema = obj.get("params_schema") or {}
         if not isinstance(schema, Mapping):
             raise ConfigError(f"{where}.params_schema: 期望映射")
+        # ⚠ 类型名必须校验 —— 拼错的后果是运行时校验永远失败或永远通过，
+        #   而两种症状都从配置上看不出来。
+        for pname, ptype in schema.items():
+            if not isinstance(pname, str) or not pname.strip():
+                raise ConfigError(f"{where}.params_schema: 参数名必须是非空字符串")
+            if ptype not in PARAM_TYPES:
+                raise ConfigError(
+                    f"{where}.params_schema.{pname}: 类型 '{ptype}' 无效；"
+                    f"可用类型为 {sorted(PARAM_TYPES)}\n"
+                    f"  ⚠ 类型名必须精确 —— 拼错会让校验永远失败或永远通过。"
+                )
 
         return cls(
             name=name,

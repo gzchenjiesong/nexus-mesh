@@ -582,21 +582,109 @@ max_response_level  → self_limits.max_response_level（同一语义，合并�
 
 ---
 
-### Step 6 · 新功能：`paused` 状态 + schema 校验
+### Step 6 · `paused` 状态 + `params_schema` 校验 ✅ 已完成（2026-10-30）
 
-**改**
+这两项都是**配置里写着、但一直没接线**的功能。它们的共同前提是
+类型由 Mesh 定义一次 —— 所以"这个类型的参数长什么样"才有唯一答案。
 
-- `ops` 端点新增 `state` 动作：节点申报 `available` / `paused`
-- 投递时跳过 `paused`（广播静默跳过；单播明确报错）
-- 网关按 `types[].params_schema` 校验 `params`
-- 删 `UNIMPLEMENTED` 的 `params_schema` 条目
+**① `params_schema` 真正校验**
 
-**判据**
+新增 `PolicyEngine.check_params()`，接在投递链路的 **①b** 位置：
 
-- 节点申报 `paused` → 广播跳过、单播报错
-- 心跳停 → `paused` 转 `stale`（不会卡死）
-- 传非法参数 → 被拒，错误码 `FM-PARAM-02`
-- **`UNIMPLEMENTED` 归零**
+```
+① 发布方 role 允许发布        MX-ISSUER-01
+①b 参数符合 params_schema     FM-PARAM-02   ← 新增
+② 目标节点可路由              AU-*
+③ 域间矩阵                   MX-DOMAIN-02
+③b 目标没有自报 paused        QT-PAUSED-08  ← 新增
+④ 应答上限 = min(三重)
+⑤ 信箱还有余量                QT-BACKLOG-07
+```
+
+**位置是刻意的**：放在发布权限**之后**、目标确定**之前**。
+
+* 放在权限之前 → 没发布权的人也能靠参数错误探测 schema
+* 放在目标之后 → 自动匹配可能先挑到节点再发现参数不对，白跑一趟
+
+校验三条：必需参数齐全 / 类型正确 / **未声明参数一律拒绝**。
+
+第三条是刻意的严格 —— 未声明参数是提示注入的现成载体。
+
+**② 类型名白名单**
+
+踩到的实例：示例配置一处写 `"int"`、另一处写 `"integer"`，
+两种写法并存。**类型名拼错的后果是校验永远失败或永远通过，
+两种都是坑，而且从配置上完全看不出来。**
+
+新增 `PARAM_TYPES` 白名单（string/integer/number/boolean/array/object），
+加载时校验。示例配置的 `"int"` 一并改成 `"number"`（demo.slow 的 seconds
+本来就该是 number）。
+
+**③ `paused` 参与投递判定**
+
+两处接线，语义不同：
+
+| 位置 | 行为 | 理由 |
+|---|---|---|
+| `check_delivery` | 拒绝，`QT-PAUSED-08` | 显式指定了目标，它不接就该报错 |
+| `matcher.candidates` | 跳过 | 自动匹配时"有别的能干"和"只能给它但它不接"是两回事 |
+
+**⚠ 错误码的选择与文档不一致，我改了文档并说明理由**
+
+`protocol.md` 早期版本写的是这一条用 `AU-APPROVE-05`。实现时改成新码
+`QT-PAUSED-08`，因为两个码回答的问题不同：
+
+| 码 | 回答的问题 | 节点的处境 |
+|---|---|---|
+| `AU-APPROVE-05` | 它**有没有资格**在这个网络里 | 未批准 / 已吊销 / 不可路由 |
+| `QT-PAUSED-08` | 它**现在接不接单** | 已批准、活着，但主动声明暂停 |
+
+paused 的节点在网络上完全合法，只是暂时不接活。用准入错误码会让
+排障者去查批准记录 —— 而那一切正常。
+
+**错误码 23 → 24**（新增 `QT-PAUSED-08`）
+**`UNIMPLEMENTED` 2 → 1**（只剩 `TypeDecl.delivery`，广播按你的要求延后）
+
+**⚠ 顺带修了一个我自己留下的 bug**
+
+前面几步用正则删代码时，把 `errors.py` 里两处换行吃掉了：
+`WL_FREETEXT_NOT_ALLOWED` 的下一行直接贴在 `QT_BACKLOG_FULL` 的注释上。
+语法能过（都是注释），但可读性被破坏。已修复并重排了 QT 组的分组说明。
+
+**新增 `tests/test_params_and_paused.py`（18 条）**
+
+重点几条：
+
+| 测试 | 保护什么 |
+|---|---|
+| `test_undeclared_param_rejected` | 夹带防护 —— 本步最重要的性质 |
+| `test_bool_does_not_pass_integer` | Python 里 `True` 是 `int` 子类，必须显式排除 |
+| `test_uses_qt_not_au` | paused 必须用 QT-*，用 AU-* 会让排障方向跑偏 |
+| `test_extra_param_rejection_does_not_name_it` | 拒绝时不报参数名（防探测） |
+| `test_node_cannot_self_report_stale` | 自报态与观测态必须分开 |
+
+**双向验证四项**
+
+```
+check_params 置空        → 5 条 FAILED
+去掉 bool 排除           → 1 条 FAILED
+paused 检查摘掉          → 2 条 FAILED
+matcher 的 paused 过滤摘掉 → 1 条 FAILED
+```
+
+**demo 从九步变十步**
+
+新增第 7 步「参数校验 + 暂停状态」，把三条拒绝实跑给出来：
+
+```
+[7/10] ★ 安全断言④  参数校验 + 暂停状态
+       REJECTED  FM-PARAM-02   demo.count 要 n: integer，给了 string
+       REJECTED  FM-PARAM-02   夹带 note 参数 → 未声明参数一律拒绝
+       REJECTED  QT-PAUSED-08  node-a 自报 paused → 活着但主动不接单
+```
+
+改步数带出四处同步：`demo.py` 模块文档、README、Makefile、`test_gateway.py`。
+其中 Makefile 那处是**已有的守护测试主动抓到的**（"同一个事实写在两处"）。
 
 ---
 

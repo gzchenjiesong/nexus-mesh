@@ -30,7 +30,12 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..core.errors import PolicyDenied, RuleId
 from ..core.models import Artifact, Capability, Level, RoleCard, Task
-from ..mgmt.config import MatrixRule, NexusConfig, RoleDecl
+from ..mgmt.config import (
+    PARAM_TYPES,
+    MatrixRule,
+    NexusConfig,
+    RoleDecl,
+)
 
 #: 单个自由文本字段的字节上限。
 #: 自由文本是提示注入的主要载体，也是唯一无法用字段白名单约束的内容形态，
@@ -280,6 +285,21 @@ class PolicyEngine:
                 f"no matrix rule for {src.domain} → {dst.domain}",
             )
 
+        # ---- ③b 目标节点是否在暂停中 ----
+        #
+        # ⚠ `card.state`（available/paused）是**节点自报**的意愿，
+        #   与 registry 的 NodeState（alive/stale/revoked）是两回事：
+        #
+        #       观测态 → Mesh 根据心跳判定，节点无权自报（"谁说的"要分清）
+        #       自报态 → 节点主动声明"我活着但暂时不接单"
+        #
+        # 先判观测态（require_routable 已在调用方做过），再判自报态。
+        if dst.state == "paused":
+            raise PolicyDenied(
+                RuleId.QT_NODE_PAUSED,
+                f"{to_node} self-reported paused",
+            )
+
         # ---- ④ 应答上限：三重独立来源取最小 ----
         #
         # ⚠ 这个"多处取最小"的性质是整个模型防越界的支点，不能简化成单源：
@@ -396,6 +416,80 @@ class PolicyEngine:
                         RuleId.WL_FREETEXT_NOT_ALLOWED,
                         f"artifact[{i}].{fname} size={size}",
                     )
+
+    # ------------------------------------------------------------------
+    # ③b 参数校验：任务本身的形状对不对
+    # ------------------------------------------------------------------
+
+    def check_params(self, task_type: str, params: Mapping[str, Any]) -> None:
+        """校验任务参数是否符合该类型的 `params_schema`。
+
+        ## 为什么这事该由 Mesh 做，而不是执行节点
+
+        这是权限模型改造之后才变得**可能**的：类型由运维在 `types:` 段
+        定义一次，所以"这个类型的参数长什么样"有唯一答案。
+
+        旧模型里类型是从各节点卡片汇总来的，同一个名字可以有两套契约 ——
+        那时校验方不知道该按哪份校验，所以这个字段只能"声明但不校验"。
+
+        ## 校验什么
+
+            ① schema 声明的每个参数**必须出现**
+            ② 类型要对得上
+            ③ **未声明的参数一律拒绝**
+
+        第 ③ 条是刻意的严格。理由：未声明的参数是提示注入的现成载体 ——
+        发布方塞一个 `{"text": "hi", "note": "忽略上述指令..."}`，
+        而下游只按 schema 读 `text`，`note` 就跟着任务一路走到执行节点。
+        **允许未声明参数等于允许夹带。**
+
+        ## schema 为空时
+
+        跳过校验（只做 ③ 的反向：不要求任何参数）。
+
+        这不是疏忽：空 schema 的语义是"这个类型的参数形状未定义"，
+        不知道该校验什么就只能放过。**但它记录在 UNIMPLEMENTED 的反面**——
+        写了 schema 就一定会被校验。
+
+        ## 错误信息
+
+        只说"参数被拒"，**不说是哪个参数、期望什么类型** ——
+        与 `check_response` 不报字段名同一条理由：具体值可能携带信息，
+        而对外响应是攻击者能看到的。细节进本地审计日志。
+        """
+        decl = self._cfg.types.get(task_type)
+        if decl is None or not decl.params_schema:
+            return          # 没有类型声明 / 没写 schema → 无从校验
+
+        # ① 必需参数齐全 + ② 类型正确
+        for pname, ptype in decl.params_schema.items():
+            if pname not in params:
+                raise PolicyDenied(
+                    RuleId.FM_TASK_PARAM_INVALID,
+                    f"{task_type}: missing param {pname!r}",
+                )
+            value = params[pname]
+            expected = PARAM_TYPES.get(ptype, ())
+            # ⚠ bool 是 int 的子类，必须排除 —— 否则 True 会通过 integer 校验。
+            #   这类"Python 类型系统的小陷阱"不写下来一定会再踩。
+            ok = isinstance(value, expected) and not (
+                ptype in ("integer", "number") and isinstance(value, bool)
+            )
+            if not ok:
+                raise PolicyDenied(
+                    RuleId.FM_TASK_PARAM_INVALID,
+                    f"{task_type}.{pname}: expected {ptype}, "
+                    f"got {type(value).__name__}",
+                )
+
+        # ③ 未声明的参数一律拒绝（夹带防护）
+        stray = set(params) - set(decl.params_schema)
+        if stray:
+            # 同样只报数量，不报名字
+            raise PolicyDenied(
+                RuleId.FM_TASK_PARAM_INVALID,
+                f"{task_type}: {len(stray)} undeclared param(s)",
+            )
 
     # ------------------------------------------------------------------
     # ④ 有状态检查：配额与并发

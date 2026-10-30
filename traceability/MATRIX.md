@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **788** 个测试方法（已声明覆盖）· **137** 个纵向编号项（114 功能点 + 23 模块需求）
+共 **806** 个测试方法（已声明覆盖）· **137** 个纵向编号项（114 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -101,7 +101,7 @@ _（未实现，暂无功能点）_
 | **M5.F3** | 接收方约束校验 | `nxs/control/policy.py:PolicyEngine.check_delivery（域矩阵可达性）` | G2 | P0 | S3 | 2 |
 | **M5.F4** | 应答字段白名单（含列表递归） | `nxs/control/policy.py:PolicyEngine.check_response` | G2 | P0 | S2 | 6 |
 | **M5.F5** | 等级上限计算（三重取最小） | `nxs/control/policy.py:PolicyEngine.check_delivery（min 计算）` | G2 | P0 | S5 | 8 |
-| **M5.F6** | 发布权限校验 | `nxs/control/policy.py:PolicyEngine.check_publish` | G2 | P0 | S3 | 6 |
+| **M5.F6** | 发布权限校验 | `nxs/control/policy.py:PolicyEngine.check_publish` | G2 | P0 | S3 | 20 |
 | **M5.F7** | 配额校验（并发／按日／字节） | `nxs/control/policy.py:PolicyEngine.check_quota` | G2 | P1 | — | 12 |
 | **M5.F8** | 委托链校验 | `nxs/control/policy.py:PolicyEngine.check_delegation` | G2 | P1 | — | 1 |
 | **M5.F9** | 能力发现查询 | `nxs/control/policy.py:PolicyEngine.providers_of` | G1 | P1 | — | 2 |
@@ -183,7 +183,7 @@ _（未实现，暂无功能点）_
 
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
-| **M11.F1** | 配置加载与严格校验（非法即拒绝启动） | `nxs/mgmt/config.py:load_config` | G4,G5 | P0 | — | 111 |
+| **M11.F1** | 配置加载与严格校验（非法即拒绝启动） | `nxs/mgmt/config.py:load_config` | G4,G5 | P0 | — | 115 |
 | **M11.F2** | 矩阵规则解析（拒绝裸通配） | `nxs/mgmt/config.py:MatrixRule.from_dict/matches_type` | G5 | P0 | S3 | 1 |
 | **M11.F3** | 凭据来源解析（环境变量优先） | `nxs/mgmt/config.py:load_config（凭据段）` | G2 | P0 | — | 3 |
 | **M11.F4** | 示例配置回退与临时凭据 | `nxs/mgmt/config.py:resolve_config_path/demo_env_for` | G4 | P2 | — | 4 |
