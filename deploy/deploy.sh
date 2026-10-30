@@ -27,7 +27,33 @@ cd "$REPO"
 
 echo "═══ ① 拉取代码 ═══"
 BEFORE=$(git rev-parse --short HEAD)
-git fetch origin main
+if ! git fetch origin main 2>/tmp/nxs-fetch-err; then
+    echo "  ✗ fetch 失败"
+    sed 's/^/    /' /tmp/nxs-fetch-err
+    cat <<'HINT'
+
+  ⚠ 两条路，按情况选：
+
+  ① 临时（借本机的 GitHub 凭据，需要 ssh -A）：
+       GIT_SSH_COMMAND='ssh -o IdentitiesOnly=no -o BatchMode=yes' \
+         bash /root/nexus-mesh-deploy/deploy.sh
+
+     ⚠ 为什么要 IdentitiesOnly=no：~/.ssh/config 里为 deploy key
+       配了 `IdentitiesOnly yes`，它会**忽略 agent 里的 key** ——
+       所以只加 -A 转发还不够，必须显式放开这一项。
+
+     这是 2026-10-30 实际踩到的：加了 -A 仍然 Permission denied，
+     因为被自己的 config 挡住了。
+
+  ② 持久（推荐，一次配置永久生效）：
+       bash /root/nexus-mesh-deploy/check-git.sh
+     它会打印公钥和添加步骤。
+
+HINT
+    rm -f /tmp/nxs-fetch-err
+    exit 1
+fi
+rm -f /tmp/nxs-fetch-err
 git merge --ff-only origin/main
 AFTER=$(git rev-parse --short HEAD)
 echo "  $BEFORE → $AFTER"
