@@ -53,7 +53,7 @@
 > 这条是**实测后修正的**：本手册初版写"返回 `outcome=created`"，
 > 但用示例配置（节点已在 yaml 里）跑会得到 `unchanged`。
 
-**推荐验证方式**：`make demo`（九步，两种传输）+ 自己按上面 6 步走一遍真实 HTTP。
+**推荐验证方式**：`make demo`（十步，两种传输）+ 自己按上面 6 步走一遍真实 HTTP。
 
 ---
 
@@ -148,7 +148,7 @@
 | G2 配置模板可用 | 按 `deploy/local.yaml.example` 起服务 | 启动成功，`doctor` 通过 |
 | G3 系统服务 | systemd unit 启停 | `Restart=always` 生效；停止时在途请求有时间完成 |
 | G4 CLI 全可用 | 逐个 `nxs <cmd> --help` | 9 个命令（verify · demo · serve · status · candidates · metrics · doctor · ops · ui）全部返回 0 |
-| G5 demo 全通过 | `make demo` 与 `make demo-net` | 九步全过 |
+| G5 demo 全通过 | `make demo` 与 `make demo-net` | 十步全过 |
 
 ---
 
@@ -228,11 +228,14 @@ ssh -N -L 8080:127.0.0.1:8080 user@服务器
 
 | 配置项 | 实际不生效 |
 |---|---|
-| `params_schema` | 参数不校验。格式错误的参数会被投递出去，由执行节点自己承担失败 |
+| `TypeDecl.delivery` | 写 `broadcast` 不会真的广播。所有任务都按单播处理 |
 
-> **权限模型改造（进行中）会把它也消掉**：TaskType 改为 Mesh 全局定义后，
-> 校验方与定义方是同一个，`params_schema` 才能真的校验。
-> 详见 [`design/06-agent-role-model.md`](design/06-agent-role-model.md)。
+> 广播的展开逻辑未实现（需要先定「N 个结果怎么返回」，属协议层设计）。
+> 配置里写 `delivery: broadcast` 不会报错，但行为就是单播。
+>
+> **`params_schema` 已于 2026-10-30 接线**，不再是缺口 —— 它被消掉的
+> 原因正是改造的核心收益：类型由 Mesh 定义一次，校验方与定义方是同一个，
+> 所以「这个类型的参数长什么样」才有唯一答案。
 
 ### 其余 6 项的去向（不再是"不生效"，而是"不存在了"）
 
@@ -317,7 +320,7 @@ ssh -N -L 8080:127.0.0.1:8080 user@服务器
 
 ```
 第一轮 · 核心闭环（必过）
-  ├─ make demo / make demo-net                    九步全过
+  ├─ make demo / make demo-net                    十步全过
   ├─ 真实 HTTP 走 A1–A6                            任务跑完
   └─ C1/C2 持久化                                  重启不丢
 
@@ -359,7 +362,7 @@ ssh -N -L 8080:127.0.0.1:8080 user@服务器
 # ① 自动抽查：按本手册的条目验一遍（21 项）
 python examples/acceptance_drill.py
 
-# ② 八步/九步 demo（两种传输）
+# ② 十步 demo（两种传输）
 make demo && make demo-net
 
 # ③ 全部测试（含 21 条文档守门）

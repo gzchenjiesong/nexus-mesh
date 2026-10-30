@@ -195,7 +195,16 @@ def test_no_test_targets_removed_concepts():
     """
     #: 这些文件**定义**了旧模型词汇表，必然包含这些词。
     #: 它们不是"在测试旧概念"，而是在描述"哪些概念已淘汰"。
-    VOCAB_DEFINERS = {"test_docs_design_consistency.py", "test_model_boundary.py"}
+    #:
+    #: ⚠ `test_docs_consistency.py` 于 2026-10-30 加入：它新增的
+    #:   `TestNoDeadVocabulary` 里有一份 `DEAD_VOCAB` 词表，用途与此处
+    #:   相同（声明"哪些词已淘汰"）。**这不是通融** —— 判据是
+    #:   "文件是否在定义词汇表"，而不是"它红了就放过"。
+    VOCAB_DEFINERS = {
+        "test_docs_design_consistency.py",
+        "test_docs_consistency.py",
+        "test_model_boundary.py",
+    }
 
     offenders = []
     for p in sorted(TESTS.glob("test_*.py")):

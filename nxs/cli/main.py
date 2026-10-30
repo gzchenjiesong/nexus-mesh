@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="cmd", required=True, metavar="<命令>")
 
-    sub.add_parser("whoami", help="我是谁：身份牌、能力、配额、批准状态")
+    sub.add_parser("whoami", help="我是谁：身份牌、角色、能力、自限、批准状态")
     sub.add_parser("nodes", help="网络里有谁（当前有协议限制，见输出）")
 
     sp = sub.add_parser("ask", help="问一个 Agent 并等它的回答")

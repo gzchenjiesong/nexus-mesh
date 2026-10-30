@@ -3,7 +3,7 @@
 四个子命令：
 
     nxs verify  配置自检：加载配置、校验合法性、打印生效的规则
-    nxs demo    跑九步验收 demo（同 ``make demo``）
+    nxs demo    跑十步验收 demo（同 ``make demo``）
     nxs serve   核心常驻：启动 HTTP 网关 + 定期维护（sweep）
     nxs status  查看当前节点状态与审计摘要
 
@@ -185,7 +185,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_demo(args: argparse.Namespace) -> int:
-    """跑九步验收 demo。``--net`` 时改走真实 HTTP（同一套断言）。"""
+    """跑十步验收 demo。``--net`` 时改走真实 HTTP（同一套断言）。"""
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root))
     try:
@@ -982,7 +982,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "示例：\n"
             "  nxs verify                         自检示例配置\n"
-            "  nxs demo                           跑九步验收 demo（同进程）\n"
+            "  nxs demo                           跑十步验收 demo（同进程）\n"
             "  nxs demo --net                     同一套断言，走真实 HTTP\n"
             "  nxs serve -c config/local.yaml     常驻：监听端口 + 定期维护\n"
             "  nxs status                         查看节点与审计\n\n"
@@ -1004,10 +1004,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(sp)
     sp.set_defaults(func=cmd_verify)
 
-    sp = sub.add_parser("demo", help="跑九步验收 demo")
+    sp = sub.add_parser("demo", help="跑十步验收 demo")
     add_common(sp)
     sp.add_argument("--net", action="store_true",
-                    help="改走真实 HTTP（同一套九步断言，验证传输层）")
+                    help="改走真实 HTTP（同一套十步断言，验证传输层）")
     sp.set_defaults(func=cmd_demo)
 
     sp = sub.add_parser("serve", help="核心常驻（含定期维护）")

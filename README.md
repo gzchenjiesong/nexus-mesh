@@ -278,8 +278,8 @@ Nexus Mesh treats these as core concerns rather than add-ons.
 
 ### Core concepts
 
-- **Node** — an agent joining the network under a **role** (Issuer / Executor / Relay / Observer)
-- **Role Card** — a node's self-declaration: roles, capabilities, and **trust constraints** (max data level, issuable types, quota)
+- **Node** — an agent joining the network under **exactly one role** (`worker` / `driver` / `publisher`)
+- **Role Card** — a node's self-declaration: its role, the task types it serves, and its **self-limits** (backlog depth, max response level). The role alone decides *whether it may publish* — that is the only thing needing approval
 - **Capability** — a named task type with a parameter schema and a **response field allow-list**
 - **Response Boundary** — enforced on the node side: data that must not be disclosed has **no code path at all**, rather than being filtered at runtime
 - **Session** — the context of one user request, linking all tasks under it

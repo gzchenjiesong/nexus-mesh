@@ -385,7 +385,7 @@ coordinator 侧取 `min(矩阵上限, 节点上限, 能力等级)`。两级取�
 > ⚠ 顺带确认：**单次应答字节上限从未真正生效过**——
 > `check_quota(planned_bytes=...)` 在整个代码库里没有调用点，一直收默认值 0。
 >
-> 这个遗留项正在被删掉（权限模型改造，见
+> 这个遗留项**已删除**（权限模型改造，2026-10-30，见
 > [`design/06-agent-role-model.md`](design/06-agent-role-model.md)）：
 > 节点侧配额归节点自律，Mesh 不再管这一层。
 > 真实的体积硬上限是 `server.max_body_bytes`。
@@ -588,7 +588,8 @@ coordinator 侧取 `min(矩阵上限, 节点上限, 能力等级)`。两级取�
 > 而实际上完全不生效。发现方式是审计时顺着 `check_quota` 的调用点查下去。
 >
 > 新模型把这一整类问题从根上消掉了 —— 不是靠"记得别写错"，
-> 而是让配置项本身不存在。
+> 而是让配置项本身不存在。**`Quota` 类与 `check_quota()` 已于
+> 2026-10-30 整体删除。**
 
 > **v0.2 移出清单的三项**：`max_body_bytes`、`tls_cert / tls_key`、
 > `rate_limit_per_second`。传输层落地后它们都真的产生行为了：

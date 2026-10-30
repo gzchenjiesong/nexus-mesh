@@ -359,7 +359,7 @@ NXS_OPS_SECRET    全权，只留在 mesh 进程本机
 | `can_delegate_to` / `MX-DELEGATE-04` | — | — | 先删，有转发需求再加 |
 | `local_node` 配置 + `_pulse_local_node()` | — | — | mesh 退出节点表 |
 
-### 错误码：27 → 23
+### 错误码：27 → 24
 
 **⚠ 一处需要修正的早期判断**
 
@@ -382,15 +382,15 @@ NXS_OPS_SECRET    全权，只留在 mesh 进程本机
 |---|---|
 | 删 | `QT-TASK-01` · `QT-BYTE-02` · `QT-BYTE-03` · `MX-DELEGATE-04` · `QT-CONC-05` |
 | **拆分** | `MX-RECEIVE-03` → 按真实语义一分为三（见下） |
-| 新增 | `QT-BACKLOG-07`（信箱深度）· `AU-APPROVE-05`（未批准） |
+| 新增 | `QT-BACKLOG-07`（信箱深度）· `AU-APPROVE-05`（未批准）· `QT-PAUSED-08`（目标自报暂停） |
 | 保留但**语义变更** | `MX-DOMAIN-02` → 纯可达性（不再兼管类型）<br>`WL-TYPE-404` → 类型未定义（不再是"没节点声明"）<br>`MX-ISSUER-01` → 判据简化为 role 可否发布 |
 | 保留（Mesh 自保） | `QT-RATE-04` · `QT-CONN-06` |
 
-### `UNIMPLEMENTED` 清单：7 项 → 归零
+### `UNIMPLEMENTED` 清单：12 项 → 1 项
 
 | 原清单项 | 新归宿 |
 |---|---|
-| `params_schema` 不校验 | ✅ **可以真正开始校验**——类型全局定义后，校验方与定义方是同一个 |
+| `params_schema` 不校验 | ✅ **已真正接线**（Step 6）——类型全局定义后，校验方与定义方是同一个 |
 | `bytes_per_response` 不生效 | 配置项删除，配额归节点 |
 | `bytes_per_day` 不生效 | 同上 |
 | `roles.relay` | 字段消失 |
@@ -398,9 +398,21 @@ NXS_OPS_SECRET    全权，只留在 mesh 进程本机
 | `roles.executor` | 字段消失 |
 | `roles.human_interface` | 字段消失 |
 
-**归零的根源是归属清晰了。** 以前 `params_schema` 不生效，是因为
-「每个节点各说一套 schema，谁也不知道该信哪份」。这是这轮设计
+**清单从 12 项降到 1 项，根源是归属清晰了。** 以前 `params_schema` 不生效，
+是因为「每个节点各说一套 schema，谁也不知道该信哪份」。这是这轮设计
 最实在的收益——**不是加功能，是把原来悬空的东西落地**。
+
+### 唯一剩下的一项：广播
+
+| 项 | 状态 |
+|---|---|
+| `TypeDecl.delivery` | ⬜ 配 `broadcast` 不会真的广播，所有任务按单播处理 |
+
+**为什么留着**：广播展开需要先定「N 个结果怎么返回给调用方」（task group），
+那是协议层的设计，不是本轮改造的范围。**按约定作为后续扩展 feature。**
+
+它留在 `UNIMPLEMENTED` 里而不是悄悄实现一半 —— 这条清单的意义正是
+「说不清就别让它看起来能用」。
 
 ---
 

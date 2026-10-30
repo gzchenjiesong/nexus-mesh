@@ -288,9 +288,34 @@ class TestNumberClaims:
         #   中文数字（"九步"）—— 两种写法都要认。
         #   我第一版只查中文，结果 Makefile 明明写对了却报"没提到九步"。
         def _mentions(text: str, n: int) -> bool:
+            """文本里是否把 n 当作 **demo 总步数** 提到。
+
+            ⚠ 不能只查 `f"{n} 步" in text` —— 会误伤两种写法：
+
+                「第 4–7 步是安全断言」  ← 7 是**序号**，不是总数
+                「第 7 步」               ← 同上
+
+            第一版就是这么写的，然后在 README 的
+            「第 4–7 步是四条安全断言」上报了假警。
+            **检查太宽和太窄一样有害**：假警多了，人就会把它关掉。
+            """
             word = zh.get(n)
-            return (f"{n} 步" in text) or (f"{n}步" in text) or \
-                   (word is not None and f"{word}步" in text)
+            candidates = [f"{n}步", f"{n} 步"]
+            if word:
+                candidates.append(f"{word}步")
+
+            for pat in candidates:
+                start = 0
+                while True:
+                    i = text.find(pat, start)
+                    if i < 0:
+                        break
+                    # 往前看几个字符，排除序号与范围写法
+                    pre = text[max(0, i - 6):i]
+                    if not any(mark in pre for mark in ("第", "–", "-", "—")):
+                        return True
+                    start = i + 1
+            return False
 
         stale_mk = [n for n in zh if n != actual_steps and _mentions(makefile, n)]
         assert not stale_mk, (
@@ -299,6 +324,45 @@ class TestNumberClaims:
         assert _mentions(makefile, actual_steps), (
             f"Makefile 没有提到实际步数（{actual_steps} 步）"
             f"—— help 文本应与 demo 一致"
+        )
+
+        # ---- 其余"同一个事实"的副本 ----
+        #
+        # ⚠ **2026-10-30 的教训：上面那段注释讲的就是「只守一处会给别处
+        #   发免检证」，而它自己只守了 README 与 Makefile 两处。**
+        #   改九步→十步时又漏了七处：
+        #
+        #       docs/acceptance-guide.md   4 处「九步」（验收手册！）
+        #       nxs/__main__.py            3 处 CLI help 文本「九步」
+        #
+        #   验收手册与 `--help` 都是**使用者直接照着做**的东西，
+        #   过时比设计文档过时更误导人。
+        #
+        # 所以范围一次扩全：凡声明 demo 步数的文件都进这张表。
+        # 加新文件进来是**有代价的承诺**，但漏掉它的代价更大。
+        STEP_CLAIMANTS = (
+            "README.md",
+            "Makefile",
+            "docs/acceptance-guide.md",
+            "nxs/__main__.py",
+        )
+
+        bad: list[str] = []
+        for rel in STEP_CLAIMANTS:
+            path = REPO_ROOT / rel
+            if not path.exists():
+                bad.append(f"{rel}: 文件不存在（清单过时了？）")
+                continue
+            body = path.read_text(encoding="utf-8")
+            wrong = [n for n in zh if n != actual_steps and _mentions(body, n)]
+            if wrong:
+                bad.append(f"{rel}: 出现过时步数 {wrong}")
+
+        assert not bad, (
+            f"这些文件里的 demo 步数与实际（{actual_steps} 步）不一致：\n  "
+            + "\n  ".join(bad)
+            + "\n\n  ⚠ 步数是「同一个事实写多处」的典型：只守一处，"
+            "等于给别处发免检证。"
         )
 
 
@@ -1174,4 +1238,183 @@ class TestNoDuplicateSections:
                 f"  {n}:\n    实际 {a}\n    应为 {e}"
                 for n, a, e in problems
             )
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6. 死词汇：改造删掉的旧字段不能再出现在描述性文档里
+# ---------------------------------------------------------------------------
+
+class TestNoDeadVocabulary:
+    """★★ 权限模型改造删掉的旧字段，不能再出现在描述性文档里。
+
+    ## 这条测试的来历
+
+    `docs/design/07` §8 写过一段计划：
+
+    > 不靠自觉。加一条测试 `test_no_dead_vocabulary_in_docs`：
+    > **PENDING 清空 = 文档改完**，这比口头确认可靠。
+    > 且它在 CI 里会一直提醒，不会因为「这次先凑合」而无声腐烂。
+
+    **但它从未落地** —— 只作为代码片段留在设计文档里。于是改造期间
+    「14 / 16 份文档已改完」这个结论一直是靠人工扫描支撑的，
+    而人工扫描正是那句话说的「不可靠」的那一种。
+
+    这份文档整理补上了它。而且比原计划更严：**没有 PENDING 白名单**。
+    原计划留白名单是因为改造尚未完成；现在完成了，任何命中都必须处理。
+
+    ## 为什么要用「字段路径级」的词表
+
+    不用 `quota` 这种裸词 —— 它在讲历史教训的段落里是必要内容。
+    只列**精确到字段路径的旧写法**：`quota.tasks_per_day` 这类。
+    讲"这个字段为什么被删"时不会碰巧写出完整路径。
+
+    确需引用旧写法时，在那一行加 `<!-- ok:describes-removed -->`。
+    `docs/protocol.md` 里已有先例。
+
+    ## 刻意豁免的文件
+
+    * **历史快照**：`CHANGELOG` / `docs-audit` / `03` / `04` ——
+      正确性标准是"如实反映当时"，改了反而失真
+    * **设计文档 `06` / `07` / `08`**：正文引用旧模型是做**前后对照**，
+      删掉这个对照，读者就看不出改造到底改了什么
+    """
+
+    #: 改造删掉/改名的字段路径。
+    #:
+    #: ⚠ 每一项都精确到「对象.字段」，不列裸字段名 ——
+    #:   裸词会误伤讲解历史与对照的段落。
+    DEAD_VOCAB = (
+        # Roles 的 5 个布尔（Step 5c 删除）
+        "roles.issuer", "roles.executor", "roles.relay",
+        "roles.observer", "roles.human_interface",
+        # Constraints 的 3 个字段（Step 5c 删除）
+        "can_issue_types", "can_receive_from", "can_delegate_to",
+        # Quota 的 4 个字段（Step 5b 删除）
+        "quota.tasks_per_day", "quota.bytes_per_response",
+        "quota.bytes_per_day", "quota.concurrent_tasks",
+        # 与 self_limits 合并的那个（Step 5c）
+        "constraints.max_response_level",
+        # mesh 退出节点表（Step 5a）
+        "local_node", "_pulse_local_node",
+        # 拆掉/删掉的错误码（Step 4 / 5c）
+        "MX-RECEIVE-03", "MX-DELEGATE-04", "MX-DELEGATION-TOO-DEEP",
+    )
+
+    #: 描述性文档 —— 应该**已经没有**旧词汇。
+    #:
+    #: 加新文档进这里等于宣称"它描述的是当前系统"。
+    #: 这是有代价的承诺：它从此受这条测试约束。
+    DESCRIPTIVE_DOCS = (
+        "README.md",
+        "CONTRIBUTING.md",
+        "docs/architecture.md",
+        "docs/protocol.md",
+        "docs/acceptance-guide.md",
+        "docs/agent-bridges.md",
+        "docs/hermes-integration.md",
+        "docs/observability.md",
+        "docs/artifact-size.md",
+        "deploy/README.md",
+        "docs/design/01-system-definition.md",
+        "traceability/MATRIX.md",
+    )
+
+    #: 历史快照 —— 豁免。改了反而失真。
+    SNAPSHOT_DOCS = frozenset({
+        "CHANGELOG.md",
+        "docs/docs-audit.md",
+        "docs/design/03-traceability-review.md",
+        "docs/design/04-mvp-plan.md",
+    })
+
+    @covers("M11.F1")
+    def test_descriptive_docs_have_no_dead_vocabulary(self):
+        """★ 描述性文档里不得出现旧字段路径。"""
+        offenders: list[str] = []
+
+        for rel in self.DESCRIPTIVE_DOCS:
+            path = REPO_ROOT / rel
+            if not path.exists():
+                offenders.append(f"{rel}: 文件不存在（清单过时了？）")
+                continue
+            for lineno, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1):
+                if "ok:describes-removed" in line:
+                    continue                    # 行内显式豁免
+                for word in self.DEAD_VOCAB:
+                    if word in line:
+                        offenders.append(
+                            f"{rel}:{lineno} [{word}] {line.strip()[:60]}")
+
+        assert not offenders, (
+            "描述性文档里出现已删除的旧字段：\n  "
+            + "\n  ".join(offenders)
+            + "\n\n  三种处理：\n"
+            "    ① 按新模型改写（多数情况）\n"
+            "    ② 确需引用旧写法 → 那一行加 <!-- ok:describes-removed -->\n"
+            "    ③ 若整份文档是历史快照 → 加进 SNAPSHOT_DOCS 并说明理由\n"
+            "  ⚠ 不要只是为了让它绿就改词表 —— 先判断是文档过时还是词表太宽"
+        )
+
+    @covers("M11.F1")
+    def test_no_pending_whitelist(self):
+        """★★ 不得引入「待改白名单」。
+
+        07 §8 原计划里有 `PENDING = {...}`，边改边删。
+        那是改造期间的权宜；**改造完成后它必须不存在**。
+
+        理由：临时豁免不清掉，等于给这项检查永久免检证 ——
+        而"永久免检"与"没有这项检查"没有区别。
+        """
+        # ⚠ 必须用 AST 查**真正的赋值**，不能只搜字符串 ——
+        #   这个类的 docstring 里就引用了「PENDING 清空」这句话
+        #   （讲它的来历），纯文本搜索会误判。
+        #   第一版就是这么写的，然后它自己红了。
+        import ast
+
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        cls = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, ast.ClassDef) and n.name == "TestNoDeadVocabulary"),
+            None,
+        )
+        assert cls is not None, "找不到 TestNoDeadVocabulary 类"
+
+        for node in cls.body:
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                targets = [node.target.id]
+
+            assert not any(name.startswith("PENDING") for name in targets), (
+                f"TestNoDeadVocabulary 里出现了白名单赋值：{targets}\n"
+                "  改造已结束，不应再有「等以后改」的豁免。\n"
+                "  确需豁免请用行内标记 <!-- ok:describes-removed --> "
+                "或 SNAPSHOT_DOCS，并写清理由。"
+            )
+
+    @covers("M11.F1")
+    def test_snapshot_actually_contains_old_vocab(self):
+        """反向：豁免的历史快照里**应该**还有旧词汇。
+
+        如果某份"历史快照"里一个旧词都搜不到，说明它可能已经被
+        顺手改过了 —— 那它在"如实反映当时"这个标准上是失真的。
+
+        ⚠ 不要求每一份都命中（文件内容各有不同），只做整体提示：
+        若**所有**快照都干净，说明这份豁免清单可能已无必要。
+        """
+        clean = []
+        for rel in self.SNAPSHOT_DOCS:
+            path = REPO_ROOT / rel
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            if not any(w in text for w in self.DEAD_VOCAB):
+                clean.append(rel)
+
+        assert len(clean) < len(self.SNAPSHOT_DOCS), (
+            "所有历史快照里都已没有旧词汇 —— 这份豁免清单可能已无必要，\n"
+            f"  或者这些文件被顺手改写过（那会让它们失真）：{clean}"
         )
