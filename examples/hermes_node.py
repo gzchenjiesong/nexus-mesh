@@ -122,7 +122,7 @@ def build_card(node_id: str, domain: str, *, toolsets: str) -> RoleCard:
         #
         # `role` 必填（Step 5c 起）—— 旧的 roles 布尔与 can_issue_types
         # 已全部删除，角色是能力与权限的唯一来源。
-        "role": "driver",          # 能发也能收
+        "role": "agent",          # 能发也能收
         "may_broadcast": False,    # 不广播：它只做点对点问答
         "self_limits": {
             # 每次任务都烧 token。队列深度收在 5 ——

@@ -1243,6 +1243,37 @@ class _Handler(BaseHTTPRequestHandler):
                           f"card.node_id={card.node_id!r} != signer={sender!r}")
 
         card = self.gw.resolve_domain(card)                 # ③ 域由配置裁定
+
+        # ④ 角色必须已在配置的 roles 表里定义过
+        #
+        # ⚠ **这道校验是实机部署时补的，因为漏它会造出最难查的一类故障。**
+        #
+        # 2026-10-30 首次升级后实测：两个桥接的卡片写着 `role: driver`，
+        # 而生产配置的角色是 hub/agent/worker —— 没有 driver。
+        # 结果：
+        #
+        #     注册成功（200，approved=True）
+        #     但 PolicyEngine.role_of() 返回 None
+        #     → providers_of("agent.ask") 返回空集
+        #     → **没有任何任务能投给它，而它自己看起来一切正常**
+        #
+        # 症状是"A2A 突然不通了"，但每个组件都在说"我健康"。
+        # 这正是改造要消灭的那类静默失效 —— 所以必须在入口拦住。
+        #
+        # 注意与启动校验的分工：`load_config` 校验的是**配置里的**节点；
+        # 自注册节点不在配置里，只能在这里校验。
+        #
+        # roles 表为空时**不拒绝**：那是配置缺段（由 `nxs verify` 提示），
+        # 不是这张卡片的问题。责任要分开。
+        if self.gw.app.config.roles and card.role not in self.gw.app.config.roles:
+            raise _Reject(
+                400, RuleId.FM_CARDCARD_INVALID,
+                f"role {card.role!r} 不在配置的 roles 表里；"
+                f"已定义的角色：{sorted(self.gw.app.config.roles)}。\n"
+                f"  ⚠ 注册进来也发不出、也收不到任何任务 —— 所以在这里拒绝，"
+                f"而不是让它「注册成功但静默无效」。",
+            )
+
         record, outcome = self.gw.app.registry.register_from_node(card)
 
         self.gw.record_registration(sender, outcome, record)

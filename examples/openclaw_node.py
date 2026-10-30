@@ -125,7 +125,7 @@ def build_card(node_id: str, domain: str, *, agent_id: str,
         "heartbeat_interval": 30,
 
         # ---- 权限模型改造 Step 2：新字段（与旧字段并存一个版本周期）----
-        "role": "driver",
+        "role": "agent",
         "may_broadcast": False,
         "self_limits": {
             "max_backlog": 5,        # agent turn 慢，堆积等于白等

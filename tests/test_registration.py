@@ -52,7 +52,7 @@ from nxs.mgmt.config import ServerConfig
 # ---------------------------------------------------------------------------
 
 def make_card(node_id: str = "work-laptop", *, domain: str = "zone-work",
-              level: str = "summary") -> RoleCard:
+              level: str = "summary", role: str = "worker") -> RoleCard:
     """造一张**确定性**的角色卡。
 
     ⚠ 确定性很重要：卡片里若含时间戳或随机串，每次重启都会"卡片变了"，
@@ -63,7 +63,8 @@ def make_card(node_id: str = "work-laptop", *, domain: str = "zone-work",
         "domain": domain,
         "display_name": "Company Laptop",
         "heartbeat_interval": 30,
-        "role": "worker","capabilities": [{
+        "role": role,
+        "capabilities": [{
             "type": "work.calendar",
             "level": level,
             "mode": "sync",
@@ -447,3 +448,66 @@ class TestRegistryLayer:
         reg = Registry(MemoryRegistryStore())
         record = reg.register(make_card(), approved=True)
         assert record.approved is True
+
+
+class TestRoleMustExistInConfig:
+    """★★ 自注册节点的 role 必须已在配置的 roles 表里定义。
+
+    ⚠ **这条守护是 2026-10-30 实机升级时补的，来自一次真实故障。**
+
+    首次升级后两个桥接的卡片写着 `role: driver`，而生产配置的角色是
+    `hub` / `agent` / `worker` —— 没有 `driver`。结果：
+
+        注册成功（200，approved=True，revision 正常递增）
+        但 PolicyEngine.role_of() 返回 None
+        → providers_of("agent.ask") 返回空集
+        → **没有任何任务能投给它，而它自己看起来一切正常**
+
+    症状是「A2A 突然不通了」，而每个组件都在报健康。
+    **这正是这轮改造要消灭的那类静默失效** —— 所以必须在入口拦住。
+
+    它为什么没被启动校验抓到：`load_config` 校验的是**配置里的**节点
+    （生产只有 coordinator），自注册节点压根不在其中。
+    """
+
+    @covers("M3.F2")
+    def test_unknown_role_is_rejected_at_registration(self, work_client, app):
+        """卡片里写配置中没有的角色 → 注册被拒，**且节点没有进注册表**。
+
+        ⚠ 断言用「行为」而不是「错误消息内容」：`to_wire()` 只回 rule_id，
+        client 侧拿到的 detail 就是 `http 400` —— 这是**有意的设计**
+        （对外不泄露细节，否则错误响应本身成了探测通道）。
+
+        我第一版断言 detail 里含角色名，那是在要求一个设计上不该存在的东西。
+        真正要保证的是：**拒了，而且真的没进去**。
+        """
+        from nxs.core.errors import PolicyDenied, RuleId
+
+        with pytest.raises(PolicyDenied) as ei:
+            work_client.register(make_card(role="nonexistent-role"))
+        assert ei.value.rule_id == RuleId.FM_CARDCARD_INVALID
+
+        # 关键：确实没被注册进去 —— 否则"拒了"只是表面现象
+        assert app.registry.record("work-laptop") is None, (
+            "注册被拒了，但节点却进了注册表 —— 那它会处于"
+            "「在表里但发不出也收不到」的静默失效状态"
+        )
+
+    @covers("M3.F2")
+    def test_known_role_is_accepted(self, work_client):
+        """配置里有的角色 → 正常注册。"""
+        result = work_client.register(make_card(role="worker"))
+        assert result["outcome"] == REGISTER_CREATED
+
+    @covers("M3.F2")
+    def test_empty_roles_table_does_not_reject(self, work_client, app):
+        """配置里没有 roles 段 → 不因角色问题拒绝注册。
+
+        ⚠ 责任要分开：缺 `roles:` 段是**配置问题**，由 `nxs verify` 提示；
+        这张卡片本身没有错。在注册入口替配置背锅，会让人查错方向。
+        """
+        import dataclasses
+
+        app.config = dataclasses.replace(app.config, roles={})
+        result = work_client.register(make_card(role="an-undefined-role"))
+        assert result["outcome"] == REGISTER_CREATED
