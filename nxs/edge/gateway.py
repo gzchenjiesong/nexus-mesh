@@ -328,6 +328,19 @@ class Gateway:
     #: ``ops/audit`` 的默认条数。与观察窗默认值一致，避免"要了才发现不够"。
     OPS_AUDIT_DEFAULT_LIMIT = 100
 
+    #: 滤心跳时把读取窗口放大的倍数。
+    #:
+    #: 实测心跳密度：3 个节点 × 每 30 秒 ≈ 每 10 秒一条。
+    #: 要 100 条有用事件，按最坏情况（全是心跳）需要往回收 10 倍。
+    #: 实际很少打满 —— 有任务时心跳占比会低得多。
+    HEARTBEAT_SCAN_FACTOR = 10
+
+    #: 放大后的扫描硬上限。
+    #:
+    #: 防止 ``limit=1000 × 10 = 10000`` 行（约 3 MB）一次读进来。
+    #: 2000 行约 600 KB，尾部读仍是毫秒级，但也不会失控。
+    OPS_AUDIT_MAX_SCAN = 2000
+
     def __init__(self, app: NexusApp, *,
                  server_config: ServerConfig | None = None,
                  authenticator: Authenticator | None = None,
@@ -1246,6 +1259,36 @@ class _Handler(BaseHTTPRequestHandler):
 
         所以这次返回的是"运行日志"，不是"任务产出"。
         展示产出是另一个安全等级，不在这个端点、也不在观察窗里。
+
+        ## ⚠⚠ 心跳必须被过滤（2026-10-30 实机发现）
+
+        上线后立刻暴露：**最近 100 条审计 100% 是 ``register:unchanged``**
+        （纯心跳），一条任务事件都没有。
+
+        原因很直白：3 个节点每 30 秒各心跳一次 ≈ 每 10 秒一条心跳。
+        100 条的窗口只覆盖约 **17 分钟** ——
+        **一次故障只要发生在 17 分钟前，它的记录就已经被心跳挤出窗口了。**
+
+        也就是说：不过滤的话，这个"运行日志"在真正需要它的时候
+        （回顾半小时前发生了什么）恰好什么都看不到。
+        而它存在的唯一理由就是那一刻。
+
+        ### 处理方式：采集时过滤，而不是渲染时隐藏
+
+        前端过滤不行 —— 尾部读只取 100 行，若这 100 行全是心跳，
+        前端滤完就是空白，**真事件根本没被读到**。
+
+        所以这里读一个放大后的窗口（``limit × HEARTBEAT_SCAN_FACTOR``），
+        滤掉心跳，再取最后 ``limit`` 条。
+
+        ### 但不静默丢弃
+
+        返回 ``filtered_heartbeats`` 与 ``scanned`` 说明滤掉了多少、
+        总共扫了多少行。**"被过滤"和"不存在"必须能区分** ——
+        否则人会以为节点没在心跳，反而更困惑。
+
+        需要看心跳本身时（排查"心跳到底通不通"）传
+        ``include_heartbeat: true``。
         """
         raw = payload.get("limit", self.gw.OPS_AUDIT_DEFAULT_LIMIT)
         try:
@@ -1253,6 +1296,8 @@ class _Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             self._reject_status(400, f"limit 必须是整数，收到 {raw!r}")
             return {"error": "unreachable"}      # pragma: no cover
+
+        include_hb = bool(payload.get("include_heartbeat", False))
 
         if limit <= 0:
             # 0 或负数理解为"不要记录"，返回空列表比 400 更友好。
@@ -1264,11 +1309,33 @@ class _Handler(BaseHTTPRequestHandler):
             return {
                 "records": [], "limit": 0, "truncated": False,
                 "max_limit": self.gw.OPS_AUDIT_MAX_LIMIT,
+                "scanned": 0, "filtered_heartbeats": 0,
+                "include_heartbeat": include_hb,
             }
 
         capped = min(limit, self.gw.OPS_AUDIT_MAX_LIMIT)
 
-        records = list(self.gw.app.audit.read_recent(limit=capped))
+        # 读多大的窗口：要够滤掉心跳后还剩 capped 条。
+        # 用放大系数而不是"直接读上限"，是为了小请求也便宜
+        # （要 10 条就别扫 2000 行）。
+        scan = capped if include_hb else min(
+            capped * self.gw.HEARTBEAT_SCAN_FACTOR,
+            self.gw.OPS_AUDIT_MAX_SCAN)
+
+        rows = list(self.gw.app.audit.read_recent(limit=scan))
+        scanned = len(rows)
+
+        filtered = 0
+        if not include_hb:
+            kept = []
+            for r in rows:
+                if r.get("outcome") == "register:unchanged":
+                    filtered += 1
+                    continue
+                kept.append(r)
+            rows = kept
+
+        records = rows[-capped:]
 
         return {
             "records": records,
@@ -1278,6 +1345,12 @@ class _Handler(BaseHTTPRequestHandler):
             #: 请求被截断时标出来，便于调用方决定是否分页
             "truncated": limit > capped,
             "max_limit": self.gw.OPS_AUDIT_MAX_LIMIT,
+            #: 实际扫了多少行（放大窗口的真实大小）
+            "scanned": scanned,
+            #: 滤掉了多少条心跳。**非零并不代表出错**，
+            #: 而是说明"这段时间节点很健康"。
+            "filtered_heartbeats": filtered,
+            "include_heartbeat": include_hb,
         }
 
     def _authenticate_ops(self, full_path: str, body: bytes) -> str:

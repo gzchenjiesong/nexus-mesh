@@ -203,6 +203,10 @@ class UiServer:
             #: 审计被服务端截断时的标记 —— 不显示出来的话，
             #: 人会以为"只有这么多"，而实际是被上限砍了。
             "audit_truncated": False,
+            #: 被滤掉的纯心跳条数。**必须显示出来** ——
+            #: 否则人会疑惑"节点明明每 30 秒心跳，怎么日志里一条都没有"。
+            #: 非零不代表出错，而是"这段时间没发生任务"。
+            "audit_heartbeats": 0,
             "error": None,
         }
         try:
@@ -219,6 +223,8 @@ class UiServer:
             audit = self._ops.audit(limit=self.AUDIT_LIMIT)
             out["audit"] = list(audit.get("records") or [])
             out["audit_truncated"] = bool(audit.get("truncated"))
+            out["audit_heartbeats"] = int(
+                audit.get("filtered_heartbeats") or 0)
         except Exception as exc:  # noqa: BLE001
             # ⚠ 审计拿不到**不能**影响前两块。
             #   常见原因：旧版 coordinator 没有这个端点（501）、

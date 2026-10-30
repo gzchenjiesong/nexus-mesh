@@ -457,14 +457,27 @@ function outcomeKey(o) {
   return String(o || "").split(":")[0];
 }
 
-function renderAudit(records, truncated) {
+function renderAudit(records, truncated, heartbeats) {
   const host = document.getElementById("audit");
   const stamp = document.getElementById("logstamp");
   host.replaceChildren();
-  stamp.textContent = records.length ? "（最近 " + records.length + " 条）" : "";
+
+  // 标题右边注明条数与"滤掉了多少心跳"。
+  //
+  // ⚠ 必须说出来。节点每 30 秒心跳一次，若日志里一条心跳都没有
+  //   却没解释，人会以为"心跳停了"或"日志坏了"——
+  //   而事实恰恰相反：**滤掉得多 = 这段时间没发生任务 = 一切正常**。
+  const parts = [];
+  if (records.length) parts.push("最近 " + records.length + " 条");
+  if (heartbeats > 0) parts.push("已滤 " + heartbeats + " 条心跳");
+  stamp.textContent = parts.length ? "（" + parts.join(" · ") + "）" : "";
 
   if (!records.length) {
-    host.appendChild(el("div", "log-empty", "暂无审计记录。"));
+    // 空列表有两种含义，别混成一句
+    host.appendChild(el("div", "log-empty",
+      heartbeats > 0
+        ? "这段时间只有心跳（" + heartbeats + " 条），没有任务事件。"
+        : "暂无审计记录。"));
     return;
   }
 
@@ -602,7 +615,7 @@ async function refresh() {
     renderNodes(nodes);
     renderDenials(data.metrics);
     renderByType(data.metrics);
-    renderAudit(data.audit || [], data.audit_truncated);
+    renderAudit(data.audit || [], data.audit_truncated, data.audit_heartbeats);
     renderAnomalies(data.metrics ? data.metrics.anomalies : []);
     document.getElementById("stamp").textContent =
       "最后更新 " + new Date().toLocaleTimeString("zh-CN");

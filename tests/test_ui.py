@@ -1216,3 +1216,144 @@ class TestPageRendersNewSections:
                 "  必须用 textContent —— 它从结构上不解析标记，\n"
                 "  而不是「小心避开了危险路径」。"
             )
+
+
+class TestHeartbeatNoiseIsFiltered:
+    """★★ 纯心跳必须被滤掉，否则运行日志毫无用处。
+
+    ⚠⚠ **这是上线后立刻暴露的问题（2026-10-30）。**
+
+    功能刚上线，用真实生产数据一看：
+
+        最近 100 条审计的 outcome 分布
+        register:unchanged       100 条
+
+    **100% 是心跳，一条任务事件都没有。**
+
+    原因：3 个节点 × 每 30 秒心跳 ≈ 每 10 秒一条。
+    100 条的窗口只覆盖约 **17 分钟** ——
+    一次故障只要发生在 17 分钟前，记录就已经被心跳挤出窗口了。
+
+    讽刺的是：这个"运行日志"存在的唯一理由，就是回顾"半小时前发生了什么"。
+    **不过滤的话，它在最需要的那一刻恰好什么都看不到。**
+
+    ## 为什么必须在采集时滤，不能在前端滤
+
+    尾部读只取 100 行。若这 100 行全是心跳，前端滤完就是空白 ——
+    **真正的任务事件根本没被读到。** 所以服务端要读放大后的窗口，
+    滤掉心跳后再取 100 条。
+    """
+
+    @pytest.fixture
+    def noisy_coordinator(self):
+        """一个有大量心跳、少量真事件的 coordinator。"""
+        from conftest import EXAMPLE_CONFIG, demo_env
+        from nxs.app import NexusApp
+        from nxs.edge.gateway import Gateway
+        from nxs.mgmt.config import ServerConfig
+
+        app = NexusApp.from_config_path(
+            str(EXAMPLE_CONFIG), env=demo_env(), force_memory=True)
+        app.start()
+        gw = Gateway(app, server_config=ServerConfig(host="127.0.0.1", port=0),
+                     ops_secret=SECRET).start()
+        # 200 心跳 → 5 真事件 → 50 心跳（真事件被噪音夹在中间）
+        for _ in range(200):
+            app.record(outcome="register:unchanged",
+                       from_node="n1", to_node="n1")
+        for out in ("completed", "failed", "denied",
+                    "ops:approve", "register:created"):
+            app.record(outcome=out, from_node="a", to_node="b",
+                       task_type="work.query")
+        for _ in range(50):
+            app.record(outcome="register:unchanged",
+                       from_node="n1", to_node="n1")
+        yield gw.base_url, app
+        gw.stop()
+
+    @covers("M15.F9")
+    def test_heartbeats_are_filtered_by_default(self, noisy_coordinator):
+        """★ 默认请求里不该有 register:unchanged。"""
+        from nxs.edge.client import OpsClient
+
+        base, _ = noisy_coordinator
+        got = OpsClient(base, secret=SECRET).audit(limit=20)
+
+        outcomes = [r.get("outcome") for r in got["records"]]
+        assert "register:unchanged" not in outcomes, (
+            f"心跳没被滤掉：{outcomes}\n"
+            "  100 条窗口会被心跳填满，真事件反而看不到"
+        )
+
+    @covers("M15.F9")
+    def test_real_events_are_recovered_from_noise(self, noisy_coordinator):
+        """★★ 被 250 条心跳埋住的 5 条真事件必须能捞出来。
+
+        这是核心价值：不放大窗口的话，一次 limit=5 的请求
+        只会拿到 5 条心跳，而那 5 条真事件在 250 条噪音的中间。
+        """
+        from nxs.edge.client import OpsClient
+
+        base, _ = noisy_coordinator
+        got = OpsClient(base, secret=SECRET).audit(limit=10)
+
+        outcomes = {r.get("outcome") for r in got["records"]}
+        expected = {"completed", "failed", "denied",
+                    "ops:approve", "register:created"}
+        assert expected <= outcomes, (
+            f"真事件没被捞全。拿到 {outcomes}，应有 {expected}\n"
+            "  说明扫描窗口没放大，只看到了最近的心跳"
+        )
+
+    @covers("M15.F9")
+    def test_reports_how_many_were_filtered(self, noisy_coordinator):
+        """★ 必须报告滤掉多少 —— 「被过滤」与「不存在」要能区分。
+
+        否则人会疑惑"节点明明每 30 秒心跳，日志里怎么一条都没有"，
+        进而怀疑心跳机制坏了。而事实恰恰相反。
+        """
+        from nxs.edge.client import OpsClient
+
+        base, _ = noisy_coordinator
+        got = OpsClient(base, secret=SECRET).audit(limit=10)
+        assert got["filtered_heartbeats"] > 0, (
+            "滤掉了心跳却没报告数量 —— 人会以为心跳停了"
+        )
+        assert got["scanned"] >= got["filtered_heartbeats"]
+
+    @covers("M15.F9")
+    def test_can_include_heartbeat_on_demand(self, noisy_coordinator):
+        """需要排查"心跳到底通不通"时，必须能看到心跳。"""
+        from nxs.edge.client import OpsClient
+
+        base, _ = noisy_coordinator
+        got = OpsClient(base, secret=SECRET).audit(
+            limit=5, include_heartbeat=True)
+        outcomes = [r.get("outcome") for r in got["records"]]
+        assert outcomes and all(o == "register:unchanged" for o in outcomes), (
+            f"include_heartbeat=True 时应看到心跳，实际 {outcomes}"
+        )
+        assert got["filtered_heartbeats"] == 0
+
+    @covers("M15.F9")
+    def test_snapshot_surfaces_heartbeat_count(self, live_coordinator):
+        """snapshot 要把心跳数传给前端 —— 否则页面无法解释"为什么没日志"。"""
+        from nxs.ui.server import UiServer
+
+        srv = UiServer(live_coordinator, SECRET, port=0).start()
+        try:
+            snap = srv.snapshot()
+            assert "audit_heartbeats" in snap, (
+                "snapshot 没带 audit_heartbeats —— 前端无法说明"
+                "「日志为空是因为只有心跳」"
+            )
+        finally:
+            srv.stop()
+
+    @covers("M15.F10")
+    def test_page_shows_heartbeat_count(self):
+        """页面要显示"已滤 N 条心跳"。"""
+        assert "audit_heartbeats" in SHELL or "heartbeats" in SHELL, (
+            "前端没接收心跳数 —— 空日志时无法解释原因"
+        )
+        assert "心跳" in SHELL

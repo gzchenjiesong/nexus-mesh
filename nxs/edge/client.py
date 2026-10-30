@@ -482,7 +482,8 @@ class OpsClient:
         """
         return self._post("metrics", {})
 
-    def audit(self, limit: int = 100) -> Mapping[str, Any]:
+    def audit(self, limit: int = 100, *,
+              include_heartbeat: bool = False) -> Mapping[str, Any]:
         """读取最近的审计记录。**只读，且只含元信息。**
 
         返回 ``{"records": [...], "limit": 实际条数,
@@ -494,6 +495,17 @@ class OpsClient:
         **不告诉调用方就会让人以为"审计只有 1000 条"** ——
         那会导致误判"运行很空闲"。所以这两个字段必须回传。
 
+        ## 默认滤掉心跳（``include_heartbeat``）
+
+        节点每 30 秒心跳一次，3 个节点 ≈ 每 10 秒一条 ``register:unchanged``。
+        实机上线后实测：最近 100 条审计 **100% 是心跳**，一条任务事件都没有 ——
+        100 条只覆盖约 17 分钟，**半小时前的事故记录已被挤出窗口**。
+
+        所以默认滤掉心跳，并在 ``filtered_heartbeats`` 里报告滤了多少
+        （非零不代表出错，而是"这段时间节点很健康"）。
+
+        排查"心跳到底通不通"时传 ``include_heartbeat=True``。
+
         ## 不含业务内容
 
         审计记录按设计只写元信息（时间、谁→谁、类型、成败、错误码、
@@ -503,7 +515,12 @@ class OpsClient:
         所以拿这个接口给观察窗看"运行日志"是安全的；
         但**不要**指望它能当"任务详情"用，那需要另一个安全等级的设计。
         """
-        return self._post("audit", {"limit": int(limit)})
+        return self._post("audit", {
+            "limit": int(limit),
+            #: 默认滤掉纯心跳（register:unchanged）。
+            #: 排查"心跳到底通不通"时才置 True。
+            "include_heartbeat": bool(include_heartbeat),
+        })
 
 
 __all__ = ["DEFAULT_TIMEOUT_SECONDS", "HttpTransport", "OpsClient"]
