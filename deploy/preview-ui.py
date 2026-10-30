@@ -1,8 +1,28 @@
 """生成观察窗静态预览（不连服务，用假数据渲染）。
 
 为什么需要这个：改前端后「代码看着对」不等于「渲染对」。
-这个脚本把真实形状的数据注入页面，再用浏览器读回渲染结果 ——
-比看截图更精确，也能捕获 JS 运行时错误。
+
+它把一份**真实形状**的 `/api/state` 数据注入 `SHELL`，输出一个
+不依赖后端的静态 HTML。配合浏览器可以：
+
+    python3 deploy/preview-ui.py          # → /tmp/ui-preview.html
+    npx playwright screenshot --full-page \\
+        file:///tmp/ui-preview.html /tmp/ui.png
+
+也可以读回渲染后的 DOM（比看截图精确，还能捕获 JS 运行时错误）：
+
+    // verify.js
+    const rows = await page.evaluate(() =>
+      [...document.querySelectorAll('#nodes tr')].map(tr => tr.innerText));
+
+## 为什么假数据要写在代码里而不是外部 JSON
+
+它同时是**前端数据契约的参考实现** —— 字段名和嵌套形状与
+`UiServer.snapshot()` 的真实返回一致。改后端返回形状时，
+先改这里，页面渲染会立刻暴露不匹配。
+
+⚠ 数据按**真实顺序**写：审计数组是升序（最早在前），前端
+`reverse()` 之后才是"最新在最上面"。写反了会出现"日志倒序"的假象。
 """
 
 import json
