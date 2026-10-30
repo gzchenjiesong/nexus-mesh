@@ -461,14 +461,68 @@ class NodeClient:
         #   详见 `_start_heartbeat_thread` 的说明。
         self._start_heartbeat_thread()
 
+        #: 连续失败次数，用于指数退避。成功一次就归零。
+        consecutive_errors = 0
+
         try:
             while True:
                 if should_stop is not None and should_stop():
                     return
+
                 try:
                     task = self.run_once()
                 except PolicyDenied:
                     task = None       # 已被记录，继续下一轮
+                except Exception as exc:      # noqa: BLE001
+                    # ⚠⚠ **常驻节点绝不能因为一次网络抖动就退出。**
+                    #
+                    #   2026-10-30 实机：进程跑了 43 分钟后自己死了。
+                    #   死因是一次 `poll()` 的 TLS 握手超时：
+                    #
+                    #       urllib.error.URLError:
+                    #         <urlopen error _ssl.c:1015:
+                    #          The handshake operation timed out>
+                    #
+                    #   而 `run_once` 只 catch `PolicyDenied` ——
+                    #   **网络层异常一路上冒到 main，进程退出**。
+                    #
+                    #   为什么这是最严重的一类：
+                    #   前两个 bug（心跳阻塞、错误被掩盖）只是"某次任务失败"；
+                    #   这个是"节点消失"。而桥接通常由 systemd/launchd 拉起，
+                    #   一旦进程死了，**要等人发现才会重启** ——
+                    #   期间它既不在线也无人知晓，只有服务端一条 stale。
+                    #
+                    #   网络抖动是**常态**（本机 Wi-Fi 切换、笔记本休眠唤醒、
+                    #   云服务器偶发抖动）。用"抖动即退出"来应对常态，
+                    #   等于让节点大部分时间处于离线。
+                    consecutive_errors += 1
+
+                    # 指数退避：1s → 2s → 4s → … 上限 30s。
+                    #
+                    # ⚠ 必须退避，不能"立刻重试"：服务端挂了的时候
+                    #   紧循环重试等于每秒几十次无用连接，
+                    #   而且会让日志瞬间被灌满、把真正的错误淹掉。
+                    delay = min(2 ** min(consecutive_errors - 1, 5), 30)
+                    self._log.error(
+                        "[%s] 轮询失败（连续 %d 次，%.0fs 后重试）：%s: %s",
+                        self.config.node_id, consecutive_errors, delay,
+                        type(exc).__name__, exc,
+                    )
+                    # 首次失败给完整栈，便于区分"网络抖动"与"代码 bug"。
+                    # 后续只给一行 —— 否则日志会被同一个栈刷满。
+                    if consecutive_errors == 1:
+                        self._log.debug("首次失败的完整栈：", exc_info=True)
+                    time.sleep(delay)
+                    continue
+
+                if consecutive_errors:
+                    # 恢复：明确记一笔。否则"曾经断过多久"无从判断。
+                    self._log.info(
+                        "[%s] 轮询恢复正常（此前连续失败 %d 次）",
+                        self.config.node_id, consecutive_errors,
+                    )
+                    consecutive_errors = 0
+
                 if task is None:
                     time.sleep(self.config.poll_interval)
         finally:

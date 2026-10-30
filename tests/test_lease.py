@@ -608,3 +608,198 @@ class TestHeartbeatIsNotBlockedByLongTask:
             assert client._hb_thread.is_alive()
         finally:
             client.stop()
+
+
+class TestTransientNetworkErrorDoesNotKillNode:
+    """★★★ 一次网络抖动**不能**让常驻节点退出。
+
+    ⚠⚠ **这是实机最严重的一个 bug（2026-10-30）。**
+
+    本机 work-macbook 跑了 43 分钟后自己死了，死因：
+
+        urllib.error.URLError:
+          <urlopen error _ssl.c:1015: The handshake operation timed out>
+
+    而 `run_forever` 只 catch `PolicyDenied` —— **网络层异常一路上冒到
+    main，进程 SystemExit(1)**。
+
+    ## 为什么这类比前两个 bug 严重得多
+
+    | bug | 后果 |
+    |---|---|
+    | 心跳被长任务阻塞 | 某次投递被拒，任务照常完成 |
+    | 退出码 0 掩盖真因 | 报错误导，但节点还在 |
+    | **网络抖动杀死进程** | **节点消失** |
+
+    桥接通常由 systemd / launchd 拉起。进程一死，**要等人发现才重启** ——
+    期间它既不在线、也无人知晓，服务端只留一条 stale。
+
+    ## 为什么必须当成常态处理
+
+    网络抖动不是异常情况：Wi-Fi 切换、笔记本合盖唤醒、云主机偶发抖动、
+    TLS 会话重协商 —— 任何一项都会产生一次 `URLError`。
+    **用"抖动即退出"应对常态，等于让节点大部分时间离线。**
+    """
+
+    @covers("M7.F11")
+    def test_poll_error_is_survived_and_retried(self):
+        """poll 抛 URLError 后，循环继续，后续能正常领任务。"""
+        import threading as _threading
+        import urllib.error
+
+        from nxs.control import make_task
+        from nxs.core.models import RoleCard
+        from nxs.sdk import NodeClient, NodeConfig
+
+        class FlakyTransport:
+            """前 2 次 poll 抛网络错误，第 3 次正常返回一个任务。"""
+
+            def __init__(self):
+                self.poll_calls = 0
+                self.heartbeats = 0
+
+            def register(self, card):
+                self.heartbeats += 1
+                return {"outcome": "unchanged", "approved": True}
+
+            def poll(self, node_id):
+                self.poll_calls += 1
+                if self.poll_calls <= 2:
+                    raise urllib.error.URLError(
+                        "<urlopen error _ssl.c:1015: The handshake "
+                        "operation timed out>"
+                    )
+                if self.poll_calls == 3:
+                    return make_task(
+                        task_id="t-net", idempotency_key="i-net",
+                        task_type="demo.echo", from_node="coordinator",
+                        to_node="node-b", params={"text": "x"},
+                    )
+                return None
+
+            def complete(self, *a, **k):
+                return None
+
+            def fail(self, *a, **k):
+                return None
+
+            def renew(self, task_id):
+                return None
+
+        card = RoleCard.from_dict({
+            "node_id": "node-b", "domain": "zone-a", "display_name": "B",
+            "role": "worker",
+            "self_limits": {"max_response_level": "metadata"},
+            "capabilities": [{"type": "demo.echo", "level": "metadata",
+                              "mode": "sync",
+                              "response_fields": ["echo", "level"]}],
+        })
+
+        tr = FlakyTransport()
+        client = NodeClient(
+            NodeConfig(
+                "node-b",
+                handlers={"demo.echo": lambda p: {"echo": "ok",
+                                                  "level": "metadata"}},
+                levels={"demo.echo": Level.METADATA},
+                card=card,
+                heartbeat_interval=0,     # 本测试不关心心跳
+                renew_interval=0,
+                poll_interval=0.05,
+            ),
+            tr,
+        )
+
+        stop = _threading.Event()
+        crashed: list[BaseException] = []
+
+        def _drive():
+            try:
+                client.run_forever(should_stop=stop.is_set)
+            except BaseException as exc:      # noqa: BLE001
+                crashed.append(exc)
+
+        t = _threading.Thread(target=_drive, daemon=True)
+        t.start()
+
+        # 等它跨过两次失败并处理掉一个任务。
+        # ⚠ 退避是 1s + 2s，所以至少要 3s 才过得去。
+        time.sleep(5.0)
+        stop.set()
+        client._hb_stop.set()
+        t.join(timeout=5)
+
+        assert not crashed, (
+            f"常驻循环死于网络异常：{crashed[0]!r}\n"
+            "  ⚠ 这正是 2026-10-30 那个 bug：一次 TLS 握手超时\n"
+            "     就把节点进程带走，而桥接要等人发现才重启。"
+        )
+        assert tr.poll_calls >= 3, (
+            f"只轮询了 {tr.poll_calls} 次 —— 说明前两次失败后没继续重试"
+        )
+        assert client.processed == 1, (
+            f"网络恢复后没处理到任务（processed={client.processed}）"
+        )
+
+    @covers("M7.F11")
+    def test_repeated_errors_back_off_instead_of_hot_looping(self):
+        """持续失败时必须退避 —— 不能紧循环重试。
+
+        服务端挂掉时，紧循环等于每秒几十次无用连接，
+        且会把日志瞬间灌满、把真正的错误淹掉。
+        """
+        import threading as _threading
+        import urllib.error
+
+        from nxs.core.models import RoleCard
+        from nxs.sdk import NodeClient, NodeConfig
+
+        class DeadTransport:
+            def __init__(self):
+                self.poll_calls = 0
+
+            def register(self, card):
+                return {"outcome": "unchanged", "approved": True}
+
+            def poll(self, node_id):
+                self.poll_calls += 1
+                raise urllib.error.URLError("connection refused")
+
+            def complete(self, *a, **k):
+                return None
+
+            def fail(self, *a, **k):
+                return None
+
+            def renew(self, task_id):
+                return None
+
+        card = RoleCard.from_dict({
+            "node_id": "n-1", "domain": "d", "display_name": "N",
+            "role": "worker", "capabilities": [],
+        })
+        tr = DeadTransport()
+        client = NodeClient(
+            NodeConfig("n-1", handlers={}, levels={}, card=card,
+                       heartbeat_interval=0, renew_interval=0,
+                       poll_interval=0.01),
+            tr,
+        )
+
+        stop = _threading.Event()
+        t = _threading.Thread(
+            target=lambda: client.run_forever(should_stop=stop.is_set),
+            daemon=True,
+        )
+        t.start()
+        time.sleep(4.0)          # 退避 1+2+4=7s，4 秒内只应有 3 次左右
+        stop.set()
+        client._hb_stop.set()
+        t.join(timeout=5)
+
+        # 若紧循环，4 秒内会打几百次（poll_interval=0.01 → 400 次）
+        assert tr.poll_calls <= 6, (
+            f"4 秒内轮询了 {tr.poll_calls} 次 —— 没有退避，在紧循环重试。\n"
+            "  服务端故障时这会制造连接风暴并淹没日志。"
+        )
+        assert tr.poll_calls >= 2, "至少要重试几次，不能一次失败就放弃"
