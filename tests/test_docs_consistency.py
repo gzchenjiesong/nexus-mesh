@@ -1488,3 +1488,90 @@ class TestNoDeadVocabulary:
             "所有历史快照里都已没有旧词汇 —— 这份豁免清单可能已无必要，\n"
             f"  或者这些文件被顺手改写过（那会让它们失真）：{clean}"
         )
+
+
+class TestVersionIsConsistent:
+    """★★ 版本号必须在三处一致，且 CHANGELOG 有对应条目。
+
+    ⚠ **这条来自一次真实疏漏（2026-10-30 整理时发现）。**
+
+    v1.0.4 的提交**忘了升版本号** —— 代码里还是 1.0.3，
+    而 CHANGELOG 已经在写 1.0.4 了。是下一个提交才补的（"版本号补到 1.0.5"）。
+
+    这类疏漏的后果不大但很烦：`nxs --version` 报的版本和
+    实际装的东西对不上，排查时会被误导成"部署没生效"。
+
+    ## 为什么必须三处一起对
+
+         pyproject.toml    —— 打包元数据（pip 装出来的版本）
+         nxs/__init__.py   —— 运行时 `__version__`（`nxs --version` 用）
+         CHANGELOG.md      —— 人查"这个版本有什么"的入口
+
+    前两个不一致 → 装上后报的版本是错的。
+    后一个缺失 → 升了版本但没人知道改了什么。
+    """
+
+    #: 版本号格式：1.1.0 这种两位语义（见 CHANGELOG 的「版本号约定」）
+    _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+
+    def _versions(self) -> dict[str, str]:
+        """从三处读出当前版本。"""
+        import tomllib
+
+        pyproject = REPO_ROOT / "pyproject.toml"
+        with pyproject.open("rb") as fh:
+            meta = tomllib.load(fh)
+        pkg_version = meta["project"]["version"]
+
+        init_text = (REPO_ROOT / "nxs" / "__init__.py").read_text(encoding="utf-8")
+        m = re.search(r'^__version__\s*=\s*"([^"]+)"', init_text, re.M)
+        assert m, "nxs/__init__.py 里找不到 __version__"
+        runtime_version = m.group(1)
+
+        return {"pyproject": pkg_version, "runtime": runtime_version}
+
+    @covers("M11.F1")
+    def test_pyproject_and_runtime_agree(self):
+        """★ `pyproject.toml` 与 `nxs.__version__` 必须一致。
+
+        这两处不一致时 `pip install` 装的版本和 `nxs --version` 报的
+        版本不同 —— 排查"部署有没有生效"时会被误导。
+        """
+        v = self._versions()
+        assert v["pyproject"] == v["runtime"], (
+            f"版本号不一致：pyproject.toml={v['pyproject']!r}，"
+            f"nxs/__init__.py={v['runtime']!r}\n"
+            "  v1.0.4 就漏过一次（代码还是 1.0.3 而 CHANGELOG 已写 1.0.4）。"
+        )
+
+    @covers("M11.F1")
+    def test_version_has_changelog_entry(self):
+        """★ 当前版本必须在 CHANGELOG 里有条目。
+
+        升了版本却没写 CHANGELOG，等于发了个"没人知道改了什么"的版本。
+        """
+        version = self._versions()["pyproject"]
+        assert self._SEMVER.match(version), (
+            f"版本号 {version!r} 不是 x.y.z 形式 —— 见 CHANGELOG 的「版本号约定」"
+        )
+
+        changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        assert f"## [{version}]" in changelog, (
+            f"CHANGELOG.md 里没有 ## [{version}] 这一节。\n"
+            "  升版本时必须同时写：改了什么、升级要做什么迁移。"
+        )
+
+    @covers("M11.F1")
+    def test_changelog_link_defined(self):
+        """★ CHANGELOG 里每个版本标题都要有对应的链接定义。
+
+        Markdown 的 `[1.1.0]: https://...` 是引用式链接的定义。
+        漏了它，标题里的 `[1.1.0]` 会渲染成字面的方括号 ——
+        在 GitHub 上看起来像"这个版本没发布"。
+        """
+        version = self._versions()["pyproject"]
+        changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        assert f"[{version}]:" in changelog, (
+            f"CHANGELOG.md 末尾缺 `[{version}]: https://github.com/.../tag/v{version}`\n"
+            "  漏了它，版本号在 GitHub 上不会变成链接。"
+        )

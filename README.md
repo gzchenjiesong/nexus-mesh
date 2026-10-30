@@ -200,7 +200,7 @@ nxs ops approve node-a --url https://coordinator.example.com/nxs
 
 详见 [`docs/architecture.md`](docs/architecture.md)。
 
-### 已实现（v1.0.7）
+### 已实现（v1.1.0）
 
 | 模块 | 状态 |
 |---|---|
