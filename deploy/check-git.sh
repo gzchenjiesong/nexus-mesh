@@ -3,14 +3,24 @@
 #  check-git.sh —— 检查服务器能否**独立**拉取 nexus-mesh
 # ==============================================================================
 #
-# ⚠ 为什么需要这个检查：
+# ⚠ 关键在「独立」这两个字。判据是：**不依赖任何外部凭据**。
 #
 #   本地用 `ssh -A` 转发 agent 时，服务器能借用你电脑上的 GitHub 凭据 ——
 #   `git fetch` 会成功。但 **systemd / cron / 任何自动化环境里永远没有转发**。
 #
 #   所以只在带 -A 的会话里测，会得出"配好了"的错误结论。
-#   这个脚本用 BatchMode=yes（禁止交互、不用 agent 之外的凭据），
-#   等价于自动化环境的条件。
+#
+#   ## 为什么光加 BatchMode=yes 不够
+#
+#   `BatchMode=yes` 只禁止**交互式**输入（密码、口令），
+#   **它不会禁用 agent**。所以在 -A 会话里跑，checks 照样会通过 ——
+#   因为用了转发的 key。
+#
+#   要真正模拟生产条件，必须显式**关掉 agent**：
+#       -o IdentityAgent=none      （不连 agent socket）
+#       -o IdentitiesOnly=yes      （只用 config 里指定的那一个）
+#
+#   这样测出来的才是「这台机器自己有没有凭据」。
 #
 # 用法：bash /root/nexus-mesh-deploy/check-git.sh
 # ==============================================================================
@@ -19,14 +29,22 @@ set -u
 
 cd /opt/nexus-mesh || { echo "  ✗ /opt/nexus-mesh 不存在"; exit 1; }
 
+#: 模拟生产条件：不交互、不用 agent、只用 config 里那把 deploy key
+SSH_INDEPENDENT=(ssh
+    -o BatchMode=yes
+    -o IdentityAgent=none
+    -o IdentitiesOnly=yes
+    -o ConnectTimeout=10
+)
+
 echo "  仓库: $(pwd)"
 echo "  remote: $(git remote get-url origin)"
 echo "  当前提交: $(git log --oneline -1)"
 echo
 
-# ---- ① GitHub 认证 ----
-echo -n "  GitHub 认证: "
-if out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -T git@github.com 2>&1); then
+# ---- ① GitHub 认证（不借助 agent）----
+echo -n "  GitHub 认证（不用 agent）: "
+if out=$("${SSH_INDEPENDENT[@]}" -T git@github.com 2>&1); then
     echo "$out" | head -1
 else
     echo "✗ 失败"
@@ -50,19 +68,24 @@ HINT
     ③ 回来重跑：
          bash /root/nexus-mesh-deploy/check-git.sh
 
+  ⚠ 在此之前，部署仍可用（临时借本机凭据）：
+       ssh -A root@<这台机器> 'bash /root/nexus-mesh-deploy/deploy.sh'
+
 HINT
     exit 1
 fi
 
-# ---- ② 能否 fetch ----
+# ---- ② 能否 fetch（同样不借助 agent）----
 echo -n "  fetch origin/main: "
-if git fetch origin main --dry-run >/dev/null 2>&1; then
+if GIT_SSH_COMMAND="${SSH_INDEPENDENT[*]}" \
+        git fetch origin main --dry-run >/dev/null 2>&1; then
     echo "✓ 可用"
 else
     echo "✗ 失败"
-    git fetch origin main 2>&1 | tail -4 | sed 's/^/      /'
+    GIT_SSH_COMMAND="${SSH_INDEPENDENT[*]}" \
+        git fetch origin main 2>&1 | tail -4 | sed 's/^/      /'
     exit 1
 fi
 
 echo
-echo "  ✓ 服务器可独立拉取，自动化环境（systemd/cron）不会有问题。"
+echo "  ✓ 服务器可独立拉取 —— systemd / cron 环境下不会有问题。"
