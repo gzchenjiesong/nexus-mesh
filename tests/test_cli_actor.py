@@ -333,3 +333,139 @@ class TestCliEntry:
             assert forbidden not in r.stdout, (
                 f"nxs-cli 暴露了 {forbidden} —— 运维面不该在这里"
             )
+
+
+class TestWhoamiDisplaysNewModel:
+    """★★ `nxs-cli whoami` 必须显示**角色模型**的信息。
+
+    ⚠ **这一节来自一次实机故障（2026-10-30）。**
+
+    改造删掉了 `constraints` 类。但 `cmd_whoami` 仍在读那份已删的
+    发布白名单（旧 `constraints` 下的字段）—— 因为用的是 `.get()`，
+    **不报错，只是永远显示「（无发布权）」**。
+
+    实测：coordinator 的角色是 `hub`（can_issue=True），whoami 却说它
+    没有发布权。**使用者看到的界面在说反话**，而所有测试都是绿的 ——
+    因为没有任何测试断言过 whoami 的权限展示。
+
+    教训有两层：
+
+        ① 展示层也要有测试。它是使用者的第一手信息，错了比 API 错更误导
+        ② `.get()` 的宽容会掩盖字段被删 —— 静默降级成"永远显示默认值"
+    """
+
+    def _fake(self, monkeypatch, *, can_issue: bool, role: str = "hub"):
+        """把 _transport 换成假的，whoami 返回构造好的响应。"""
+        from nxs.cli import commands as C
+
+        class _T:
+            def whoami(self_inner):
+                return {
+                    "node_id": "coordinator",
+                    "approved": True,
+                    "state": "alive",
+                    "card": {
+                        "display_name": "协调中枢",
+                        "domain": "cloud",
+                        "role": role,
+                        "may_broadcast": False,
+                        "capabilities": [
+                            {"type": "work.summary", "level": "summary",
+                             "mode": "sync"},
+                        ],
+                        "self_limits": {"max_backlog": 20,
+                                        "max_response_level": "summary"},
+                    },
+                    "role_definition": {
+                        "can_issue": can_issue,
+                        "serves": ["work.summary"],
+                        "max_response_level": "summary",
+                    },
+                    "usage": {"pending": 0},
+                }
+
+        monkeypatch.setattr(C, "_transport", lambda actor: _T())
+
+    @covers("M14.F3")
+    def test_shows_can_issue_when_allowed(self, monkeypatch, capsys):
+        """★ can_issue=True 必须显示「可发布」。
+
+        这条就是那个 bug 的直接回归测试：旧代码恒显示「（无发布权）」。
+        """
+        from nxs.cli.commands import cmd_whoami
+
+        self._fake(monkeypatch, can_issue=True)
+        args = type("A", (), {"json": False})()
+        cmd_whoami(actor=None, args=args)
+
+        out = capsys.readouterr().out
+        assert "可发布" in out, f"can_issue=True 却没显示可发布：\n{out}"
+        assert "（无发布权）" not in out, "还在显示旧文案 —— 说明又读了已删字段"
+        assert "hub" in out
+
+    @covers("M14.F3")
+    def test_shows_cannot_issue_when_denied(self, monkeypatch, capsys):
+        """can_issue=False 显示「不可发布」。"""
+        from nxs.cli.commands import cmd_whoami
+
+        self._fake(monkeypatch, can_issue=False, role="worker")
+        args = type("A", (), {"json": False})()
+        cmd_whoami(actor=None, args=args)
+
+        out = capsys.readouterr().out
+        assert "不可发布" in out, f"can_issue=False 却没显示不可发布：\n{out}"
+
+    @covers("M14.F3")
+    def test_warns_when_role_not_in_config(self, monkeypatch, capsys):
+        """★ 角色不在配置表里 → 必须明确警告。
+
+        这正是实机踩到的状态：桥接写 `role: driver` 而配置里只有
+        hub/agent/worker。节点一切"正常"（心跳、批准都对），
+        但发不出也收不到任何任务。展示层必须把这个说出来。
+        """
+        from nxs.cli import commands as C
+        from nxs.cli.commands import cmd_whoami
+
+        class _T:
+            def whoami(self_inner):
+                return {
+                    "node_id": "hermes-working",
+                    "approved": True,
+                    "state": "alive",
+                    "card": {
+                        "display_name": "H", "domain": "cloud",
+                        "role": "driver",
+                        "may_broadcast": False,
+                        "capabilities": [{"type": "agent.ask",
+                                          "level": "summary", "mode": "sync"}],
+                        "self_limits": {"max_backlog": 5,
+                                        "max_response_level": "summary"},
+                    },
+                    "role_definition": None,      # ← 角色查不到
+                    "usage": {"pending": 0},
+                }
+
+        monkeypatch.setattr(C, "_transport", lambda actor: _T())
+        args = type("A", (), {"json": False})()
+        cmd_whoami(actor=None, args=args)
+
+        out = capsys.readouterr().out
+        assert "不在服务端配置" in out, (
+            f"角色查不到时必须明确警告，否则用户不知道为什么不工作：\n{out}"
+        )
+
+    @covers("M14.F3")
+    def test_shows_self_limits_and_backlog(self, monkeypatch, capsys):
+        """自限与信箱待办要显示（配额已删，这是替代信息）。"""
+        from nxs.cli.commands import cmd_whoami
+
+        self._fake(monkeypatch, can_issue=True)
+        args = type("A", (), {"json": False})()
+        cmd_whoami(actor=None, args=args)
+
+        out = capsys.readouterr().out
+        assert "自限" in out and "20" in out
+        assert "信箱" in out
+        # 旧的配额说法不该再出现（按日任务数那套已整体删除）
+        assert "按日" not in out
+        assert "配额" not in out

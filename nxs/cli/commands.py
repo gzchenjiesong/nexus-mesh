@@ -110,16 +110,39 @@ def cmd_whoami(actor: Actor, args) -> int:
     else:
         print("能力　：（无 —— 声明了能力才能被派任务）")
 
-    cons = card.get("constraints") or {}
-    print(f"接收　：来自 {cons.get('can_receive_from') or '（无）'}")
-    print(f"发布　：{cons.get('can_issue_types') or '（无发布权）'}")
-    q = cons.get("quota") or {}
-    if q:
-        print(f"配额　：日 {q.get('tasks_per_day')} 笔"
-              f"　并发 {q.get('concurrent_tasks')}")
+    # ---- 角色与权限 ----
+    #
+    # ⚠ 这一段在权限模型改造后**重写过**。
+    #
+    # 旧代码读 `card["constraints"]` 的 can_receive_from / can_issue_types /
+    # quota —— 那三个字段都删了。因为用的是 `.get()`，所以**不报错**，
+    # 只是永远显示"（无发布权）"。
+    #
+    # 实机部署时实测：coordinator 的角色是 hub（can_issue=True），
+    # whoami 却显示「发布：（无发布权）」。**使用者看到的界面在说反话**，
+    # 而没有任何测试或异常提示这一点。
+    #
+    # 教训：`.get()` 的宽容会掩盖字段被删 —— 展示层要显式对齐数据源。
+    role = card.get("role") or "（未声明）"
+    rd = info.get("role_definition") or {}
+    if rd:
+        can = "可发布" if rd.get("can_issue") else "不可发布"
+        print(f"角色　：{role}　（{can}）　上限={rd.get('max_response_level')}")
+        serves = rd.get("serves") or []
+        print(f"可服务：{', '.join(serves) if serves else '（无 —— 只发布不执行）'}")
+    else:
+        print(f"角色　：{role}　⚠ 该角色不在服务端配置的 roles 表里 ——"
+              f"发不出也收不到任何任务")
+
+    print(f"接收　：由域矩阵决定（不再由节点自报）")
+    print(f"广播　：{'允许' if card.get('may_broadcast') else '不允许'}")
+
+    limits = card.get("self_limits") or {}
+    if limits:
+        print(f"自限　：信箱 {limits.get('max_backlog')} 个"
+              f"　应答上限 {limits.get('max_response_level')}")
     if usage:
-        print(f"今日　：已用 {usage.get('tasks_today', 0)} 笔"
-              f"　进行中 {usage.get('concurrent_now', 0)}")
+        print(f"信箱　：{usage.get('pending', 0)} 个待办")
     return 0
 
 

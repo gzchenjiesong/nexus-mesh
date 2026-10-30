@@ -900,6 +900,15 @@ class _Handler(BaseHTTPRequestHandler):
             "approved": bool(record.approved) if record else False,
             "state": str(record.state) if record else "unknown",
             "card": card.to_dict(),
+            #: 该角色在配置里的定义 —— **与 card 平级，不塞进 card 里**。
+            #:
+            #: 为什么单列：`card.to_dict()` 的契约是"能被 from_dict 原样读回"，
+            #: 塞一个服务端派生的 `role_definition` 进去会破坏那个往返不变式。
+            #:
+            #: 为什么必须给：Agent 最需要知道的就是"我能不能发布"，
+            #: 而 role 名本身不含这个信息 —— 光看到 `role: hub` 还得去翻配置。
+            #: 查不到给 None（角色名拼错 / 配置无 roles 段），这本身就是答案。
+            "role_definition": self._role_definition(card.role),
             "usage": {
                 "pending": self.gw.app.backlog_of(node_id),
             },
