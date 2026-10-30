@@ -228,8 +228,28 @@ class Metrics:
             self._bucket(task_type)[self._bucket_key("submitted")] += 1
 
     def on_complete(self, *, task_id: str, task_type: str,
-                    from_node: str, byte_size: int = 0) -> None:
-        """任务完成。这里结算延迟与字节数。"""
+                    from_node: str, byte_size: int = 0) -> int | None:
+        """任务完成。这里结算延迟与字节数。
+
+        :return: 本次的端到端延迟（毫秒）。算不出来时为 ``None``
+            （进程刚重启、任务不是本进程投的、或任务早被清理）。
+
+        ⚠ **为什么返回值是必需的（2026-10-30 修）**：
+
+        审计记录里的 ``duration_ms`` 一直是 **0** —— 因为
+        ``Mailbox.complete`` 调 ``app.record()`` 时**没传**它，
+        而 ``make_record`` 的默认值是 0。于是运行日志里每一行都写着
+        "耗时 0"，**看起来像任务瞬间完成**。
+
+        实测反例：本机 CodeBuddy 跑一次 ``work.query`` 用了 68 秒、
+        回传 259 字节，而审计里记的是 ``duration_ms=0, bytes=0``。
+
+        这意味着排查性能问题时，运行日志里**最需要的两列都是假数据** ——
+        比没有更糟，因为它看起来是有值的。
+
+        延迟本身一直是算对的（``_settle_latency`` 在 metrics 里），
+        只是没被传递出来。这里把它返回，让审计也能用。
+        """
         now = time.monotonic()
         with self._lock:
             self._completed += 1
@@ -237,16 +257,17 @@ class Metrics:
             if byte_size:
                 self._node_bytes[from_node] += byte_size
             self._bucket(task_type)["completed"] += 1
-            self._settle_latency(task_id, now)
+            return self._settle_latency(task_id, now)
 
     def on_fail(self, *, task_id: str, task_type: str,
-                from_node: str) -> None:
+                from_node: str) -> int | None:
+        """任务失败。:return: 同 :meth:`on_complete`。"""
         now = time.monotonic()
         with self._lock:
             self._failed += 1
             self._node_failed[from_node] += 1
             self._bucket(task_type)["failed"] += 1
-            self._settle_latency(task_id, now)
+            return self._settle_latency(task_id, now)
 
     def on_deny(self, *, rule_id: str, from_node: str = "") -> None:
         with self._lock:
@@ -291,7 +312,7 @@ class Metrics:
     def _bucket(self, task_type: str) -> Counter[str]:
         return self._by_type.setdefault(task_type, Counter())
 
-    def _settle_latency(self, task_id: str, now: float) -> None:
+    def _settle_latency(self, task_id: str, now: float) -> int | None:
         """结算延迟。**签名要求调用方持锁。**
 
         找不到起始时刻时有三种可能：进程刚重启、任务不是本进程投的
@@ -300,8 +321,10 @@ class Metrics:
         """
         started = self._inflight_since.pop(task_id, None)
         if started is None:
-            return
-        self._latency_ms.append(max(0.0, (now - started) * 1000.0))
+            return None
+        ms = max(0.0, (now - started) * 1000.0)
+        self._latency_ms.append(ms)
+        return int(round(ms))
 
 
 def _percentile(samples: Sequence[float], q: float) -> float | None:

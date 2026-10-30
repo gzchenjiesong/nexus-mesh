@@ -342,6 +342,31 @@ class InProcessTransport:
 
         done = app.lifecycle.complete(task, probe.artifacts)
         hint = ResponseBoundary.trust_hint(node_id, done.artifacts)
+
+        # 字节数按产物的实际载荷估：这是"这个节点往外吐了多少"的度量，
+        # 也正是 bulk_movement 规则需要的量。用 JSON 长度而非 proto 长度，
+        # 因为前者与业务体量线性相关，后者含大量恒定的框架开销。
+        payload_bytes = _payload_bytes(done.artifacts)
+
+        # ⚠ **先结算指标，再写审计** —— 顺序在这里有实际作用（2026-10-30 改）。
+        #
+        #   审计记录里的 ``duration_ms`` 与 ``bytes`` 一直是 **0**：
+        #   ``make_record`` 的默认值是 0，而这里**没传**它们。
+        #   于是运行日志每一行都写着"耗时 0"、"字节 —"，
+        #   **看起来像任务瞬间完成、什么都没回传**。
+        #
+        #   实测反例：本机 CodeBuddy 跑一次 work.query 用 68 秒、
+        #   回传 259 字节，审计里却是 ``duration_ms=0, bytes=0``。
+        #   而这正是排查性能问题时最需要的两列 —— **有假值比没有更糟**，
+        #   因为它看起来是有值的。
+        #
+        #   延迟一直算在 metrics 里（``_settle_latency``），只是没传出来。
+        #   现在它返回给调用方，就能同时进审计。
+        duration_ms = app.metrics.on_complete(
+            task_id=done.id, task_type=done.type, from_node=node_id,
+            byte_size=payload_bytes,
+        )
+
         app.record(
             outcome="completed", task_id=done.id, task_type=done.type,
             session_id=done.session_id, trace_id=done.trace_id,
@@ -351,25 +376,24 @@ class InProcessTransport:
             level=hint["max_level"], attempt=done.attempt,
             contains_freetext=hint["contains_freetext"],
             sanitized=hint["sanitized"],
-        )
-        # 字节数按产物的实际载荷估：这是"这个节点往外吐了多少"的度量，
-        # 也正是 bulk_movement 规则需要的量。用 JSON 长度而非 proto 长度，
-        # 因为前者与业务体量线性相关，后者含大量恒定的框架开销。
-        app.metrics.on_complete(
-            task_id=done.id, task_type=done.type, from_node=node_id,
-            byte_size=_payload_bytes(done.artifacts),
+            byte_size=payload_bytes,
+            # 算不出来（进程刚重启 / 非本进程投递）时给 0 而不是编造一个值
+            duration_ms=duration_ms or 0,
         )
         return done
 
     def fail(self, node_id: str, task: Task, reason: str) -> Task:
         failed = self._app.lifecycle.fail(task, reason)
+        # 同 complete：**先结算拿延迟，再写审计** —— 否则 duration_ms 恒为 0。
+        # 而"失败了多久才失败"正是排查超时类问题的关键线索。
+        duration_ms = self._app.metrics.on_fail(
+            task_id=failed.id, task_type=failed.type, from_node=node_id,
+        )
         self._app.record(
             outcome="failed", task_id=failed.id, task_type=failed.type,
             session_id=failed.session_id, from_node=failed.from_node,
             to_node=failed.to_node, attempt=failed.attempt,
-        )
-        self._app.metrics.on_fail(
-            task_id=failed.id, task_type=failed.type, from_node=node_id,
+            duration_ms=duration_ms or 0,
         )
         return failed
 

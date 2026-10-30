@@ -739,3 +739,133 @@ class TestMetricsCli:
         )
         assert result.returncode == 2
         assert "NXS_OPS_SECRET" in (result.stdout + result.stderr)
+
+
+class TestAuditCarriesRealDurationAndBytes:
+    """★★ 审计里的耗时与字节必须是真实值，不能恒为 0。
+
+    ⚠⚠ **这是加运行日志后才发现的既有 bug（2026-10-30）。**
+
+    上线后看真实数据，每条 completed 记录都是：
+
+        {"outcome": "completed", "duration_ms": 0, "bytes": 0, ...}
+
+    而实际任务跑了 68 秒、回传 259 字节。
+
+    ## 根因
+
+    `Mailbox.complete` 调 `app.record(...)` 时**没传** `byte_size` 与
+    `duration_ms`，而 `make_record` 的默认值是 0。
+
+    延迟其实一直算得对（在 `metrics._settle_latency` 里），
+    只是**没被传递出来**。
+
+    ## 为什么这比"没有值"更糟
+
+    运行日志里那两列会显示 "0 ms" 和 "—"，**看起来是有值的** ——
+    人读到会以为「任务瞬间完成、什么都没回传」。
+
+    而排查性能问题时，「耗时多长、回传多大」恰恰是最需要的两列。
+    之前发现 `p95=180s` 撞超时线，靠的就是延迟数据；
+    若那时看的是审计日志，会得出完全错误的结论。
+
+    ## 修法
+
+    `on_complete` / `on_fail` 返回本次结算的延迟，`Mailbox` 先结算
+    再写审计，把真实耗时与字节一起落盘。
+    """
+
+    @covers("M13.F1")
+    def test_complete_records_real_duration_and_bytes(self):
+        """completed 记录必须带真实耗时与字节。"""
+        import time
+
+        from conftest import EXAMPLE_CONFIG, demo_env
+        from nxs.app import NexusApp
+        from nxs.core.models import Artifact, Level
+        from nxs.edge.client import HttpTransport
+        from nxs.edge.gateway import Gateway
+        from nxs.mgmt.config import ServerConfig
+
+        app = NexusApp.from_config_path(
+            str(EXAMPLE_CONFIG), env=demo_env(), force_memory=True)
+        app.start()
+        app.approve("node-a")
+        gw = Gateway(app, server_config=ServerConfig(host="127.0.0.1", port=0),
+                     ops_secret=b"x" * 32).start()
+        try:
+            tr_a = HttpTransport(gw.base_url, node_id="node-a",
+                                 secret=app.config.secrets["node-a"])
+            tr_c = HttpTransport(gw.base_url, node_id="coordinator",
+                                 secret=app.config.secrets["coordinator"])
+            tr_c.publish(from_node="coordinator", to_node="node-a",
+                         task_type="demo.echo", params={"text": "hi"},
+                         idempotency_key="k-dur")
+            time.sleep(0.3)          # 造一点可测的耗时
+            task = tr_a.poll("node-a")
+            tr_a.complete("node-a", task, [
+                Artifact(level=Level.METADATA, kind="structured",
+                         data={"echo": "一段回答正文", "level": "metadata"}),
+            ])
+
+            recs = [r for r in app.audit.read_recent(20)
+                    if r.get("outcome") == "completed"]
+            assert recs, "没有 completed 记录"
+            r = recs[-1]
+
+            assert (r.get("duration_ms") or 0) > 0, (
+                f"duration_ms 是 {r.get('duration_ms')!r} —— 恒为 0 说明"
+                " record 时没传真实耗时。\n"
+                "  运行日志里「耗时」这一列会全是 0，看起来像任务瞬间完成。"
+            )
+            # 造了 300ms，允许宽松区间（CI 机器可能慢）
+            assert 200 <= r["duration_ms"] < 5000, (
+                f"duration_ms={r['duration_ms']} 与造的 300ms 明显不符"
+            )
+            assert (r.get("bytes") or 0) > 0, (
+                f"bytes 是 {r.get('bytes')!r} —— 恒为 0 说明"
+                " record 时没传真实字节数"
+            )
+        finally:
+            gw.stop()
+
+    @covers("M13.F1")
+    def test_on_complete_returns_latency(self):
+        """`on_complete` 要返回本次延迟——调用方（Mailbox）靠它填审计。"""
+        from nxs.mgmt.observ import Metrics
+
+        m = Metrics()
+        m.on_submit(task_id="t1", task_type="demo.echo", to_node="n1")
+        got = m.on_complete(task_id="t1", task_type="demo.echo",
+                            from_node="n1", byte_size=10)
+        assert isinstance(got, int) and got >= 0, (
+            f"on_complete 返回 {got!r}，应为毫秒整数"
+        )
+
+    @covers("M13.F1")
+    def test_on_complete_returns_none_when_unknown(self):
+        """算不出来时返回 None，**不编造一个 0**。
+
+        进程刚重启、任务非本进程投递、任务早被清理 —— 三种情况都
+        算不出延迟。编造 0 会污染"耗时"这一列的语义。
+        """
+        from nxs.mgmt.observ import Metrics
+
+        m = Metrics()
+        got = m.on_complete(task_id="never-submitted",
+                            task_type="demo.echo", from_node="n1")
+        assert got is None, (
+            f"未知任务返回了 {got!r}，应为 None —— 编造 0 会误导"
+        )
+
+    @covers("M13.F1")
+    def test_on_fail_returns_latency(self):
+        """失败路径同样要返回延迟 —— "多久才失败"是排查超时的关键。"""
+        from nxs.mgmt.observ import Metrics
+
+        m = Metrics()
+        m.on_submit(task_id="t2", task_type="demo.echo", to_node="n1")
+        got = m.on_fail(task_id="t2", task_type="demo.echo", from_node="n1")
+        assert isinstance(got, int) and got >= 0, (
+            f"on_fail 返回 {got!r}，应为毫秒整数"
+        )
