@@ -469,3 +469,84 @@ class TestWhoamiDisplaysNewModel:
         # 旧的配额说法不该再出现（按日任务数那套已整体删除）
         assert "按日" not in out
         assert "配额" not in out
+
+
+class TestTimeoutPairingIsCoherent:
+    """★★ 调用方等待必须**长于**节点执行超时。
+
+    ⚠ 这两个值住在不同模块里，没有任何机制强制它们配合 ——
+    2026-10-30 调整前它们**恰好都是 180**，形成竞态。
+
+    ## 为什么相等是 bug
+
+    ```
+    t=0    调用方开始等，节点开始执行
+    t=180  两个同时到期 —— 谁先谁后不确定
+    ```
+
+    若调用方先到：
+
+        调用方报「超时」→ 用户看到"没回答"
+        节点继续跑到自己的上限 → 答案写入任务记录，**但没人读**
+
+    那比干脆失败更糟：**用户以为节点没干活，而它干了。**
+
+    ## 正确的关系
+
+        调用方等待 > 节点执行超时
+
+    这样"节点超时"会先发生 —— 用户收到的是节点给出的**具体失败原因**
+    （如"轮次用尽，调大 --max-turns"），而不是一句笼统的"超时"。
+
+    ## 为什么放在这个文件
+
+    `DEFAULT_ASK_TIMEOUT` 在 CLI 侧，`DEFAULT_TIMEOUT` 在桥接侧。
+    测试是唯一两边都能看的地方 —— 这种跨模块的不变式只能在这里守。
+    """
+
+    @covers("M14.F3")
+    def test_caller_waits_longer_than_node_runs(self):
+        """★ 调用方等待 > 节点执行超时。"""
+        from examples.agent_bridge_common import DEFAULT_TIMEOUT
+        from nxs.cli.commands import DEFAULT_ASK_TIMEOUT
+
+        assert DEFAULT_ASK_TIMEOUT > DEFAULT_TIMEOUT, (
+            f"调用方等待（{DEFAULT_ASK_TIMEOUT}s）不大于节点执行超时"
+            f"（{DEFAULT_TIMEOUT}s）。\n"
+            "  相等或更短会形成竞态：调用方先放弃时，节点仍在跑，\n"
+            "  结果写进任务记录但没人读 —— 用户以为它没干活。"
+        )
+
+    @covers("M14.F3")
+    def test_margin_is_enough_for_polling_granularity(self):
+        """余量要够跑轮询与收尾，不能只差 1 秒。
+
+        `ask` 是 2 秒一次轮询。余量小于一个轮询周期时，
+        节点刚回结果、调用方可能已经错过了那一拍。
+        """
+        from examples.agent_bridge_common import DEFAULT_TIMEOUT
+        from nxs.cli.commands import DEFAULT_ASK_TIMEOUT, POLL_INTERVAL
+
+        margin = DEFAULT_ASK_TIMEOUT - DEFAULT_TIMEOUT
+        assert margin >= POLL_INTERVAL * 5, (
+            f"余量只有 {margin}s，少于 5 个轮询周期"
+            f"（{POLL_INTERVAL * 5}s）。\n"
+            "  紧贴着的两个超时仍会抖动 —— 节点刚回结果，调用方可能已错过。"
+        )
+
+    @covers("M14.F3")
+    def test_node_timeout_is_generous_enough_for_real_tasks(self):
+        """★ 节点超时不能太小 —— 实测 p95 已经撞过 180 秒。
+
+        2026-10-30 实测本机 CodeBuddy 的延迟：p50=82.5s，**p95=180.8s**。
+        180 秒上限意味着 p95 附近的任务在成功/失败之间抖动，
+        而"读仓库回答问题"本来就要 100+ 秒。
+
+        这不是"要求更快"能解决的 —— 是工具轮次本身就多。
+        """
+        from examples.agent_bridge_common import DEFAULT_TIMEOUT
+
+        assert DEFAULT_TIMEOUT >= 240, (
+            f"节点超时只有 {DEFAULT_TIMEOUT}s。实测 p95 已达 180.8s，\n"
+            "  240 以下会让 p95 附近的任务在成功/失败之间随机抖动。"
+        )
