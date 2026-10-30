@@ -413,3 +413,198 @@ class TestSdkAutoRenew:
         assert transport.completed == [], (
             "失去租约后仍回传了产出 —— 会造成重复副作用"
         )
+
+
+class TestHeartbeatIsNotBlockedByLongTask:
+    """★★ 心跳必须在**长任务执行期间**照常发。
+
+    ⚠ **这一节来自 2026-10-30 的一次真实故障。**
+
+    接入本机 Mac（work-macbook）后，云端 Agent 发来的 `work.query`
+    要跑 CodeBuddy，耗时 140 秒。期间出现：
+
+        云端再发任务 → AU-APPROVE-05「尚未批准或不可路由」
+
+    而本机进程明明在好好干活。
+
+    ## 根因
+
+    原来心跳挂在常驻循环上：
+
+        while True:
+            task = self.run_once()      # ← 执行 handler，几十秒到几分钟
+            self._maybe_heartbeat()     # ← 任务返回后才发
+
+    服务端判 stale 的阈值是 `heartbeat_interval × 3`（30×3=90 秒）。
+    所以**任何超过 90 秒的任务都会让节点变 stale**，而这期间别人
+    投递会被 `AU-APPROVE-05` 拒 —— 错误信息说"未批准"，
+    完全指错方向。
+
+    ## 为什么之前没暴露
+
+    work-desktop 之前的任务都很快（< 30 秒），心跳赶得上。
+    本机 CodeBuddy 要读仓库、多轮工具调用，把这个问题顶出来了。
+
+    ## 已有的先例
+
+    `_LeaseKeeper`（租约续期）早就是独立线程了 —— 同一个理由。
+    心跳漏了同样的处理，是**不一致导致的疏漏**。
+    """
+
+    @covers("M7.F11")
+    def test_heartbeat_fires_while_handler_is_blocking(self):
+        """handler 阻塞 1.2 秒期间，心跳（间隔 0.2s）应发出多次。
+
+        用记账 transport，不打网络 —— 这条测的是**调度性质**，
+        与传输无关。
+        """
+        import threading as _threading
+
+        from nxs.control import make_task
+        from nxs.sdk import NodeClient, NodeConfig
+
+        beats = []
+        release = _threading.Event()
+
+        class BeatingTransport:
+            """记账 transport：register 记一笔，poll 只回一次任务。"""
+
+            def __init__(self):
+                self._task = None
+                self._handed_out = False
+
+            def register(self, card):
+                beats.append(time.monotonic())
+                return {"outcome": "unchanged", "approved": True}
+
+            def poll(self, node_id):
+                if self._task is None and not self._handed_out:
+                    self._handed_out = True
+                    self._task = make_task(
+                        task_id="t-hb", idempotency_key="i-hb",
+                        task_type="demo.echo", from_node="coordinator",
+                        to_node="node-b", params={"text": "x"},
+                    )
+                    return self._task
+                return None
+
+            def complete(self, *a, **k):
+                return None
+
+            def fail(self, *a, **k):
+                return None
+
+            def renew(self, task_id):
+                return None
+
+        def blocking_handler(params):
+            # 模拟"跑 CodeBuddy 140 秒"—— 这里缩到 1.2 秒，
+            # 但比例相同：远大于心跳间隔。
+            release.wait(1.2)
+            return {"echo": "x", "level": "metadata"}
+
+        # ⚠ **必须给 card** —— `NodeClient.register()` 在 `card=None` 时
+        #   直接返回 `{"outcome": "skipped"}`（那是"节点由中心侧配置登记"
+        #   的合法形态），压根不调 transport.register。
+        #   于是心跳一次都不会发生，而测试会误判成"心跳被阻塞"。
+        #   第一版就是这么写的，beats 是空的。
+        from nxs.core.models import RoleCard
+
+        card = RoleCard.from_dict({
+            "node_id": "node-b", "domain": "zone-a", "display_name": "B",
+            "role": "worker",
+            "self_limits": {"max_response_level": "metadata"},
+            # ⚠ response_fields 必须含 handler 实际返回的所有字段。
+            #   漏了 `level` 会被节点侧边界拦下（WL-FIELD-001），
+            #   而那次拦截发生在 handler 之后 —— 心跳次数照样对，
+            #   但 processed 计数会不对，测试在其他地方红。
+            "capabilities": [{"type": "demo.echo", "level": "metadata",
+                              "mode": "sync",
+                              "response_fields": ["echo", "level"]}],
+        })
+
+        client = NodeClient(
+            NodeConfig(
+                "node-b",
+                handlers={"demo.echo": blocking_handler},
+                levels={"demo.echo": Level.METADATA},
+                card=card,
+                heartbeat_interval=0.2,   # 心跳很密，便于观察
+                renew_interval=0,         # 不测续租，只测心跳
+                poll_interval=0.05,
+            ),
+            BeatingTransport(),
+        )
+
+        # 只跑一个任务，然后停
+        stop_after_one = _threading.Event()
+
+        def should_stop() -> bool:
+            return stop_after_one.is_set()
+
+        def _drive():
+            try:
+                client.run_forever(should_stop=should_stop)
+            except Exception:      # noqa: BLE001
+                pass
+
+        t = _threading.Thread(target=_drive, daemon=True)
+        t.start()
+        time.sleep(1.4)            # 覆盖 handler 的 1.2 秒
+        stop_after_one.set()
+        client._hb_stop.set()
+        release.set()
+        t.join(timeout=3)
+
+        assert client.processed == 1, "任务应当被执行一次"
+
+        # 关键断言：handler 阻塞期间心跳发生了多次。
+        #
+        # ⚠ 判据用「次数 >= 3」而不是「间隔精确」——
+        #   定时器有抖动，断言精确间隔会 flaky。
+        #
+        # 1.2 秒 / 0.2 秒间隔 ≈ 6 次；留余量到 3 次。
+        # 旧实现下这里是 0 或 1（只在任务前后各一次）。
+        assert len(beats) >= 3, (
+            f"handler 阻塞 1.2 秒期间只发了 {len(beats)} 次心跳"
+            f"（间隔 0.2s，应 >= 3 次）。\\n"
+            "  心跳被长任务阻塞了 —— 那会让节点在执行期间变 stale，\\n"
+            "  而别人投递会收到 AU-APPROVE-05「未批准」，方向全错。"
+        )
+
+    @covers("M7.F11")
+    def test_heartbeat_thread_is_daemon(self):
+        """心跳线程必须是 daemon —— 否则进程退不掉。
+
+        常驻桥接被 SIGTERM 时，非 daemon 线程会让进程挂住，
+        运维看到"停了但 systemd 还在等"。
+        """
+        from nxs.sdk import NodeClient, NodeConfig
+
+        class NullTransport:
+            def register(self, card):
+                return {"outcome": "unchanged", "approved": True}
+
+            def poll(self, node_id):
+                return None
+
+        from nxs.core.models import RoleCard
+
+        card = RoleCard.from_dict({
+            "node_id": "n-1", "domain": "d", "display_name": "N",
+            "role": "worker", "capabilities": [],
+        })
+        client = NodeClient(
+            NodeConfig("n-1", handlers={}, levels={}, card=card,
+                       heartbeat_interval=0.1),
+            NullTransport(),
+        )
+        client._start_heartbeat_thread()
+        try:
+            assert client._hb_thread is not None
+            assert client._hb_thread.daemon, (
+                "心跳线程不是 daemon —— 进程会退不掉"
+            )
+            assert client._hb_thread.is_alive()
+        finally:
+            client.stop()

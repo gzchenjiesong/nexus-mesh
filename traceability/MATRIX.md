@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **818** 个测试方法（已声明覆盖）· **137** 个纵向编号项（114 功能点 + 23 模块需求）
+共 **828** 个测试方法（已声明覆盖）· **137** 个纵向编号项（114 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -102,7 +102,7 @@ _（未实现，暂无功能点）_
 | **M5.F4** | 应答字段白名单（含列表递归） | `nxs/control/policy.py:PolicyEngine.check_response` | G2 | P0 | S2 | 6 |
 | **M5.F5** | 等级上限计算（三重取最小） | `nxs/control/policy.py:PolicyEngine.check_delivery（min 计算）` | G2 | P0 | S5 | 8 |
 | **M5.F6** | 发布权限校验 | `nxs/control/policy.py:PolicyEngine.check_publish` | G2 | P0 | S3 | 20 |
-| **M5.F7** | 配额校验（并发／按日／字节） | `nxs/control/policy.py:PolicyEngine.check_quota` | G2 | P1 | — | 13 |
+| **M5.F7** | 配额校验（并发／按日／字节） | `nxs/control/policy.py:PolicyEngine.check_quota` | G2 | P1 | — | 21 |
 | **M5.F8** | 委托链校验 | `nxs/control/policy.py:PolicyEngine.check_delegation` | G2 | P1 | — | 1 |
 | **M5.F9** | 能力发现查询 | `nxs/control/policy.py:PolicyEngine.providers_of` | G1 | P1 | — | 2 |
 | **M5.F10** | 角色卡来源可注入（策略层以注册表为准，而非只看配置） | `nxs/control/policy.py:PolicyEngine.__init__（card_resolver/cards_source）` | G1,G5 | P0 | — | 2 |
@@ -138,7 +138,7 @@ _（未实现，暂无功能点）_
 | **M7.F8** | 持久化（重启后队列仍在） | `nxs/backends/sqlite/*` | G1 | P0 | — | 3 |
 | **M7.F9** | 续租端点 /nxs/ack（只允许持有者续自己的租约） | `nxs/edge/gateway.py:_Handler._handle_ack` | G1,G2 | P0 | — | 2 |
 | **M7.F10** | 续租的归属与状态校验（失败即『已失去任务』） | `nxs/data/task.py:TaskLifecycle.renew` | G2 | P0 | — | 7 |
-| **M7.F11** | SDK 执行期间自动续租（失去租约则丢弃产出） | `nxs/sdk/__init__.py:_LeaseKeeper` | G1 | P0 | — | 2 |
+| **M7.F11** | SDK 执行期间自动续租（失去租约则丢弃产出） | `nxs/sdk/__init__.py:_LeaseKeeper` | G1 | P0 | — | 4 |
 | **M7.R1** | 断电恢复零人工干预 | （由 M7.F3, M7.F4, M7.F5, M7.F8 实现） | G1,G2 | P0 | — | 6 |
 | **M7.R2** | 重试不得产生重复副作用 | （由 M7.F1, M7.F5 实现） | G1,G2 | P0 | — | 3 |
 | **M7.R3** | 终态不可回退 | （由 M7.F2, M7.F7 实现） | G3 | P0 | — | 1 |

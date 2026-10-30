@@ -123,7 +123,21 @@ DEFAULT_NODE_ID = "work-desktop"
 #: 只看 stdout 的话完全查不出来。
 DEFAULT_PORT = 0
 
-DEFAULT_MAX_TURNS = 30
+#: 单次任务允许的工具轮次上限。
+#:
+#: ⚠ **30 不够，2026-10-30 实机确认过。**
+#:
+#: 问到"用一句话说明你是谁"这种短问题，CodeBuddy 也要：Grep 找文档 →
+#: Read 读 → 再 Grep 确认 → 汇总，实测 8–12 次 function_call。
+#: 而问"这个仓库做什么"这类开放问题时轮次更多。
+#:
+#: **轮次用尽的症状极难查**（见 `make_runner` 里的说明）：
+#: stdout 空或截断、stderr 一句话、**退出码 0**。旧代码会把它
+#: 误报成"输出不是合法 JSON"。
+#:
+#: 提到 60 是权衡：`--timeout`（默认 180s）会先掐断，
+#: 所以轮次放大不会让单次调用无限期挂着。
+DEFAULT_MAX_TURNS = 60
 
 
 def find_codebuddy() -> str:
@@ -543,15 +557,117 @@ def make_runner(cmd_builder, *, timeout: int, logger: logging.Logger,
             cwd=workdir,
             what="CodeBuddy",
         )
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+
+        # ---- ① 先看 stderr：**退出码 0 也可能是硬失败** ----
+        #
+        # ⚠⚠ **这是实机踩出来的，而且是第二次踩同一个陷阱。**
+        #
+        # `build_cmd` 的注释里已经记过一次了（EADDRINUSE）：
+        #
+        #     "最恶劣的是这个错误的表现：**stdout 空、stderr 有内容、
+        #      退出码 0**。只看 stdout 的代码会以为它什么都没说，
+        #      而真正原因在 stderr 里。"
+        #
+        # 这次是另一个原因：**轮次用尽**。
+        #
+        #     实测（max_turns=3）：rc=0, stdout=0 字符,
+        #     stderr="Max turns (3) exceeded"
+        #
+        # 而旧代码只在 `rc != 0` 时才读 stderr（见 run_subprocess），
+        # 于是 rc=0 一路走到 `json.loads("")` 报"输出不是合法 JSON" ——
+        # **真正的病因被掩盖了**。运维看到"JSON 不合法"会去查编解码、
+        # 查编码、查管道，而实际该做的是调大 --max-turns。
+        if "max turns" in stderr.lower():
+            raise RuntimeError(
+                f"CodeBuddy 轮次用尽（{stderr.strip()}）。\n"
+                f"  任务需要更多工具轮次才能完成，而 --max-turns 限制了它。\n"
+                f"  用 --max-turns 调大（当前默认 {DEFAULT_MAX_TURNS}），"
+                f"或把问题问得更聚焦。"
+            )
+
+        if not stdout.strip():
+            # stderr 也没有 max turns 的提示时，把 stderr 原样给出 ——
+            # 空 stdout + rc=0 只可能是 CLI 自己出了问题，它的解释在 stderr
+            raise RuntimeError(
+                "CodeBuddy 没有输出任何内容（退出码 0）。\n"
+                f"  stderr：{stderr.strip()[:400] or '（空）'}"
+            )
+
+        # ---- ② 解析 JSON；截断时尽力抢救 ----
         try:
-            payload = json.loads(result.stdout or "")
+            payload = json.loads(stdout)
         except json.JSONDecodeError as exc:
-            logger.error("CodeBuddy stdout 不是合法 JSON（%d 字节）：%s…",
-                         len(result.stdout or ""), (result.stdout or "")[:200])
-            raise RuntimeError("CodeBuddy 输出不是合法 JSON") from exc
+            # ⚠ 输出被截断时，**已有的事件可能已经包含最终答案**。
+            #
+            #   实测：一次 125 KB 的输出在最后一个字符串处断了，
+            #   但前面的 `result` 事件（如果有）里已有完整回答。
+            #   直接报错等于把一个能用的答案扔掉。
+            #
+            #   抢救策略：逐个尝试"截到第 N 个完整对象"，取最有价值
+            #   的那个 `result` 事件。救不出来才报错。
+            payload = _salvage_truncated_events(stdout)
+            if payload is None:
+                logger.error(
+                    "CodeBuddy stdout 不是合法 JSON（%d 字节）：%s…",
+                    len(stdout), stdout[:200],
+                )
+                raise RuntimeError(
+                    f"CodeBuddy 输出不是合法 JSON（{len(stdout)} 字节，"
+                    f"疑似被截断：{exc.msg}）。\n"
+                    f"  stderr：{stderr.strip()[:300] or '（空）'}"
+                ) from exc
+            logger.warning(
+                "CodeBuddy 输出被截断（%d 字节），已从完整事件中抢救出回答",
+                len(stdout),
+            )
+
         return extract_answer(payload)
 
     return runner
+
+
+def _salvage_truncated_events(raw: str) -> list | None:
+    """从被截断的 JSON 事件数组里抢救出完整的事件。
+
+    ## 为什么值得做
+
+    `--output-format json` 输出的是一个事件数组。截断发生在**最后一个
+    事件的中间**，前面的都是完整的。而回答在 `result` 事件里 ——
+    它可能已经在前面出现了。
+
+    实测：一次 125 KB 输出在末尾断掉，仅最后一个事件不完整。
+
+    ## 做法
+
+    从后往前找最后一个能成功解析的 `"]"` 位置 —— 即"把数组在这里
+    闭合"。逐个尝试，第一个能解析的就是最完整的可用前缀。
+
+    找不到 `result` 事件时也返回事件列表：调用方（`extract_answer`）
+    会按自己的逻辑处理，仍可能从 message 里取出内容。
+    """
+    # 只在"看起来像事件数组"时尝试，避免对任意垃圾字符串做无谓扫描
+    stripped = raw.strip()
+    if not stripped.startswith("["):
+        return None
+
+    # 从最靠后的 `}` 往前试，每次把数组在那里闭合
+    idx = len(stripped) - 1
+    attempts = 0
+    while attempts < 200:
+        idx = stripped.rfind("}", 0, idx)
+        if idx < 0:
+            return None
+        attempts += 1
+        candidate = stripped[:idx + 1] + "]"
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list) and parsed:
+            return parsed
+    return None
 
 
 #: 宿主应用（WorkBuddy / CodeBuddy 桌面版）注入的变量前缀，**必须剔除**。

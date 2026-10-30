@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import sys
 
 import pytest
@@ -1608,4 +1609,171 @@ class TestLogFileIsWindowsReadable:
         assert raw.startswith(self.BOM), (
             f"轮转后的新文件没有 BOM（前 3 字节 {raw[:3].hex(' ')}）——\n"
             "  用户看到的最新日志会是乱码"
+        )
+
+
+class TestExitCodeZeroIsNotSuccess:
+    """★★ 退出码 0 可能就是硬失败 —— 必须读 stderr。
+
+    ⚠ **这是同一个陷阱的第二次踩。**
+
+    `build_cmd` 的注释里早记过一次（EADDRINUSE 的端口冲突）：
+
+        "最恶劣的是这个错误的表现：**stdout 空、stderr 有内容、
+         退出码 0**。只看 stdout 的代码会以为它什么都没说。"
+
+    2026-10-30 实机又撞了一次，原因不同：
+
+        实测（--max-turns 3，任务需要更多轮）：
+            rc     = 0
+            stdout = 0 字符
+            stderr = "Max turns (3) exceeded"
+
+    而旧代码只在 `rc != 0` 时才读 stderr（在 `run_subprocess` 里），
+    于是 rc=0 一路走到 `json.loads("")`，报：
+
+        RuntimeError: CodeBuddy 输出不是合法 JSON
+
+    **真正的病因（轮次用尽）被完全掩盖。** 运维看到"JSON 不合法"
+    会去查编码、查管道、查转义，而该做的是把 --max-turns 调大。
+
+    这类"错误信息指错方向"的故障，比报错本身更耗时间。
+    """
+
+    def _run_with(self, monkeypatch, *, stdout: str, stderr: str = ""):
+        """用假的 run_subprocess 跑一遍 runner。"""
+        import subprocess
+        from examples import codebuddy_node as M
+
+        def fake_run_subprocess(cmd, **kw):
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=stdout, stderr=stderr,
+            )
+
+        monkeypatch.setattr(M, "run_subprocess", fake_run_subprocess)
+        runner = M.make_runner(
+            lambda prompt: ["fake-bin", prompt],
+            timeout=10, logger=logging.getLogger("t"), node_id="n",
+        )
+        return runner("q")
+
+    @covers("M5.F7")
+    def test_max_turns_exceeded_reports_the_real_cause(self, monkeypatch):
+        """★ stderr 说轮次用尽 → 报「轮次用尽」，不是「JSON 不合法」。"""
+        with pytest.raises(RuntimeError) as ei:
+            self._run_with(monkeypatch, stdout="", stderr="Max turns (3) exceeded")
+        msg = str(ei.value)
+        assert "轮次用尽" in msg, (
+            f"没指出真正原因（轮次用尽）：\n{msg}\n\n"
+            "  旧代码会报「输出不是合法 JSON」，把排查方向引向编解码。"
+        )
+        assert "max-turns" in msg.lower() or "max_turns" in msg.lower(), (
+            "要给修法：调大 --max-turns"
+        )
+        assert "JSON" not in msg.split("轮次用尽")[0], "不该先提 JSON"
+
+    @covers("M5.F7")
+    def test_max_turns_detected_case_insensitively(self, monkeypatch):
+        """大小写不同也要认出来（CLI 措辞可能变）。"""
+        with pytest.raises(RuntimeError) as ei:
+            self._run_with(monkeypatch, stdout="", stderr="MAX TURNS (9) EXCEEDED")
+        assert "轮次用尽" in str(ei.value)
+
+    @covers("M5.F7")
+    def test_empty_stdout_surfaces_stderr(self, monkeypatch):
+        """★ 空 stdout + rc=0 → 把 stderr 原样给出。
+
+        绝不能只说"没有输出" —— 那等于把唯一线索扔掉。
+        """
+        with pytest.raises(RuntimeError) as ei:
+            self._run_with(
+                monkeypatch, stdout="",
+                stderr="Error: listen EADDRINUSE: address already in use",
+            )
+        msg = str(ei.value)
+        assert "EADDRINUSE" in msg, (
+            f"stderr 里有关键线索却没报出来：\n{msg}\n\n"
+            "  这是那个「stdout 空 / stderr 有内容 / rc=0」陷阱的通用兜底。"
+        )
+
+    @covers("M5.F7")
+    def test_empty_stdout_and_empty_stderr_still_reports(self, monkeypatch):
+        with pytest.raises(RuntimeError) as ei:
+            self._run_with(monkeypatch, stdout="   ", stderr="")
+        assert "没有输出任何内容" in str(ei.value)
+
+
+class TestSalvageTruncatedOutput:
+    """★★ 输出被截断时，已有事件可能已含答案。
+
+    ⚠ 实测：一次 125 KB 的输出在**最后一个事件的字符串中途**断掉。
+
+    而 `--output-format json` 是**事件数组**，答案在 `result` 事件里。
+    如果 `result` 被截断，它前面那条 assistant `message` 通常**是完整的**
+    —— `extract_answer` 已有"没 result 就取最后一条 assistant message"
+    的兜底。
+
+    所以抢救的价值是真实的：**不抢救就等于把一个能用的答案扔掉。**
+    """
+
+    #: 一个最小的真实形状：user → assistant → result
+    _GOOD = (
+        '[{"type":"message","role":"user","content":[]},'
+        '{"type":"message","role":"assistant","content":"这是回答正文"},'
+        '{"type":"result","subtype":"success","is_error":false,'
+        '"result":"这是回答正文","num_turns":2}]'
+    )
+
+    @covers("M5.F7")
+    def test_salvages_when_truncated_inside_last_event(self, monkeypatch):
+        """★ 在 result 事件内部截断 → 从 assistant message 救出回答。"""
+        from examples.codebuddy_node import _salvage_truncated_events
+
+        # 切在 result 事件的字符串中间
+        cut = self._GOOD.rindex('"result":"这是回答正文"') + 20
+        truncated = self._GOOD[:cut]
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(truncated)      # 前提：确实不合法
+
+        salvaged = _salvage_truncated_events(truncated)
+        assert salvaged is not None, "抢救失败 —— 前面的完整事件应当能用"
+        # 前两个事件（含 assistant message）应当被救出
+        assert any(e.get("role") == "assistant" for e in salvaged)
+
+    @covers("M5.F7")
+    def test_returns_none_for_non_array(self):
+        """不是事件数组的垃圾字符串 → 返回 None，不硬扫。"""
+        from examples.codebuddy_node import _salvage_truncated_events
+
+        assert _salvage_truncated_events("not json at all") is None
+        assert _salvage_truncated_events("") is None
+
+    @covers("M5.F7")
+    def test_returns_none_when_nothing_parseable(self):
+        """截断得太狠（第一个事件都不完整）→ 诚实返回 None。"""
+        from examples.codebuddy_node import _salvage_truncated_events
+
+        assert _salvage_truncated_events('[{"type":"mess') is None
+
+    @covers("M5.F7")
+    def test_runner_uses_salvage_path(self, monkeypatch):
+        """端到端：截断输出经 runner 能拿到回答，且记 warning。"""
+        from examples import codebuddy_node as M
+
+        cut = self._GOOD.rindex('"result":"这是回答正文"') + 20
+        truncated = self._GOOD[:cut]
+
+        def fake_run_subprocess(cmd, **kw):
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout=truncated, stderr="",
+            )
+
+        monkeypatch.setattr(M, "run_subprocess", fake_run_subprocess)
+        runner = M.make_runner(
+            lambda prompt: ["fake-bin", prompt],
+            timeout=10, logger=logging.getLogger("t"), node_id="n",
+        )
+        answer = runner("q")
+        assert answer == "这是回答正文", (
+            f"没能从截断输出里救出回答，实际 {answer!r}"
         )

@@ -184,6 +184,9 @@ class NodeClient:
         #: 最近一次注册的结果（含是否已批准）。None 表示还没注册过。
         self.registration: dict[str, Any] | None = None
         self._last_heartbeat = 0.0
+        #: 心跳线程的停止信号。`run_forever` 启动线程后由它驱动心跳。
+        self._hb_stop = threading.Event()
+        self._hb_thread: threading.Thread | None = None
         #: 节点侧应答边界。**数据在离开节点之前先经过它。**
         self._local_boundary = LocalBoundary(
             config.card, levels=config.levels,
@@ -234,7 +237,12 @@ class NodeClient:
         return result
 
     def _maybe_heartbeat(self) -> None:
-        """到点就重注册。间隔取 ``heartbeat_interval``，0 表示不做。"""
+        """到点就重注册。间隔取 ``heartbeat_interval``，0 表示不做。
+
+        ⚠ **保留这个方法只给"没有后台线程"的场景用**（如单次 ``run_once``
+        调用、测试）。常驻场景请用 :meth:`_start_heartbeat_thread` ——
+        理由见那里。
+        """
         interval = self.config.heartbeat_interval
         if interval <= 0:
             return
@@ -242,7 +250,70 @@ class NodeClient:
         if now - self._last_heartbeat < interval:
             return
         self._last_heartbeat = now
-        self.register()
+        # ⚠ 心跳失败不该让整个常驻循环崩掉：网络抖动一次就退出，
+        #   而调用方会以为节点"崩了"。吞掉异常，下一轮再试。
+        try:
+            self.register()
+        except Exception as exc:      # noqa: BLE001
+            self._log.warning(
+                "[%s] 心跳失败（将在 %ss 后重试）：%s",
+                self.config.node_id, interval, exc,
+            )
+
+    def _start_heartbeat_thread(self) -> None:
+        """在**独立线程**里发心跳。
+
+        ## ⚠⚠ 为什么必须是独立线程 —— 这是实机踩出来的
+
+        原来心跳挂在常驻循环里：
+
+            while True:
+                task = self.run_once()      # ← 执行 handler，可能几十秒到几分钟
+                self._maybe_heartbeat()     # ← 任务返回后才发
+
+        对"快任务"没问题。但**任何超过 ``heartbeat_interval × 3``
+        的任务都会让节点被判 stale**，而那期间：
+
+            · 其他节点看到它 stale → 投递被 ``AU-APPROVE-05`` 拒
+            · 观测窗显示 stale，看起来像节点挂了
+            · 而它其实正在好好干活
+
+        实测（2026-10-30，work-macbook 接 CodeBuddy）：一个
+        `work.query` 跑 140 秒，节点 90 秒时变 stale，
+        云端 Agent 再发任务直接收到 `AU-APPROVE-05` —— 
+        **"我明明在跑，为什么说我没批准"**。
+
+        ## 已有的先例
+
+        `_LeaseKeeper`（租约续期）早就是独立线程了，理由完全相同：
+        长任务期间不能让"续命"这件事被阻塞。
+
+        **心跳漏了同样的处理，是不一致导致的疏漏。**
+        """
+        interval = self.config.heartbeat_interval
+        if interval <= 0:
+            return
+
+        def _run() -> None:
+            while not self._hb_stop.wait(interval):
+                self._last_heartbeat = time.monotonic()
+                try:
+                    self.register()
+                except Exception as exc:      # noqa: BLE001
+                    # 同理：一次网络抖动不该让线程死掉
+                    self._log.warning(
+                        "[%s] 心跳失败（线程继续）：%s",
+                        self.config.node_id, exc,
+                    )
+
+        self._hb_thread = threading.Thread(
+            target=_run, name="nxs-heartbeat", daemon=True,
+        )
+        self._hb_thread.start()
+
+    def stop(self) -> None:
+        """停掉后台线程。常驻循环退出前调用（或靠 daemon 自然结束）。"""
+        self._hb_stop.set()
 
     # ------------------------------------------------------------------
     # 单次轮询
@@ -380,16 +451,28 @@ class NodeClient:
         self.register()          # 先登记，再开始领任务
         self._last_heartbeat = time.monotonic()
 
-        while True:
-            if should_stop is not None and should_stop():
-                return
-            try:
-                task = self.run_once()
-            except PolicyDenied:
-                task = None       # 已被记录，继续下一轮
-            self._maybe_heartbeat()
-            if task is None:
-                time.sleep(self.config.poll_interval)
+        # ⚠ 心跳放在**独立线程**里，不挂在下面的循环上。
+        #
+        #   原来是在 `run_once()` 之后调 `_maybe_heartbeat()` —— 而
+        #   `run_once()` 会执行 handler（跑 LLM / CLI，几十秒到几分钟）。
+        #   于是任何超过 `heartbeat_interval × 3` 的任务都会让节点变 stale，
+        #   期间别人投递被 `AU-APPROVE-05` 拒。
+        #
+        #   详见 `_start_heartbeat_thread` 的说明。
+        self._start_heartbeat_thread()
+
+        try:
+            while True:
+                if should_stop is not None and should_stop():
+                    return
+                try:
+                    task = self.run_once()
+                except PolicyDenied:
+                    task = None       # 已被记录，继续下一轮
+                if task is None:
+                    time.sleep(self.config.poll_interval)
+        finally:
+            self._hb_stop.set()
 
     # ------------------------------------------------------------------
     # 上行推送（Issuer 侧）
