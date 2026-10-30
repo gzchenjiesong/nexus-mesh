@@ -816,6 +816,124 @@ CA=/etc/nexus-mesh/tls/ca.pem
 
 ---
 
+## 4.5 实机部署记录（2026-10-30）
+
+改造完成后在腾讯云 CVM 上完成升级。**这一步发现两个单测覆盖不到的真实故障**
+——它们的共同点是「一切看起来正常」。
+
+### 最终状态
+
+| 项 | 值 |
+|---|---|
+| 代码 | `7e4fecf` |
+| 服务 | 4/4 active（mesh · hermes · taskflow · ui） |
+| 节点 | 3 个，全部 `alive` + 已批准 |
+| 端到端 | 2 个 `agent.ask` 任务完成（真的调用了 Hermes 与 OpenClaw） |
+| 指标 | 提交 2 · 完成 2 · 拒绝 0 · 延迟 p50≈5s |
+| `nxs verify` | 6 项全过（生产只有 1 个配置内节点，故项数少） |
+
+### 升级步骤（实际执行的顺序）
+
+```
+① 备份：代码版本 + 未提交改动 + 配置 + 数据库 + systemd 单元
+② 停服务（桥接 → mesh → ui）
+③ 处理未提交改动（服务器上两份文档是旧模型口径，丢弃；已备份）
+④ 拉取代码 7138bd8 → 7e4fecf
+⑤ 上传迁移后的配置，**先用新代码 verify 再替换**
+⑥ 清库（registry.db / queue.db 及 -wal/-shm；audit.ndjson 保留）
+⑦ 按依赖顺序起服务：mesh → 两个桥接 → ui
+⑧ 重新批准（清库后批准状态丢失）
+⑨ 重装 Agent 的 skill（否则 Agent 还按旧错误码表判断）
+```
+
+### 三个迁移决策
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| `work-desktop` 的角色 | **worker** | 它旧卡片是 `issuer + can_issue_types=["agent.ask"]`。新模型 `can_issue` 是布尔，无法表达"只能发某类" —— 选 driver 会让它能向云端派任意类型，那正是改造要根除的。代价：失去主动问云端的能力 |
+| 数据类型 | **清库重建** | 改造是整体替换，不做数据库迁移。批准状态需重建（4 条命令） |
+| `types:` 段 | **暂不加** | 先让链路跑通。代价：参数校验（`FM-PARAM-02`）不生效。作为下一步 |
+
+### 生产配置的三个角色 —— 为什么不是两个
+
+`serves` 由角色决定，所以**能力不同的节点必须是不同角色**：
+
+```
+hub      can_issue=true   serves=[work.summary]   协调节点
+agent    can_issue=true   serves=[agent.ask]      云端 Agent ×2
+worker   can_issue=false  serves=[work.query]     内网执行者
+```
+
+如果为了省事让协调节点和云端 Agent 共用 `driver`
+（`serves=[agent.ask, work.summary]`），则 `providers_of` 会说
+"协调节点也能服务 agent.ask" —— 而它根本没有那个 handler，
+任务投过去会执行失败。**宁可多两个角色，也不要让能力匹配说谎。**
+
+这是 06 §10「角色粒度 = 能力边界粒度」在生产上的第一次具体体现。
+
+---
+
+### ⚠ 故障一：注册成功但什么任务都收不到
+
+**现象**：桥接注册返回 200、`approved=True`、revision 正常递增。
+但实测：
+
+```
+providers_of("agent.ask") = []
+registered_types = ["work.summary"]
+```
+
+**根因**：桥接卡片的 `role: driver`，而生产配置的角色是
+`hub` / `agent` / `worker` —— **没有 `driver`**。于是
+`role_of()` 返回 `None` → `providers_of` 跳过它 → 没有任务能投给它。
+
+而它自己（心跳、注册、批准）全部正常。症状是"A2A 突然不通了"，
+每个组件都在报健康。
+
+**为什么启动校验没抓到**：`load_config` 校验的是**配置里的**节点
+（生产只有 coordinator），自注册节点压根不在其中。
+
+**修法**：注册端点补校验（`ce129ca`）—— role 不在配置的 roles 表里就拒绝。
+「接入即失败」比「注册成功但静默无效」好得多：前者知道找谁，后者只能猜。
+
+### ⚠ 故障二：`whoami` 在说反话
+
+**现象**：`nxs-cli whoami` 对一个 `can_issue=True` 的节点显示
+「发布：（无发布权）」。
+
+**根因**：改造删了 `constraints` 类，但 `cmd_whoami` 仍在读
+`card["constraints"]["can_issue_types"]`。因为用的是 `.get()`，
+**不报错**，只是永远落到 `or` 后面的默认文案。
+
+**`.get()` 的宽容把"字段被删"静默降级成了"永远显示默认值"。**
+
+**修法**（`7e4fecf`）：whoami 端点补 `role_definition`（与 `card` 平级，
+不塞进 card 里 —— 那会破坏 `to_dict()` 的往返不变式），展示层重写。
+角色查不到时明确警告。
+
+**为什么没有测试抓到**：没有任何测试断言过 whoami 的权限展示。
+展示层被当成"薄薄一层不会错"，但它是使用者的第一手信息 ——
+错了比 API 错更误导人。已补 4 条测试。
+
+### 顺带修的一处运维不一致
+
+`nxs/mgmt/config.py` 的 `DEFAULT_CONFIG_PATH = "config/local.yaml"`。
+仓库里那个文件是旧格式副本，于是**不带 `--config` 的运维命令会静默读到旧配置**
+（`nxs metrics` 就这样失败过）。
+
+修法：把它改成指向 `/etc/nexus-mesh/local.yaml` 的软链接，两处永远一致。
+
+### 遗留事项
+
+| 项 | 状态 |
+|---|---|
+| `work-desktop` 接入验证 | ⬜ 它在 Windows 公司电脑上，本次未启动。worker 边界已在本地用真实拓扑模拟验证（三种情形全部 `MX-ISSUER-01`） |
+| `types:` 段 | ⬜ 未加，参数校验不生效 |
+| 广播（`TypeDecl.delivery`） | ⬜ 按约定作为后续扩展 feature |
+| 内网"主动问云端"能力 | ⬜ work-desktop 改 worker 后失去。若需要，正确做法是给模型加 `role.can_issue_types`，而不是改回 driver |
+
+---
+
 ## 5. 顺带要清的文档债
 
 > ✅ **已完成（2026-10-30）**。
