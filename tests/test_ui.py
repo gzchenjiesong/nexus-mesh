@@ -816,3 +816,403 @@ class TestUnauthorizedUx:
         assert "clearInterval" in SHELL, (
             "页面内 401 分支没停轮询 —— 会白刷日志"
         )
+
+
+class TestTailReadPerformance:
+    """★★ 审计读取必须是尾部读，不能全量读盘。
+
+    ⚠ **这是加运行日志前必须解决的前提。**
+
+    原 ``read_recent`` 是 ``read_text().splitlines()[-limit:]`` —— 逻辑对，
+    但每次都把整个文件读进内存。生产审计文件 5.9 MB 时，
+    观察窗每 5 秒轮询 = **每天 99.5 GB 无用 IO**，而它只需要最后 100 行。
+
+    这类问题不报错、不会慢到被发现 —— 只是磁盘一直在转。
+    而观察窗的定位是"轻量只读"，让它全量扫审计文件与定位矛盾。
+
+    实测（2026-10-30，生产文件副本）：
+
+        文件      旧·读全文    新·尾部读
+        5.9 MB      8.21 ms      3.08 ms
+        59 MB      47.30 ms      3.57 ms    ← 旧实现线性增长，新实现不变
+
+    **关键不是"现在快多少"，而是"文件涨了不会变慢"。**
+    """
+
+    @staticmethod
+    def _tmpdir() -> Path:
+        """自建临时目录。
+
+        ⚠ 不用 pytest 的 ``tmp_path`` fixture：本环境下它会报
+        ``FileExistsError: mkdir ... pytest-of-unknown``（残留的
+        目录锁）。测的是读文件逻辑，用 ``tempfile`` 更直接、
+        也不受 pytest 会话目录状态影响。
+        """
+        import tempfile
+        return Path(tempfile.mkdtemp(prefix="nxs-audit-"))
+
+    def _big_file(self, tmp_path, lines: int):
+        p = tmp_path / "audit.ndjson"
+        with p.open("w", encoding="utf-8") as fh:
+            for i in range(lines):
+                fh.write(json.dumps({"ts": f"t{i:06d}", "outcome": "completed",
+                                     "n": i}) + "\n")
+        return p
+
+    @covers("M15.F9")
+    def test_returns_exact_tail(self):
+        """尾部读的结果必须与"读全文取尾部"完全一致。"""
+        from nxs.mgmt.audit import FileAuditStore
+
+        p = self._big_file(self._tmpdir(), 2000)
+        store = FileAuditStore(p)
+        for limit in (1, 7, 100, 1999, 2000, 5000):
+            got = store.read_recent(limit)
+            expected = tuple(
+                json.loads(ln) for ln in
+                p.read_text(encoding="utf-8").splitlines()[-limit:] if ln.strip()
+            )
+            assert got == expected, f"limit={limit} 结果不一致"
+            assert [r["n"] for r in got] == list(
+                range(2000 - len(got), 2000)), "取到的不是最后 N 条"
+
+    @covers("M15.F9")
+    def test_does_not_read_whole_file(self, monkeypatch):
+        """★ 断言"没有读整个文件"——不靠耗时而靠行为。
+
+        用一个大文件，检查实际读取的字节数远小于文件大小。
+        这比计时代更可靠（计时会被机器负载干扰）。
+        """
+        from nxs.mgmt import audit as audit_mod
+
+        p = self._big_file(self._tmpdir(), 20000)   # 约 1.5 MB
+        size = p.stat().st_size
+        assert size > 500_000, "测试文件应足够大才看得出差别"
+
+        read_bytes = {"n": 0}
+        real_open = audit_mod.Path.open
+
+        def counting_open(self, *a, **kw):
+            fh = real_open(self, *a, **kw)
+            if "b" in (a[0] if a else kw.get("mode", "r")):
+                real_read = fh.read
+
+                def read(*ra, **rkw):
+                    data = real_read(*ra, **rkw)
+                    read_bytes["n"] += len(data)
+                    return data
+                fh.read = read
+            return fh
+
+        monkeypatch.setattr(audit_mod.Path, "open", counting_open)
+        FileAuditStore = audit_mod.FileAuditStore
+        FileAuditStore(p).read_recent(50)
+        monkeypatch.undo()
+
+        assert read_bytes["n"] > 0, "没读到任何数据（测试本身失效）"
+        assert read_bytes["n"] < size / 2, (
+            f"读了 {read_bytes['n']} 字节 / 文件共 {size} 字节 —— "
+            "超过一半说明还在全量读。\n"
+            "  每 5 秒轮询一次，5.9MB 的文件就是每天 99.5GB 无用 IO。"
+        )
+
+    @covers("M15.F9")
+    def test_handles_multibyte_line_boundaries(self):
+        """★ 块边界切在多字节字符中间时不能崩、不能出乱码。
+
+        尾部读是二进制分块读的，chunk 边界可能正好落在
+        一个 UTF-8 汉字的三字节中间。第一行因此可能被切半 ——
+        那一行必须被丢弃（它不是完整行），而不是解码成乱码留下。
+        """
+        from nxs.mgmt.audit import FileAuditStore
+
+        p = self._tmpdir() / "cn.ndjson"
+        with p.open("w", encoding="utf-8") as fh:
+            for i in range(3000):
+                fh.write(json.dumps(
+                    {"ts": f"二〇二六年十月三十日 {i}", "outcome": "完成"},
+                    ensure_ascii=False) + "\n")
+
+        got = FileAuditStore(p).read_recent(100)
+        assert len(got) == 100
+        # 每一条都必须是完整可解析的对象，且中文完好
+        for r in got:
+            assert r["outcome"] == "完成", f"出现乱码: {r!r}"
+            assert "二〇二六年" in r["ts"], f"中文被切断: {r!r}"
+        assert got[-1]["ts"].endswith("2999")
+
+    @covers("M15.F9")
+    def test_tolerates_broken_and_unterminated_lines(self):
+        """坏行跳过、末尾无换行也不丢数据 —— 原有容错不能被换读取方式弄丢。"""
+        from nxs.mgmt.audit import FileAuditStore
+
+        p = self._tmpdir() / "b.ndjson"
+        p.write_text('{"a":1}\n{坏行\n{"a":3}\n{"a":4}', encoding="utf-8")
+
+        got = FileAuditStore(p).read_recent(5)
+        assert [r["a"] for r in got] == [1, 3, 4], (
+            f"容错失效：拿到 {got}\n"
+            "  坏行应跳过；末尾无换行的最后一行应保留。"
+        )
+
+    @covers("M15.F9")
+    def test_non_positive_limit_returns_empty(self):
+        """★ limit <= 0 返回空 —— 两个后端必须一致。
+
+        ⚠ 内存后端原实现是 ``tuple(self._records[-limit:])``，
+        踩了 Python 负数索引陷阱：
+
+            limit=0  → [-0:] → [0:] → **全部**
+            limit=-1 → [1:]  → 除第一条外的**全部**
+
+        实测（2026-10-30）请求 limit=0 返回了 5 条。
+        两个后端行为不一致本身就是隐患：测试走内存、生产走文件，
+        不一致会让"测试通过但生产不对"。
+        """
+        from nxs.backends.memory import MemoryAuditStore
+        from nxs.mgmt.audit import FileAuditStore
+
+        p = self._tmpdir() / "x.ndjson"
+        p.write_text('{"a":1}\n{"a":2}\n', encoding="utf-8")
+        file_store = FileAuditStore(p)
+
+        mem = MemoryAuditStore()
+        mem.append({"a": 1})
+        mem.append({"a": 2})
+
+        for limit in (0, -1, -100):
+            assert file_store.read_recent(limit) == (), (
+                f"文件后端 limit={limit} 应返回空"
+            )
+            assert mem.read_recent(limit) == (), (
+                f"内存后端 limit={limit} 返回了 {mem.read_recent(limit)} —— "
+                "负数索引陷阱（[-0:] 等于 [0:]）"
+            )
+
+
+class TestOpsAuditEndpoint:
+    """★★ ops/audit 端点必须有上限、要鉴权、且只回元信息。
+
+    ⚠ 这是唯一一个"返回量可由调用方指定"的运维动作 ——
+    不封顶的话，一个 ``limit=999999999`` 就能让服务端把整个审计文件
+    塞进内存再序列化成 JSON。
+    """
+
+    @pytest.fixture
+    def ops(self, live_coordinator):
+        from nxs.edge.client import OpsClient
+        return OpsClient(live_coordinator, secret=SECRET)
+
+    @covers("M15.F9")
+    def test_requires_ops_secret(self, live_coordinator):
+        """★ 无运维密钥必须被拒 —— 审计是"谁对谁做了什么"，不是公开数据。"""
+        from nxs.edge.client import OpsClient
+        from nxs.core.errors import ConfigError, PolicyDenied
+
+        with pytest.raises((ConfigError, PolicyDenied)):
+            OpsClient(live_coordinator, secret=b"wrong" * 10).audit()
+
+    @covers("M15.F9")
+    def test_limit_is_capped(self, ops):
+        """★ 超大 limit 必须被截断，并明确告诉调用方被截断了。"""
+        from nxs.edge.gateway import Gateway
+
+        got = ops.audit(limit=10 ** 9)
+        assert got["limit"] <= Gateway.OPS_AUDIT_MAX_LIMIT
+        assert got["truncated"] is True, (
+            "被截断了却没标 truncated —— 调用方会以为"
+            "「审计只有这么多条」，进而误判运行很空闲"
+        )
+        assert got["max_limit"] == Gateway.OPS_AUDIT_MAX_LIMIT
+
+    @covers("M15.F9")
+    def test_non_positive_limit_returns_empty(self, ops):
+        """limit=0 与负数返回空（不是 400，也不是全部）。"""
+        for limit in (0, -1, -999):
+            got = ops.audit(limit=limit)
+            assert got["records"] == [], f"limit={limit} 应返回空"
+            assert got["truncated"] is False
+
+    @covers("M15.F9")
+    def test_returns_metadata_only(self, ops, live_coordinator):
+        """★★ 审计记录**不得**含任务产出内容。
+
+        这是「运行日志」与「任务详情」的边界：
+        本项目设计上审计只写元信息（见 mgmt/audit.py 顶部两条硬约束）。
+        若哪天有人往审计里塞了 params / answer，这条会红。
+        """
+        from nxs.app import NexusApp  # noqa: F401  (确认类型可用)
+
+        got = ops.audit(limit=100)
+        forbidden = {"params", "answer", "content", "summary",
+                     "payload", "result", "body", "text"}
+
+        keys: set[str] = set()
+        for rec in got["records"]:
+            keys |= set(rec)
+
+        leak = keys & forbidden
+        assert not leak, (
+            f"审计记录里出现了业务内容字段：{sorted(leak)}\n"
+            "  审计只该有元信息 —— 展示产出是另一个安全等级。"
+        )
+        # 正向：必须有那几个关键元信息字段（否则列表没意义）
+        if got["records"]:
+            sample = got["records"][-1]
+            for k in ("ts", "outcome"):
+                assert k in sample, f"缺元信息字段 {k}"
+
+
+class TestSnapshotCarriesAudit:
+    """★ snapshot 必须带审计流，且三块数据失败互不牵连。"""
+
+    @covers("M15.F9")
+    def test_snapshot_includes_audit(self, live_ui):
+        """snapshot 要有 audit 字段（运行日志的数据来源）。"""
+        snap = live_ui.snapshot()
+        assert "audit" in snap, (
+            "snapshot 没有 audit 字段 —— 那样前端拿不到运行日志，\n"
+            "  而「运行日志」是观察窗目标的一半"
+        )
+        assert isinstance(snap["audit"], list)
+        assert "audit_truncated" in snap
+
+    @covers("M15.F9")
+    def test_audit_failure_does_not_break_nodes(self):
+        """★★ audit 拉取失败时，nodes 与 metrics 必须照常返回。
+
+        观察窗最需要工作的时候恰恰是出故障的时候。
+        旧版 coordinator 没有 /ops/audit 端点（501），
+        那时节点与指标都是好的 —— 不该因为日志拉不到就整页空白。
+        """
+        from unittest.mock import MagicMock
+        from nxs.ui.server import UiServer
+
+        srv = UiServer.__new__(UiServer)
+        srv.ops_url = "http://x/nxs"
+        ops = MagicMock()
+        ops.nodes.return_value = [{"node_id": "a"}]
+        ops.metrics.return_value = {"totals": {}}
+        ops.audit.side_effect = RuntimeError("HTTP 501")
+        srv._ops = ops
+
+        snap = srv.snapshot()
+        assert snap["nodes"] == [{"node_id": "a"}], "节点被审计失败拖累"
+        assert snap["metrics"] is not None, "指标被审计失败拖累"
+        assert snap["audit"] == []
+        assert "audit" in (snap["error"] or ""), (
+            "审计失败应在 error 里标出来 —— 否则人会以为「就是没有日志」"
+        )
+
+    @covers("M15.F9")
+    def test_metrics_and_audit_both_fail_keep_nodes(self):
+        """metrics 与 audit 同时失败，节点仍要显示。"""
+        from unittest.mock import MagicMock
+        from nxs.ui.server import UiServer
+
+        srv = UiServer.__new__(UiServer)
+        srv.ops_url = "http://x/nxs"
+        ops = MagicMock()
+        ops.nodes.return_value = [{"node_id": "a"}]
+        ops.metrics.side_effect = RuntimeError("boom1")
+        ops.audit.side_effect = RuntimeError("boom2")
+        srv._ops = ops
+
+        snap = srv.snapshot()
+        assert len(snap["nodes"]) == 1
+        err = snap["error"] or ""
+        assert "metrics" in err and "audit" in err, (
+            f"两个错误都要标出来，实际：{err!r}"
+        )
+
+
+class TestPageRendersNewSections:
+    """★ 页面得真的包含运行日志与待审批区块。
+
+    ⚠ 这类断言看着像"检查字符串"，但它防的是一个真实事故：
+    2026-10-30 发现角色列**永远显示 "—"** —— 因为前端读 `n.roles`
+    （旧模型对象），而服务端返回 `n.role`（新模型字符串）。
+    所有测试都是绿的，因为没有断言过那一列的渲染。
+    """
+
+    @covers("M15.F10")
+    def test_has_runtime_log_section(self):
+        assert 'id="audit"' in SHELL
+        assert "运行日志" in SHELL
+
+    @covers("M15.F10")
+    def test_has_pending_approval_hint(self):
+        """待审批提示要在，且**不含任何写按钮**。"""
+        assert 'id="pending"' in SHELL
+        # 不能有 forms/按钮 —— 写操作留给 CLI
+        low = SHELL.lower()
+        assert "<form" not in low, "观察窗不得有表单"
+        assert "<button" not in low, (
+            "观察窗不得有按钮 —— 审批是写操作，留在 nxs ops / SSH"
+        )
+
+    @covers("M15.F10")
+    def test_node_role_reads_new_model_field(self):
+        """★★ 角色列必须**真的读取**新模型的 `role` + `role_definition`。
+
+        这是那个"角色列永远显示 —"的 bug 的回归测试。
+
+        ⚠ 断言的是**具体读取语句**，不是"页面里出现过这个词"。
+        第一版用 ``"n.role_definition" in SHELL`` 做判据，反向验证时
+        **改坏了却不红** —— 因为同一个词还出现在注释和另一个 ``if`` 里，
+        断言被那两处满足了。**判据落在词上就守不住行为。**
+        """
+        # 真正读取字段的那一行（不是注释、不是判断条件）
+        assert "const rd = n.role_definition" in SHELL, (
+            "角色渲染没有从 role_definition 取值 —— 角色列会显示不出权限信息"
+        )
+        # 角色名本身
+        assert "n.role ||" in SHELL or "n.role " in SHELL, (
+            "没读 n.role（角色名字段）"
+        )
+        # 旧模型的字典必须已经消失：服务端不再返回 roles 对象，
+        # 留着它只会让角色列恒为 "—"
+        assert "ROLE_LABELS" not in SHELL, (
+            "残留旧模型的 ROLE_LABELS（issuer/executor/relay/observer）"
+        )
+        # ⚠ 这里**不**断言 "n.roles" 不出现 —— 代码注释里提到
+        #   「旧代码读 n.roles」是在解释 bug 成因，那是有价值的记录。
+        #   判据只锁"实际取值语句"（上一行的 const rd = ...），
+        #   锁词会误伤注释，也会像第一版那样被注释满足。
+
+    @covers("M15.F10")
+    def test_log_rows_are_colored_by_outcome(self):
+        """运行日志要按 outcome 上色 —— 排障时靠颜色扫，不靠读字。"""
+        for cls in (".o-completed", ".o-failed", ".o-denied"):
+            assert cls in SHELL, f"缺 {cls} 样式"
+        assert "OUTCOME_LABELS" in SHELL
+
+    @covers("M15.F10")
+    def test_never_uses_innerhtml(self):
+        """★ 渲染安全：绝不**调用**会解析标记的 API。
+
+        节点自报的 display_name / description 是不可信文本。
+        textContent 从结构上不解析标记 —— 这条不能被破。
+
+        ⚠ 断言的是"调用"而不是"提及"。代码里有一行注释
+        「绝不使用 innerHTML 承载任何数据」，那是在**说明为什么不用**，
+        不是违规。第一版用 ``"innerHTML" not in SHELL`` 做判据，
+        结果测试红了而代码是对的 —— **判据错了，不是代码错了**。
+
+        改用正则匹配真实的赋值/调用形态。
+        """
+        import re
+
+        dangerous = (
+            (r"\.innerHTML\s*=", "innerHTML 赋值"),
+            (r"\.outerHTML\s*=", "outerHTML 赋值"),
+            (r"\.insertAdjacentHTML\s*\(", "insertAdjacentHTML 调用"),
+            (r"document\.write\s*\(", "document.write 调用"),
+        )
+        for pat, label in dangerous:
+            hit = re.search(pat, SHELL)
+            assert not hit, (
+                f"页面里出现了危险的 {label}：{hit.group(0)!r}\n"
+                "  必须用 textContent —— 它从结构上不解析标记，\n"
+                "  而不是「小心避开了危险路径」。"
+            )

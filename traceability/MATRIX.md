@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **838** 个测试方法（已声明覆盖）· **137** 个纵向编号项（114 功能点 + 23 模块需求）
+共 **854** 个测试方法（已声明覆盖）· **139** 个纵向编号项（116 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -257,6 +257,8 @@ _（未实现，暂无功能点）_
 | **M15.F6** | 自报字段安全渲染（textContent 建 DOM · 不用 innerHTML） | `nxs/ui/page.py:el` | G3 | P1 | — | 9 |
 | **M15.F7** | 自报字段服务端校验（长度上限 · 拒控制字符） | `nxs/core/models.py:_clean_self_reported` | G3 | P1 | — | 1 |
 | **M15.F8** | 只读保证（无写方法 · 405 带 Allow） | `nxs/ui/server.py:Handler.do_POST` | G3 | P1 | — | 4 |
+| **M15.F9** | 运行日志视图（审计流 · 尾部读 · ops/audit 端点 · 按 outcome 着色） | `nxs/ui/page.py:renderAudit · nxs/mgmt/audit.py:read_recent · nxs/edge/gateway.py:_ops_audit` | G3 | P1 | — | 12 |
+| **M15.F10** | 待审批提示与指标补齐（denied_by_rule／by_type／节点吞吐／运行时长） | `nxs/ui/page.py:renderPending · renderDenials · renderByType` | G3 | P1 | — | 5 |
 
 ## 代码准则
 

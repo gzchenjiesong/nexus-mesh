@@ -159,13 +159,35 @@ class UiServer:
     # 数据聚合
     # ------------------------------------------------------------------
 
-    def snapshot(self) -> dict[str, Any]:
-        """拉一次节点与指标。
+    #: 观察窗每次拉多少条审计。
+    #:
+    #: 100 条的取舍：约 30 KB，够看清"最近发生了什么"；
+    #: 人眼也不会去读第 500 行 —— 需要更深的历史该去翻文件或用 grep，
+    #: 那不是观察窗的用途。
+    AUDIT_LIMIT = 100
 
-        **失败不抛异常**，而是把错误放进 ``error`` 字段：
-        观察窗最需要工作的时候恰恰是 coordinator 出问题的时候。
-        如果这里抛 500，浏览器只有一个空白页，看不出"是 coordinator 停了"
-        还是"UI 自己坏了"。
+    def snapshot(self) -> dict[str, Any]:
+        """拉一次节点、指标与审计流。
+
+        ## 三块数据的失败互不牵连（**重要**）
+
+        观察窗最需要工作的时候，恰恰是 coordinator 出问题的时候。
+        所以这里的原则是：**能拿到多少就显示多少。**
+
+        | 情况 | 行为 |
+        |---|---|
+        | ``nodes`` 拿不到 | 直接返回（没有节点就没得看），``error`` 记下 |
+        | ``metrics`` 拿不到 | 节点照常显示，只标指标的错 |
+        | ``audit`` 拿不到 | 节点与指标照常显示，只标审计的错 |
+
+        为什么 ``nodes`` 失败就整体返回：它是页面的主体，
+        没有节点列表时"有个指标数字"没有意义。而另外两块是**补充信息**，
+        缺一块不该让整页变空白。
+
+        ## 审计流为什么也在这里拉
+
+        观察窗的目标是「查看运行情况**以及运行日志**」。
+        审计流是后半段的唯一数据源 —— 见 ``gateway._ops_audit`` 的说明。
         """
         out: dict[str, Any] = {
             "at": datetime.now(timezone.utc).astimezone().isoformat(
@@ -176,6 +198,11 @@ class UiServer:
             "coordinator_url": self.ops_url,
             "nodes": [],
             "metrics": None,
+            #: 审计流（运行日志）。与 nodes/metrics 平级。
+            "audit": [],
+            #: 审计被服务端截断时的标记 —— 不显示出来的话，
+            #: 人会以为"只有这么多"，而实际是被上限砍了。
+            "audit_truncated": False,
             "error": None,
         }
         try:
@@ -188,6 +215,18 @@ class UiServer:
         except Exception as exc:  # noqa: BLE001
             # 节点拿到了、指标没拿到 —— 仍然把节点显示出来，只标指标的错
             out["error"] = f"metrics: {type(exc).__name__}: {exc}"
+        try:
+            audit = self._ops.audit(limit=self.AUDIT_LIMIT)
+            out["audit"] = list(audit.get("records") or [])
+            out["audit_truncated"] = bool(audit.get("truncated"))
+        except Exception as exc:  # noqa: BLE001
+            # ⚠ 审计拿不到**不能**影响前两块。
+            #   常见原因：旧版 coordinator 没有这个端点（501）、
+            #   或有端点但读文件失败。两种情况下节点与指标都是好的。
+            #   把错误累加到 error（不覆盖已有的），页面会显示成一行提示。
+            prev = out["error"]
+            marker = f"audit: {type(exc).__name__}: {exc}"
+            out["error"] = f"{prev} · {marker}" if prev else marker
         return out
 
 

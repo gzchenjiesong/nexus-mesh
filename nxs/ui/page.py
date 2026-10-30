@@ -104,6 +104,36 @@ SHELL = """<!DOCTYPE html>
   .err { border: 1px solid var(--bad); color: var(--bad); background: var(--card);
          border-radius: 8px; padding: 13px 16px; margin: 18px 0; }
   footer { margin-top: 34px; color: var(--dim); font-size: 12px; }
+
+  .pending { border-left: 3px solid var(--warn); background: var(--card);
+             border-radius: 0 8px 8px 0; padding: 13px 16px; margin: 18px 0; }
+  .pending .t { font-weight: 600; color: var(--warn); }
+  .pending .how { color: var(--dim); font-size: 12.5px; margin-top: 6px; }
+  .pending code { background: var(--bg); border: 1px solid var(--line);
+                  border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+  .row-pending { background: color-mix(in srgb, var(--warn) 9%, transparent); }
+
+  .log { width: 100%; border-collapse: collapse; background: var(--card);
+         border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+         font-size: 12.5px; }
+  .log th, .log td { padding: 7px 11px; border-bottom: 1px solid var(--line);
+                     white-space: nowrap; }
+  .log th { font-size: 11px; letter-spacing: .4px; color: var(--dim);
+            font-weight: 600;
+            text-transform: none; }
+  .log tr:last-child td { border-bottom: none; }
+  .log .t { font-family: ui-monospace, Menlo, monospace; color: var(--dim); }
+  .log .flow { font-family: ui-monospace, Menlo, monospace; }
+  .log .num { font-variant-numeric: tabular-nums; text-align: right;
+              color: var(--dim); }
+  .log .rule { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  .o-completed { color: var(--ok); font-weight: 600; }
+  .o-failed    { color: var(--bad); font-weight: 600; }
+  .o-denied    { color: var(--warn); font-weight: 600; }
+  .o-register  { color: var(--dim); }
+  .o-ops       { color: var(--accent); }
+  .log-empty { color: var(--dim); padding: 16px 14px; }
+  .trunc { color: var(--warn); font-size: 12px; margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -115,6 +145,7 @@ SHELL = """<!DOCTYPE html>
 </header>
 
 <div id="error"></div>
+<div id="pending"></div>
 
 <div class="bar" id="tiles"></div>
 
@@ -122,33 +153,44 @@ SHELL = """<!DOCTYPE html>
 <table>
   <thead>
     <tr>
-      <th style="width:26%">名称 / 简介</th>
-      <th style="width:13%">节点</th>
-      <th style="width:10%">域</th>
-      <th style="width:10%">状态</th>
-      <th style="width:8%">批准</th>
-      <th style="width:22%">角色</th>
+      <th style="width:22%">名称 / 简介</th>
+      <th style="width:11%">节点</th>
+      <th style="width:8%">域</th>
+      <th style="width:8%">状态</th>
+      <th style="width:9%">批准</th>
+      <th style="width:14%">角色</th>
+      <th style="width:13%">吞吐（收/成/败）</th>
       <th>能力</th>
     </tr>
   </thead>
   <tbody id="nodes"></tbody>
 </table>
 
+<h2>拒绝原因分布</h2>
+<div id="denials"></div>
+
+<h2>按任务类型</h2>
+<div id="bytype"></div>
+
+<h2>运行日志 <span class="meta" id="logstamp"></span></h2>
+<div id="audit"></div>
+
 <h2>系统级关联异常</h2>
 <div id="anomalies"></div>
 
 <footer>
   只读视图 —— 这里没有任何写操作。批准 / 吊销请用
-  <code>nxs ops</code>。<br>
-  数据经 coordinator 的运维端点取得，每 5 秒刷新。指标为内存态，重启归零。
+  <code>nxs ops</code>（或 SSH 上服务器执行）。<br>
+  数据经 coordinator 的运维端点取得，每 5 秒刷新。
+  节点与延迟为内存态，重启归零；运行日志读自审计文件，跨重启保留。
 </footer>
 
 <script>
 "use strict";
 
-const ROLE_LABELS = {
-  issuer: "发布", executor: "执行", relay: "中转",
-  observer: "只读", human_interface: "人机入口"
+const OUTCOME_LABELS = {
+  completed: "完成", failed: "失败", denied: "拒绝",
+  register: "注册", ops: "运维"
 };
 
 function el(tag, cls, text) {
@@ -158,6 +200,28 @@ function el(tag, cls, text) {
   //   节点自报的文本不可信，textContent 从结构上不解析标记。
   if (text !== undefined && text !== null) node.textContent = String(text);
   return node;
+}
+
+function fmtMs(v) {
+  if (v === null || v === undefined) return "—";
+  return Math.round(v) + "";
+}
+
+function fmtBytes(v) {
+  if (v === null || v === undefined) return "—";
+  if (v < 1024) return v + " B";
+  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + " KB";
+  return (v / 1024 / 1024).toFixed(1) + " MB";
+}
+
+function fmtUptime(sec) {
+  if (sec === null || sec === undefined) return "—";
+  const s = Math.floor(sec);
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h + "h" + String(m).padStart(2, "0");
 }
 
 function tile(label, value, unit) {
@@ -181,11 +245,42 @@ function renderTiles(m) {
   host.appendChild(tile("失败", t.failed ?? 0));
   host.appendChild(tile("拒绝", t.denied ?? 0));
   const lat = (m && m.latency_ms) || {};
-  const ms = (v) => (v === null || v === undefined) ? "—" : Math.round(v);
-  host.appendChild(tile("p50", ms(lat.p50), "ms"));
-  host.appendChild(tile("p95", ms(lat.p95), "ms"));
-  host.appendChild(tile("p99", ms(lat.p99), "ms"));
+  host.appendChild(tile("p50", fmtMs(lat.p50), "ms"));
+  host.appendChild(tile("p95", fmtMs(lat.p95), "ms"));
+  host.appendChild(tile("p99", fmtMs(lat.p99), "ms"));
   host.appendChild(tile("样本", (m && m.latency_samples) ?? 0));
+  // 运行时长：判断"指标为什么是小数字"的第一手信息 ——
+  // 刚重启时所有累计值都很小，没有这个会误以为网络很空闲。
+  if (m && m.uptime_seconds !== undefined) {
+    host.appendChild(tile("运行", fmtUptime(m.uptime_seconds)));
+  }
+}
+
+function renderPending(nodes) {
+  // 待审批提示。
+  //
+  // ⚠ 只展示，**不给批准按钮**。审批是写操作，留在 nxs ops / SSH。
+  //   这里的作用是让人知道"有节点在等"以及**怎么去批**，
+  //   而不是在这里批。理由见页面顶部与设计文档第五节。
+  const host = document.getElementById("pending");
+  host.replaceChildren();
+  const waiting = (nodes || []).filter(n => !n.approved);
+  if (!waiting.length) return;
+
+  const box = el("div", "pending");
+  const ids = waiting.map(n => n.node_id).join("、");
+  box.appendChild(el("div", "t",
+    "有 " + waiting.length + " 个节点等待批准：" + ids));
+  const how = el("div", "how");
+  how.appendChild(el("span", null, "未批准的节点无法收发任何任务。到服务器执行："));
+  const line = el("div");
+  line.style.cssText = "margin-top:6px";
+  const code = el("code", null,
+    "nxs ops approve <节点ID> --url <coordinator> --ca-file <ca.pem>");
+  line.appendChild(code);
+  how.appendChild(line);
+  box.appendChild(how);
+  host.appendChild(box);
 }
 
 function renderNodes(nodes) {
@@ -194,13 +289,15 @@ function renderNodes(nodes) {
   if (!nodes.length) {
     const tr = el("tr");
     const td = el("td", "meta", "（注册表为空）");
-    td.colSpan = 7;
+    td.colSpan = 8;
     tr.appendChild(td);
     body.appendChild(tr);
     return;
   }
   for (const n of nodes) {
     const tr = el("tr");
+    // 待审批的行整行高亮 —— 一眼扫到，不用逐行读"批准"列
+    if (!n.approved) tr.className = "row-pending";
 
     const cName = el("td");
     cName.appendChild(el("div", "name", n.display_name || "（未命名）"));
@@ -226,15 +323,52 @@ function renderNodes(nodes) {
       : el("span", "no", "· 待批准"));
     tr.appendChild(cAppr);
 
-    const cRoles = el("td");
-    const tags = el("div", "tags");
-    const roles = n.roles || {};
-    for (const [key, label] of Object.entries(ROLE_LABELS)) {
-      if (roles[key]) tags.appendChild(el("span", "tag", label));
+    // ---- 角色 ----
+    //
+    // ⚠ **这里修过一个"界面在说反话"的 bug（2026-10-30）。**
+    //
+    // 旧代码读 `n.roles`（旧模型的 issuer/executor/relay/observer 布尔对象），
+    // 而 ops nodes 改造后返回的是 `n.role`（字符串）+ `n.role_definition`。
+    // 结果：**角色列永远显示 "—"**，而所有测试都是绿的 ——
+    // 因为没有任何测试断言过这一列的渲染。
+    //
+    // 是同一类问题的第三次：whoami 恒显示"无发布权"、注册成功但收不到任务、
+    // 角色列恒为 "—"。共同点都是**读了一个已经不存在的字段，
+    // 而 .get()/|| 让它静默降级成默认值**。
+    const cRole = el("td");
+    const rd = n.role_definition || {};
+    const roleName = n.role || "（未声明）";
+    if (n.role_definition) {
+      const can = rd.can_issue ? "可发布" : "不可发布";
+      cRole.appendChild(el("span", "tag", roleName));
+      const note = el("div", "desc", can);
+      if (rd.max_response_level) {
+        note.textContent = can + " · 上限 " + rd.max_response_level;
+      }
+      cRole.appendChild(note);
+    } else {
+      // 角色查不到定义 = 这个节点发不出也收不到任何任务。
+      // 这是"注册成功但静默无效"的状态，必须说出来。
+      cRole.appendChild(el("span", "no", roleName + " ⚠ 无定义"));
     }
-    if (!tags.childNodes.length) tags.appendChild(el("span", "tag", "—"));
-    cRoles.appendChild(tags);
-    tr.appendChild(cRoles);
+    tr.appendChild(cRole);
+
+    // ---- 吞吐 ----
+    const cTp = el("td");
+    cTp.className = "caps";
+    const recv = n.received ?? "—";
+    const done = n.completed ?? "—";
+    const fail = n.failed ?? "—";
+    cTp.textContent = recv + " / " + done + " / " + fail;
+    // 积压与执行中：能看出"它是不是卡住了"
+    if (n.pending || n.in_flight) {
+      const busy = el("div", "desc");
+      busy.textContent = "待办 " + (n.pending ?? 0) +
+                         " · 执行中 " + (n.in_flight ?? 0);
+      if (n.pending > 0) busy.className = "desc stale";
+      cTp.appendChild(busy);
+    }
+    tr.appendChild(cTp);
 
     const caps = (n.capabilities || []).join(", ") || "—";
     tr.appendChild(el("td", "caps", caps));
@@ -242,6 +376,164 @@ function renderNodes(nodes) {
     body.appendChild(tr);
   }
 }
+
+function renderDenials(m) {
+  const host = document.getElementById("denials");
+  host.replaceChildren();
+  const d = (m && m.denied_by_rule) || {};
+  const keys = Object.keys(d);
+  if (!keys.length) {
+    host.appendChild(el("div", "none", "无拒绝记录。"));
+    return;
+  }
+  // 说明：这个区块存在的意义是**区分"越权尝试"与"普通失败"**。
+  // 只看总数"拒绝 2"看不出原因；按规则分组才知道是
+  // AU-APPROVE-05（未批准）还是 MX-DOMAIN-02（域不通）。
+  const table = el("table", "log");
+  const thead = el("thead");
+  const htr = el("tr");
+  htr.appendChild(el("th", null, "规则"));
+  htr.appendChild(el("th", null, "次数"));
+  thead.appendChild(htr);
+  table.appendChild(thead);
+  const tb = el("tbody");
+  for (const k of keys.sort((a, b) => d[b] - d[a])) {
+    const tr = el("tr");
+    const c1 = el("td");
+    c1.appendChild(el("span", "rule o-denied", k));
+    tr.appendChild(c1);
+    tr.appendChild(el("td", "num", d[k]));
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb);
+  host.appendChild(table);
+}
+
+function renderByType(m) {
+  const host = document.getElementById("bytype");
+  host.replaceChildren();
+  const bt = (m && m.by_type) || {};
+  const keys = Object.keys(bt);
+  if (!keys.length) {
+    host.appendChild(el("div", "none", "暂无任务。"));
+    return;
+  }
+  const table = el("table", "log");
+  const thead = el("thead");
+  const htr = el("tr");
+  for (const h of ["任务类型", "提交", "完成", "失败", "失败率"]) {
+    htr.appendChild(el("th", null, h));
+  }
+  thead.appendChild(htr);
+  table.appendChild(thead);
+  const tb = el("tbody");
+  for (const k of keys.sort()) {
+    const r = bt[k] || {};
+    const sub = r.submitted ?? 0;
+    const fail = r.failed ?? 0;
+    const rate = sub > 0 ? Math.round(fail / sub * 100) : 0;
+    const tr = el("tr");
+    const c1 = el("td");
+    c1.appendChild(el("span", "rule", k));
+    tr.appendChild(c1);
+    tr.appendChild(el("td", "num", sub));
+    tr.appendChild(el("td", "num", r.completed ?? 0));
+    const cFail = el("td", "num");
+    if (fail > 0) cFail.className = "num o-failed";
+    cFail.textContent = String(fail);
+    tr.appendChild(cFail);
+    const cRate = el("td", "num");
+    if (rate > 0) cRate.className = "num o-failed";
+    cRate.textContent = rate + "%";
+    tr.appendChild(cRate);
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb);
+  host.appendChild(table);
+}
+
+function outcomeKey(o) {
+  // "register:unchanged" → "register"；用于选样式
+  return String(o || "").split(":")[0];
+}
+
+function renderAudit(records, truncated) {
+  const host = document.getElementById("audit");
+  const stamp = document.getElementById("logstamp");
+  host.replaceChildren();
+  stamp.textContent = records.length ? "（最近 " + records.length + " 条）" : "";
+
+  if (!records.length) {
+    host.appendChild(el("div", "log-empty", "暂无审计记录。"));
+    return;
+  }
+
+  const table = el("table", "log");
+  const thead = el("thead");
+  const htr = el("tr");
+  for (const h of ["时间", "来源 → 目标", "类型", "状态", "耗时 ms", "字节", "规则"]) {
+    htr.appendChild(el("th", null, h));
+  }
+  thead.appendChild(htr);
+  table.appendChild(thead);
+
+  const tb = el("tbody");
+  // 最新在最上面 —— 排障时人关心"刚才"，不想滚到底
+  for (const r of records.slice().reverse()) {
+    const tr = el("tr");
+
+    const ts = String(r.ts || "");
+    const cTs = el("td", "t");
+    // 只留 HH:MM:SS，日期放 title 里（同一天的日志不需要重复日期）
+    cTs.textContent = ts.length >= 19 ? ts.slice(11, 19) : ts;
+    cTs.title = ts;
+    tr.appendChild(cTs);
+
+    const cFlow = el("td", "flow");
+    const from = r.from_node || "—";
+    const to = r.to_node || "—";
+    cFlow.textContent = from + " → " + to;
+    tr.appendChild(cFlow);
+
+    tr.appendChild(el("td", "rule", r.task_type || "—"));
+
+    // 状态：按 outcome 着色。这是整张表最需要扫的列。
+    const out = String(r.outcome || "—");
+    const ok = outcomeKey(out);
+    const cOut = el("td");
+    const span = el("span", "o-" + ok, OUTCOME_LABELS[ok] || out);
+    span.title = out;
+    cOut.appendChild(span);
+    tr.appendChild(cOut);
+
+    tr.appendChild(el("td", "num", fmtMs(r.duration_ms)));
+    // 字节数：0 表示"这次事件没有产出内容"（拒绝、注册、运维都如此），
+    // 显示 "0 B" 会让人以为"产出了空内容"。用 "—" 区分这两件事。
+    const bytes = (r.bytes === undefined || r.bytes === null) ? null : r.bytes;
+    tr.appendChild(el("td", "num",
+      (bytes === null || bytes === 0) ? "—" : fmtBytes(bytes)));
+
+    // 规则码：失败/拒绝的关键线索。成功时留空，避免一片噪音。
+    const rid = r.rule_id ? String(r.rule_id) : "";
+    const cRule = el("td");
+    if (rid) {
+      cRule.appendChild(el("span", "rule o-denied", rid));
+    } else {
+      cRule.appendChild(el("span", "rule", ""));
+    }
+    tr.appendChild(cRule);
+
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb);
+  host.appendChild(table);
+
+  if (truncated) {
+    host.appendChild(el("div", "trunc",
+      "⚠ 服务端只返回了上限条数，更早的记录未显示。"));
+  }
+}
+
 
 function renderAnomalies(list) {
   const host = document.getElementById("anomalies");
@@ -304,8 +596,13 @@ async function refresh() {
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
     showError(data.error ? ("coordinator 不可达：" + data.error) : "");
+    const nodes = data.nodes || [];
     renderTiles(data.metrics);
-    renderNodes(data.nodes || []);
+    renderPending(nodes);
+    renderNodes(nodes);
+    renderDenials(data.metrics);
+    renderByType(data.metrics);
+    renderAudit(data.audit || [], data.audit_truncated);
     renderAnomalies(data.metrics ? data.metrics.anomalies : []);
     document.getElementById("stamp").textContent =
       "最后更新 " + new Date().toLocaleTimeString("zh-CN");

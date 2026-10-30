@@ -70,17 +70,55 @@ class FileAuditStore(AuditStore):
                 # 磁盘满、权限变更、句柄耗尽——都必须让调用方知道
                 raise AuditError(f"审计写入失败: {self._path}: {exc}") from exc
 
+    #: 尾部读的块大小。
+    #:
+    #: 64 KiB 是个折中：一次 read 大约能覆盖几百条记录（单条约 300 字节），
+    #: 而 syscall 次数少。调大收益不大，调小会让大文件时 syscall 变多。
+    _TAIL_CHUNK = 64 * 1024
+
     def read_recent(self, limit: int = 100) -> Sequence[dict[str, Any]]:
-        if not self._path.exists():
+        """读最近 ``limit`` 条记录，**从文件末尾倒着读**。
+
+        ## ⚠ 为什么不用 ``read_text()`` 再取尾部（2026-10-30 改）
+
+        原实现是::
+
+            lines = self._path.read_text(encoding="utf-8").splitlines()
+            return tuple(... for line in lines[-limit:])
+
+        逻辑正确，但**每次都要把整个文件读进内存**。
+
+        生产实测暴露了问题：审计文件涨到 5.9 MB 后，
+        观察窗每 5 秒轮询一次 → **每天 99.5 GB 无用 IO**。
+        而它每次只需要最后 100 行（约 30 KB）。
+
+        这类问题的特点是**不会报错、不会变慢到被发现**——
+        只是磁盘一直在转。观察窗本身是"轻量只读"的定位，
+        让它去全量扫审计文件与定位矛盾。
+
+        ## 实现要点
+
+        · 从末尾 seek，往前读 chunk，凑够行数就停
+        · **不读的部分连内存都不进**，所以 100 MB 的审计文件
+          读最后 100 行仍是 O(30 KB)
+        · 未读到文件开头时，**第一行可能被切在多字节字符中间** ——
+          丢弃它（它不是完整行）。用 ``errors="replace"`` 兜底，
+          不让一个坏字节毁掉整次读取。
+
+        ⚠ 保留原有的单行容错：解析失败的行跳过，不影响其他行。
+        那是 NDJSON 的价值之一，不该因为换了读取方式而丢掉。
+        """
+        if limit <= 0 or not self._path.exists():
             return ()
+
         with self._lock:
             try:
-                lines = self._path.read_text(encoding="utf-8").splitlines()
+                lines = self._tail_lines(limit)
             except OSError as exc:
                 raise AuditError(f"审计读取失败: {exc}") from exc
 
         out: list[dict[str, Any]] = []
-        for line in lines[-limit:]:
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -90,6 +128,42 @@ class FileAuditStore(AuditStore):
                 # 单行损坏不影响其他行——这是 NDJSON 的容错优势
                 continue
         return tuple(out)
+
+    def _tail_lines(self, limit: int) -> list[str]:
+        """从文件末尾倒着读，返回最后至多 ``limit`` 行（未解析）。
+
+        调用方已持锁。
+        """
+        with self._path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            pos = fh.tell()
+            if pos == 0:
+                return []
+
+            chunks: list[bytes] = []
+            newlines = 0
+            # 多读一个换行的余量：文件末尾可能没有换行符，
+            # 那样 N 行只有 N-1 个换行，卡在 limit 会少读一行。
+            while pos > 0 and newlines <= limit:
+                size = min(self._TAIL_CHUNK, pos)
+                pos -= size
+                fh.seek(pos)
+                chunk = fh.read(size)
+                chunks.append(chunk)
+                newlines += chunk.count(b"\n")
+
+        data = b"".join(reversed(chunks))
+
+        # 没读到文件开头 → 首行多半被切成半截。
+        # 丢掉它：半行 JSON 解析必然失败，留着只是白费一次解析。
+        if pos > 0:
+            cut = data.find(b"\n")
+            data = data[cut + 1:] if cut >= 0 else b""
+
+        # errors="replace"：即便如此仍可能有坏字节（磁盘损坏、手改过）。
+        # 一个坏字节不该让整个观察窗报错。
+        text = data.decode("utf-8", errors="replace")
+        return text.splitlines()[-limit:]
 
     def summary(self) -> dict[str, Any]:
         records = self.read_recent(limit=10_000)

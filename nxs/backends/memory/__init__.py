@@ -209,6 +209,27 @@ class MemoryAuditStore(AuditStore):
             self._records.append(dict(record))
 
     def read_recent(self, limit: int = 100) -> Sequence[dict[str, Any]]:
+        """读最近 ``limit`` 条。
+
+        ⚠ **``limit <= 0`` 必须返回空，不能靠切片实现。**
+
+        原实现是 ``tuple(self._records[-limit:])`` —— 看着对，但踩了
+        Python 的负数索引陷阱：
+
+            limit=0   →  self._records[-0:]  →  self._records[0:]  →  **全部**
+            limit=-1  →  self._records[1:]   →  除第一条外的**全部**
+
+        也就是说"要 0 条"会拿到全部、"要 -1 条"也拿到几乎全部。
+        2026-10-30 加 ``ops/audit`` 端点时实测暴露（请求 limit=0 返回 5 条）。
+
+        这个 bug 长期没被发现，是因为既有调用方传的都是正数大值
+        （``summary()`` 传 10_000）。但**两个后端行为不一致本身就是隐患**：
+        测试走内存后端、生产走文件后端，不一致会让"测试通过但生产不对"。
+
+        现在与 ``FileAuditStore.read_recent`` 对齐：非正数一律返回空。
+        """
+        if limit <= 0:
+            return ()
         with self._lock:
             return tuple(self._records[-limit:])
 

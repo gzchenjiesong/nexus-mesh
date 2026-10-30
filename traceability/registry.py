@@ -568,10 +568,30 @@ FEATURES: tuple[Feature, ...] = (
     Feature("M15.F7", "自报字段服务端校验（长度上限 · 拒控制字符）",
             "nxs/core/models.py:_clean_self_reported",
             ("G3",), "P1"),
-    Feature("M15.F8", "只读保证（无写方法 · 405 带 Allow）",
-            "nxs/ui/server.py:Handler.do_POST",
-            ("G3",), "P1"),
-)
+      Feature("M15.F8", "只读保证（无写方法 · 405 带 Allow）",
+              "nxs/ui/server.py:Handler.do_POST",
+              ("G3",), "P1"),
+      # ---- F9／F10（2026-10-30 加）----
+      #
+      # 为什么加这两个：观察窗的目标是「查看**运行情况**以及**运行日志**」。
+      # F1–F8 只覆盖了前半段。排查 2026-10-30 那次 work-macbook 死机时，
+      # 查死因靠 journalctl、查任务失败靠手工解析 audit.ndjson，
+      # **UI 一件都没帮上** —— 只能看"此刻"的观察窗，出故障时恰恰最没用。
+      #
+      # 与"刻意不做任务详情"的边界：F9 展示审计**元信息**
+      # （时间/谁→谁/类型/状态/耗时/字节/错误码），不含产出文本。
+      Feature("M15.F9",
+              "运行日志视图（审计流 · 尾部读 · ops/audit 端点 · 按 outcome 着色）",
+              "nxs/ui/page.py:renderAudit · nxs/mgmt/audit.py:read_recent"
+              " · nxs/edge/gateway.py:_ops_audit",
+              ("G3",), "P1"),
+      # F10 的审批边界：只展示"有 N 个节点待批准"与批准命令，**不给按钮** ——
+      # 审批是写操作，留在 nxs ops / SSH（F8 的只读性不被破坏）。
+      Feature("M15.F10",
+              "待审批提示与指标补齐（denied_by_rule／by_type／节点吞吐／运行时长）",
+              "nxs/ui/page.py:renderPending · renderDenials · renderByType",
+              ("G3",), "P1"),
+  )
 
 
 # ===========================================================================

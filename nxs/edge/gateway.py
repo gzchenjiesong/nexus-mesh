@@ -310,6 +310,24 @@ class Gateway:
     :param server_config: 省略时取 ``app.config.server``
     """
 
+    #: ``ops/audit`` 一次能拉的上限。
+    #:
+    #: ⚠ **必须有硬上限。** 这是唯一一个"返回量可由调用方指定"的运维动作 ——
+    #: 不封顶的话，一个 ``limit=999999999`` 就能让服务端把整个审计文件
+    #: 塞进内存再序列化成 JSON。
+    #:
+    #: 1000 条的取舍：观察窗默认只要 100 条（约 30 KB）；
+    #: 1000 条约 300 KB，够人工翻查一次故障的上下文，
+    #: 又不至于让单次响应把网关的并发槽占太久。
+    #:
+    #: ⚠ **定义在 Gateway 而不是内部 Handler 上**：它是对外契约的一部分
+    #: （调用方要能查上限），而 Handler 是 `_make_handler` 里生成的
+    #: 内部实现类 —— 把契约藏在那里，外部只能靠试。
+    OPS_AUDIT_MAX_LIMIT = 1000
+
+    #: ``ops/audit`` 的默认条数。与观察窗默认值一致，避免"要了才发现不够"。
+    OPS_AUDIT_DEFAULT_LIMIT = 100
+
     def __init__(self, app: NexusApp, *,
                  server_config: ServerConfig | None = None,
                  authenticator: Authenticator | None = None,
@@ -1102,11 +1120,18 @@ class _Handler(BaseHTTPRequestHandler):
     def _handle_ops(self, action: str, method: str, full_path: str) -> None:
         """运维动作。**必须由运维身份签名**，且不经节点配额。
 
-        四个动作：
+        六个动作（四个写 + 两个读）：
         * ``approve`` —— 批准某节点（审批针对的是它当前那张角色卡）
         * ``revoke`` —— 吊销某节点，立即生效
         * ``release`` —— 释放过期租约（断电恢复不及时时的兜底）
         * ``nodes`` —— 列出所有节点及其状态
+        * ``metrics`` —— 运行时指标（内存态，重启归零）
+        * ``audit`` —— 最近 N 条审计记录（**只读，只含元信息**）
+
+        ⚠ ``audit`` 是 2026-10-30 加的。理由：观察窗的目标是「查看运行情况
+        **以及运行日志**」，而审计流是唯一同时含"谁→谁/类型/成败/原因/
+        耗时"的地方。缺了它，UI 只能看"此刻"看不到"刚才"，
+        而出故障时需要的恰恰是"刚才"。详见 :meth:`_ops_audit`。
 
         **为什么这些动作不做限流、不占并发槽**：节点流量洪水时正是最需要
         运维介入的时候。若运维通道与节点共用配额，故障时运维会被自己的
@@ -1187,8 +1212,73 @@ class _Handler(BaseHTTPRequestHandler):
             ]})
         elif action == "metrics":
             self._send_json(200, self.gw.collect_metrics())
+        elif action == "audit":
+            self._send_json(200, self._ops_audit(payload))
         else:
             self._reject_status(501, f"unknown ops action: {action}")
+
+    def _ops_audit(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """返回最近 N 条审计记录。**只读，且只含元信息。**
+
+        ## 为什么值得暴露这个端点
+
+        观察窗的目标是「查看运行情况**以及运行日志**」。
+        在它之前，查"刚才发生了什么"只能靠：
+
+            journalctl -u nexus-mesh | grep ...
+            python3 -c "逐行解析 /var/lib/nexus-mesh/audit.ndjson"
+
+        而审计流是**唯一**同时含"谁→谁、什么类型、成败、原因、耗时、
+        字节数"的地方。没有它，观察窗只能看"此刻"，看不到"刚才"——
+        而出故障时需要的恰恰是"刚才"。
+
+        ## 为什么不让 UI 直接读文件
+
+        UI 的硬约束是**只经运维端点取数**，不 import 存储、不碰活文件。
+        直读会新增一条绕过策略层的数据通道，违反"数据出口唯一"。
+        所以必须由这里（持有存储的一侧）来读。
+
+        ## 安全边界：不含业务内容
+
+        审计记录按设计只写元信息（见 ``mgmt/audit.py`` 顶部两条硬约束）。
+        实测生产文件各字段最长字符串：``ts`` 25 字符、``outcome`` 21、
+        ``from_node`` 17 —— **没有 params / answer / content**。
+
+        所以这次返回的是"运行日志"，不是"任务产出"。
+        展示产出是另一个安全等级，不在这个端点、也不在观察窗里。
+        """
+        raw = payload.get("limit", self.gw.OPS_AUDIT_DEFAULT_LIMIT)
+        try:
+            limit = int(raw)
+        except (TypeError, ValueError):
+            self._reject_status(400, f"limit 必须是整数，收到 {raw!r}")
+            return {"error": "unreachable"}      # pragma: no cover
+
+        if limit <= 0:
+            # 0 或负数理解为"不要记录"，返回空列表比 400 更友好。
+            #
+            # ⚠ **在这里直接返回，不调 read_recent。** 理由：切片式实现
+            # （``records[-limit:]``）在 limit=0 时会返回**全部** ——
+            # Python 里 ``[-0:]`` 等于 ``[0:]``。实测内存后端就有这个坑。
+            # 与其指望每个后端都正确处理边界，不如在入口拦住。
+            return {
+                "records": [], "limit": 0, "truncated": False,
+                "max_limit": self.gw.OPS_AUDIT_MAX_LIMIT,
+            }
+
+        capped = min(limit, self.gw.OPS_AUDIT_MAX_LIMIT)
+
+        records = list(self.gw.app.audit.read_recent(limit=capped))
+
+        return {
+            "records": records,
+            #: 明确回传实际生效的条数 —— 调用方请求 5000、实际拿到 1000 时，
+            #: 不告诉它就会以为"审计只有 1000 条"。
+            "limit": capped,
+            #: 请求被截断时标出来，便于调用方决定是否分页
+            "truncated": limit > capped,
+            "max_limit": self.gw.OPS_AUDIT_MAX_LIMIT,
+        }
 
     def _authenticate_ops(self, full_path: str, body: bytes) -> str:
         """校验运维身份。
