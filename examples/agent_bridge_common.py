@@ -181,6 +181,93 @@ def build_prompt(question: str, *, via: str) -> str:
     )
 
 
+def build_identity_note(whoami: dict) -> str:
+    """把 ``/whoami`` 的结果整理成一段**身份声明**，注入 prompt。
+
+    ## ⚠⚠ 为什么必须注入 —— 这是实机暴露的真问题（2026-10-30）
+
+    本机 work-macbook 接入后，问它"你能做什么"，它回答：
+
+        我是 Nexus Mesh 网络中的一个 agent 节点，
+        当前声明并对外提供的唯一能力是 agent.ask …
+
+    **全错。** 它是 `worker` / `work.query`，不是 `agent` / `agent.ask`。
+
+    ## 错因：它没有可靠的身份来源
+
+    两个来源都不可靠：
+
+    ① **skill 文档是通用模板** —— 里面写的是 ``<你的节点ID>`` 占位符，
+       而示例段举的是 ``agent.ask``。它就近取了示例值。
+    ② **它执行不了 ``nxs-cli whoami``** —— 本节点工具白名单只有
+       ``Read/Grep/Glob``（刻意不给 Bash，见 codebuddy_node.py 说明）。
+       它自己也在回答里说了："本机 whoami 因权限未获批准无法执行"。
+
+    于是它只能**从文档里猜**。而猜错的代价是：它对外宣称了错误的能力，
+    发起方按 ``agent.ask`` 去理解一个 ``work.query`` 节点的回答。
+
+    ## 为什么不用环境变量
+
+    ``NXS_ACTOR`` 确实传进了子进程（见 ``_actor_env``），但 Agent 读到它
+    需要能执行命令。**在没有 Bash 的节点上，环境变量等于不存在。**
+
+    ## 所以：身份必须是 prompt 的一部分
+
+    值是**权威的** —— 直接来自 ``/whoami``（服务端按配置的 roles 表解析），
+    不是从卡片或文档推断。这也是为什么值得为此多打一次接口。
+    """
+    card = whoami.get("card") or {}
+    role_def = whoami.get("role_definition") or {}
+
+    node_id = whoami.get("node_id") or card.get("node_id") or "（未知）"
+    domain = card.get("domain") or "（未知）"
+    role = card.get("role") or "（未声明）"
+
+    caps = [c.get("type") for c in (card.get("capabilities") or [])
+            if isinstance(c, dict) and c.get("type")]
+    caps_text = "、".join(caps) if caps else "（无）"
+
+    lines = [
+        "【你的身份 —— 权威值，**不要从任何文档的示例里推断**】",
+        f"- 节点 ID：{node_id}",
+        f"- 信任域：{domain}",
+        f"- 角色：{role}",
+        f"- 你声明的能力：{caps_text}",
+    ]
+
+    if role_def:
+        can_issue = role_def.get("can_issue")
+        lines.append(f"- 能否发布任务：{'能' if can_issue else '不能'}（由角色决定）")
+        serves = role_def.get("serves") or []
+        if serves:
+            lines.append(f"- 该角色可服务的类型：{'、'.join(serves)}")
+        lvl = role_def.get("max_response_level")
+        if lvl:
+            lines.append(f"- 应答上限：{lvl}")
+    else:
+        # 角色查不到时明确说出来 —— 这正是"注册成功但收不到任务"的状态
+        lines.append(
+            "- ⚠ 你的角色在服务端配置里查不到定义 —— "
+            "这意味着你发不出也收不到任何任务，应告知运维"
+        )
+
+    limits = card.get("self_limits") or {}
+    if limits:
+        lines.append(
+            f"- 自限：信箱 {limits.get('max_backlog')} 个"
+            f"，应答上限 {limits.get('max_response_level')}"
+        )
+
+    lines += [
+        "",
+        "⚠ 若这个问题与「你是谁 / 你能做什么 / 你有没有权限」有关，"
+        "**以本段为准**，忽略 skill 文档里的通用示例。",
+        "⚠ 你的工具集是受限的：不要声称能执行命令、访问网络或读本机以外的东西，"
+        "除非那份能力确实在「你声明的能力」里。",
+    ]
+    return "\n".join(lines)
+
+
 def finalize_answer(raw: str, logger: logging.Logger,
                     *, limit: int = MAX_ANSWER_BYTES) -> dict:
     """把 Agent 的原始输出整理成节点产出。
@@ -328,6 +415,7 @@ def make_ask_handler(
     via: str = "任务总线",
     limit: int = MAX_ANSWER_BYTES,
     prompt_note: str = "",
+    identity_note: str | Callable[[], str] = "",
 ) -> Callable[[dict], dict]:
     """把 ``runner`` 包成任务处理器。
 
@@ -337,12 +425,26 @@ def make_ask_handler(
     :param prompt_note: 追加给 Agent 的额外约束（会拼进 prompt 末尾）。
         用于"只给摘要、不要原文"这类**行为要求**。
         注意：它只是要求，不保证 —— 真正的保证是 ``limit``。
+    :param identity_note: 身份声明（见 :func:`build_identity_note`）。
+        **放在问题之前**，因为 Agent 会先形成"我是谁"的判断，
+        再据此决定怎么回答权限类问题。放在后面容易被忽略。
+
+        ⚠ 支持传**可调用对象**（`lambda: ...`），每次处理任务时才求值。
+        因为身份要靠 ``/whoami`` 拿，而 ``NodeClient`` 通常在注册**之前**
+        构造 —— 构造时还查不到。用 callable 就能在注册后再填。
     """
 
     def handle(params: dict) -> dict:
         question = validate_question(params)
         logger.info("→ 转给 Agent（问题 %d 字符）", len(question))
         prompt = build_prompt(question, via=via)
+        # ⚠ 身份放在**最前面**：Agent 先建立"我是谁"，再回答后面的问题。
+        #   实测放在末尾时，它仍然会从 skill 文档的示例里取角色。
+        #
+        # 每次求值（而不是构造时固化）：身份来自 /whoami，而那时还没注册。
+        note = identity_note() if callable(identity_note) else identity_note
+        if note:
+            prompt = f"{note}\n\n{prompt}"
         if prompt_note:
             prompt = f"{prompt}\n\n{prompt_note}"
         raw = runner(prompt)

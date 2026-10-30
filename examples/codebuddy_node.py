@@ -87,6 +87,7 @@ from examples.agent_bridge_common import (
     DEFAULT_TIMEOUT,
     SUMMARY_LIMIT,
     TEXT_KWARGS,
+    build_identity_note,
     make_ask_handler,
     run_subprocess,
     scrub_secrets,
@@ -1833,6 +1834,17 @@ def main() -> int:
 
     card = build_card(args.node_id, args.domain, allowed_tools=allowed_tools,
                       profile=args.profile)
+
+    #: 身份声明持有者。**注册之后**才用 ``/whoami`` 填充 ——
+    #: handler 每次处理任务时读它当前值，所以延迟求值。
+    #:
+    #: ⚠ 为什么需要这个：CodeBuddy 没有 Bash，执行不了 `nxs-cli whoami`，
+    #: 而 skill 文档是通用模板（``<你的节点ID>`` 占位符）。
+    #: 结果是它会**从文档示例里猜自己是谁** —— 实测它把自己猜成了
+    #: `agent` / `agent.ask`，而它实际是 `worker` / `work.query`。
+    #: 详情见 ``agent_bridge_common.build_identity_note``。
+    identity_holder: dict[str, str] = {"note": ""}
+
     client = NodeClient(
         NodeConfig(
             args.node_id,
@@ -1851,6 +1863,7 @@ def main() -> int:
                 logger=log, via="任务总线",
                 limit=limit,
                 prompt_note="" if args.allow_raw else SUMMARY_PROMPT_NOTE,
+                identity_note=lambda: identity_holder["note"],
             )},
             levels={"work.query": Level.SUMMARY},
             card=card,
@@ -1875,6 +1888,37 @@ def main() -> int:
     log.info("注册结果：outcome=%s approved=%s", outcome, approved)
     log.info("能力：work.query（上限 %d 字节）· 工具白名单：%s",
              limit, ", ".join(allowed_tools))
+
+    # ---- 取身份，供 prompt 注入 ----
+    #
+    # ⚠ 这一步不能省。CodeBuddy 执行不了 `nxs-cli whoami`（没有 Bash），
+    #   而不告诉它自己是谁时，它会**从 skill 文档的示例里猜** ——
+    #   实测把自己猜成了 `agent` / `agent.ask`（它是 worker / work.query）。
+    #
+    # 取不到就降级：留空 note，节点照常工作，只是回答"你是谁"类问题时
+    # 可能不准。**不因为身份查不到就不让节点启动** —— 收发任务本身
+    # 不依赖这段文案。
+    try:
+        info = transport.whoami()
+        identity_holder["note"] = build_identity_note(info)
+        role_def = info.get("role_definition") or {}
+        log.info(
+            "身份：%s · 域=%s · 角色=%s（%s）· 可服务=%s",
+            info.get("node_id"),
+            (info.get("card") or {}).get("domain"),
+            (info.get("card") or {}).get("role"),
+            "可发布" if role_def.get("can_issue") else "不可发布",
+            "、".join(role_def.get("serves") or []) or "（无）",
+        )
+        if not role_def:
+            log.warning(
+                "⚠ 服务端查不到角色 %r 的定义 —— 该节点发不出也收不到任何任务。"
+                "检查服务端 local.yaml 的 roles: 段。",
+                (info.get("card") or {}).get("role"),
+            )
+    except Exception as exc:      # noqa: BLE001
+        # 不阻断启动：身份文案只影响"你是谁"类问题的准确性
+        log.warning("取身份失败（不影响收发任务，但回答身份类问题可能不准）：%s", exc)
 
     if outcome == "error":
         log.error("注册**失败** —— 这不是「待批准」，是连不上或鉴权不过。")

@@ -43,6 +43,11 @@ VENV_PY="$REPO_ROOT/.venv/bin/python"
 CA_FILE="$HOME/.nexus-mesh/ca.pem"
 ACTOR_DIR="$HOME/.nexus-mesh/agents"
 PID_FILE="/tmp/nxs-$NODE_ID.pid"
+
+#: CodeBuddy 的项目级 skill 目录。**必须和仓库里的源文件保持一致** ——
+#: 否则 Agent 会按过期文档回答（实测把角色说成了旧模型的 agent/agent.ask）。
+SKILL_DST="$HOME/.codebuddy/skills/nexus-mesh/SKILL.md"
+SKILL_SRC="$REPO_ROOT/nexus-mesh-skill.md"
 LOG_FILE="/tmp/nxs-$NODE_ID.log"
 
 #: 只读三件 —— 默认白名单。
@@ -51,6 +56,30 @@ READONLY_TOOLS=(Read Grep Glob)
 FULL_TOOLS=(Read Grep Glob Bash WebFetch)
 
 die() { echo "  ✗ $*" >&2; exit 1; }
+
+install_skill() {
+    # 把仓库里的 skill 同步到 CodeBuddy 的 skill 目录。
+    #
+    # ⚠ **这一步漏过一次，代价是节点回答错误的自我认知。**
+    #
+    #   2026-10-30：本机 skill 还停在 2026-10-28 的旧版（改造前），
+    #   里面写着「让运维加 issuer 与 can_issue_types」这种旧模型说法。
+    #   Agent 读了它，于是把自己说成了旧模型的角色。
+    #
+    #   **只在服务器上跑过 install-skill.sh，漏了本机。**
+    #   所以现在放进启停脚本 —— 每次 start 都同步，不靠记性。
+    if [ ! -f "$SKILL_SRC" ]; then
+        echo "  ⚠ 找不到 skill 源文件：$SKILL_SRC（跳过同步）"
+        return 0
+    fi
+    mkdir -p "$(dirname "$SKILL_DST")"
+    if [ -f "$SKILL_DST" ] && cmp -s "$SKILL_SRC" "$SKILL_DST"; then
+        echo "  skill 已是最新"
+        return 0
+    fi
+    cp "$SKILL_SRC" "$SKILL_DST"
+    echo "  skill 已同步 → $SKILL_DST"
+}
 
 preflight() {
     [ -x "$VENV_PY" ]   || die "找不到 venv：${VENV_PY}（先在仓库根目录跑 make 或装依赖）"
@@ -90,6 +119,8 @@ cmd_start() {
     [ "${1:-}" = "--with-bash" ] && with_bash="yes"
 
     preflight
+    install_skill
+
     if pid="$(running_pid)"; then
         echo "  已在运行（PID ${pid}）—— 要重启先 stop"
         return 0
@@ -119,6 +150,7 @@ cmd_start() {
 
 cmd_foreground() {
     preflight
+    install_skill
     export NXS_ACTOR_DIR="$ACTOR_DIR"
     echo "  前台运行（Ctrl-C 停）· 日志同时写 $LOG_FILE"
     # shellcheck disable=SC2046
@@ -168,14 +200,16 @@ case "${1:-}" in
     stop)       cmd_stop ;;
     status)     cmd_status ;;
     foreground) cmd_foreground ;;
+    skill)      install_skill ;;
     log)        tail -f "$LOG_FILE" ;;
     *)
         cat <<USAGE
-用法：$0 {start [--with-bash] | stop | status | foreground | log}
+用法：$0 {start [--with-bash] | stop | status | foreground | skill | log}
 
   start       后台启动（默认只读工具：Read/Grep/Glob）
   start --with-bash  含 Bash/WebFetch —— 攻击面大，慎用
   foreground  前台运行，Ctrl-C 停（调 CodeBuddy 行为时用这个）
+  skill       只同步 skill 文档（start 会自动做）
   status      进程状态 + 服务端视角的 whoami
   log         跟踪日志
 USAGE

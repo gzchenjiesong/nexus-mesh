@@ -1777,3 +1777,158 @@ class TestSalvageTruncatedOutput:
         assert answer == "这是回答正文", (
             f"没能从截断输出里救出回答，实际 {answer!r}"
         )
+
+
+class TestIdentityIsInjectedIntoPrompt:
+    """★★ 节点必须被告知自己的身份，不能从文档里猜。
+
+    ⚠⚠ **这是实机暴露的真问题（2026-10-30）。**
+
+    本机 work-macbook 接入后，问它"你能做什么"，它回答：
+
+        我是 Nexus Mesh 网络中的一个 agent 节点，
+        当前声明并对外提供的唯一能力是 agent.ask …
+
+    **全错。** 它是 `worker` / `work.query`。
+
+    ## 错因：两个身份来源都不可靠
+
+    | 来源 | 问题 |
+    |---|---|
+    | skill 文档 | 通用模板，写的是 `<你的节点ID>`，示例举 `agent.ask` —— 它就近取了示例值 |
+    | `nxs-cli whoami` | **执行不了** —— 本节点白名单只有 Read/Grep/Glob，刻意不给 Bash |
+
+    于是它只能猜。而猜错的代价是：它对外宣称了错误的能力，
+    发起方按 `agent.ask` 去理解一个 `work.query` 节点的回答。
+
+    ## 为什么不用环境变量
+
+    `NXS_ACTOR` 确实传进了子进程，但**在没有 Bash 的节点上，
+    环境变量等于不存在** —— 它没法读。
+
+    ## 所以：身份必须进 prompt
+
+    值来自 `/whoami`（服务端按 roles 表解析），是权威的。
+    """
+
+    #: 一份真实形状的 whoami 响应
+    _WHOAMI = {
+        "node_id": "work-macbook",
+        "approved": True,
+        "state": "alive",
+        "card": {
+            "node_id": "work-macbook",
+            "domain": "zone-work",
+            "role": "worker",
+            "display_name": "CodeBuddy · MacBook",
+            "capabilities": [{"type": "work.query", "level": "summary",
+                              "mode": "sync"}],
+            "self_limits": {"max_backlog": 20,
+                            "max_response_level": "summary"},
+        },
+        "role_definition": {
+            "can_issue": False,
+            "serves": ["work.query"],
+            "max_response_level": "summary",
+        },
+        "usage": {"pending": 0},
+    }
+
+    @covers("M5.F7")
+    def test_note_contains_authoritative_identity(self):
+        """身份声明必须含节点 ID、域、角色、能力、发布权。"""
+        from examples.agent_bridge_common import build_identity_note
+
+        note = build_identity_note(self._WHOAMI)
+
+        assert "work-macbook" in note, "缺节点 ID"
+        assert "zone-work" in note, "缺信任域"
+        assert "worker" in note, "缺角色"
+        assert "work.query" in note, (
+            f"缺自己的能力 —— 这正是它会猜错的地方：\n{note}"
+        )
+        assert "不能" in note and "发布" in note, "缺发布权（worker 应显示不能）"
+
+    @covers("M5.F7")
+    def test_note_does_not_leak_wrong_capability(self):
+        """★ worker 的身份声明里不该出现 agent.ask（那是它会猜错的值）。"""
+        from examples.agent_bridge_common import build_identity_note
+
+        note = build_identity_note(self._WHOAMI)
+        assert "agent.ask" not in note, (
+            f"身份声明里混进了 agent.ask —— 与卡片不符：\n{note}"
+        )
+
+    @covers("M5.F7")
+    def test_note_warns_when_role_undefined(self):
+        """★ 角色查不到定义时必须明确警告。
+
+        这正是"注册成功但收不到任务"的状态 —— 该让 Agent 说出来，
+        而不是让它继续猜。
+        """
+        from examples.agent_bridge_common import build_identity_note
+
+        bad = dict(self._WHOAMI, role_definition=None)
+        note = build_identity_note(bad)
+        assert "查不到定义" in note, (
+            f"角色查不到却没警告：\n{note}"
+        )
+
+    @covers("M5.F7")
+    def test_identity_is_placed_before_question(self):
+        """★ 身份必须在问题**之前** —— Agent 先建立"我是谁"再答题。
+
+        实测放末尾时它仍然从文档示例取角色。
+        """
+        from examples.agent_bridge_common import (
+            build_identity_note, make_ask_handler,
+        )
+
+        seen: list[str] = []
+
+        def fake_runner(prompt: str) -> str:
+            seen.append(prompt)
+            return "好的"
+
+        handler = make_ask_handler(
+            fake_runner, logger=logging.getLogger("t"),
+            identity_note=build_identity_note(self._WHOAMI),
+        )
+        handler({"question": "你能做什么？"})
+
+        prompt = seen[0]
+        id_pos = prompt.find("work-macbook")
+        q_pos = prompt.find("你能做什么")
+        assert id_pos >= 0, "身份没进 prompt"
+        assert q_pos >= 0, "问题没进 prompt"
+        assert id_pos < q_pos, (
+            "身份在问题之后 —— 实测这样它仍会从文档示例里取角色"
+        )
+
+    @covers("M5.F7")
+    def test_callable_identity_is_resolved_per_call(self):
+        """★ 支持 callable：注册后才能拿到身份，构造时还没有。
+
+        `NodeClient` 通常在注册**之前**构造，那时 `/whoami` 还查不到。
+        """
+        from examples.agent_bridge_common import make_ask_handler
+
+        holder = {"note": ""}
+        prompts: list[str] = []
+
+        handler = make_ask_handler(
+            lambda p: prompts.append(p) or "ok",
+            logger=logging.getLogger("t"),
+            identity_note=lambda: holder["note"],
+        )
+
+        # 第一次：身份还没填
+        handler({"question": "q1"})
+        assert "work-macbook" not in prompts[0]
+
+        # 注册后填入，第二次应当带上
+        holder["note"] = "【你的身份】work-macbook"
+        handler({"question": "q2"})
+        assert "work-macbook" in prompts[1], (
+            "callable 身份没在注册后生效 —— 节点会一直不知道自己是谁"
+        )
