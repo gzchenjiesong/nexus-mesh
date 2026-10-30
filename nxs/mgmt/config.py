@@ -800,9 +800,22 @@ def load_config(path: str | os.PathLike[str] | None = None, *,
     )
 
     # ---- 节点与角色卡 ----
+    #
+    # ⚠ **`nodes` 允许为空**（2026-10-30 实机部署时改的）。
+    #
+    # 旧假设是"配置里总要有节点"。改造后 mesh 不再是网络里的一个节点
+    # （Step 5a），**纯自注册拓扑**（所有 Agent 都自己连进来）是合法形态 ——
+    # 这时 `nodes` 段当然是空的。
+    #
+    # 生产上就是这么用的：配置里一个节点都没有，三个 Agent 全部自注册。
+    #
+    # 注意与 `domains:` 的区别：空 `nodes` 不表示"不接纳节点"，
+    # 接纳与否由 `domains:` 段声明。
     raw_nodes = raw.get("nodes")
-    if not isinstance(raw_nodes, (list, tuple)) or not raw_nodes:
-        raise ConfigError(f"{resolved.name}: nodes 必须是非空列表")
+    if raw_nodes is None:
+        raw_nodes = []
+    if not isinstance(raw_nodes, (list, tuple)):
+        raise ConfigError(f"{resolved.name}: nodes 必须是列表")
 
     nodes: dict[str, RoleCard] = {}
     secrets: dict[str, bytes] = {}
