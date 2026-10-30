@@ -235,12 +235,39 @@ SUMMARY_PROMPT_NOTE = (
 # 角色卡
 # ---------------------------------------------------------------------------
 
+#: 本桥接的两种部署形态。差别只在**身份文案**，权限与能力完全相同。
+#:
+#: ⚠ 为什么要有这个区分：卡片里的 `display_name` / `description` 会出现在
+#: `ops nodes` 与观察窗里，运维靠它们分辨「这是哪台机器」。
+#: 同一份代码跑在公司电脑和本地 Mac 上，若文案一样，
+#: 清单里就会出现两条一模一样的"CodeBuddy · 公司电脑"——**认不出谁是谁**。
+#:
+#: 权限层面两者刻意相同（都是 worker + work.query）：本地 Mac 是
+#: work-desktop 的**调改替身**，不是另一种角色。差异只在该机器
+#: 能不能访问公司内部 CLI，而那不是 mesh 该管的事。
+DEPLOYMENT_PROFILES: dict[str, tuple[str, str]] = {
+    "workstation": (
+        "CodeBuddy · 公司电脑",
+        "公司内网执行者。凭证留在内网，只回传摘要。",
+    ),
+    "macbook": (
+        "CodeBuddy · MacBook",
+        "本地开发机执行者（work-desktop 的调改替身）。"
+        "无公司内部 CLI，work.query 用本机文件与通用知识回答。",
+    ),
+}
+
+
 def build_card(node_id: str, domain: str, *,
-               allowed_tools: tuple[str, ...] = ()) -> RoleCard:
+               allowed_tools: tuple[str, ...] = (),
+               profile: str = "workstation") -> RoleCard:
     """声明本节点是什么、能做什么。
 
     ⚠ **必须确定性生成**：不放时间戳、不放随机串。
     卡片一变，服务端的批准自动撤销。
+
+    :param profile: 部署形态，见 :data:`DEPLOYMENT_PROFILES`。
+        只影响 `display_name` / `description` 文案，不影响权限。
 
     ## 为什么只有 `work.query` 一个能力
 
@@ -253,16 +280,19 @@ def build_card(node_id: str, domain: str, *,
     ``max_response_level`` 给 ``summary``：协议层的级别限制。
     它与 ``SUMMARY_LIMIT``（字节数）是**两道不同的闸门**，都要有。
     """
+    if profile not in DEPLOYMENT_PROFILES:
+        raise ValueError(
+            f"未知的 profile {profile!r}；可选：{sorted(DEPLOYMENT_PROFILES)}"
+        )
+    base_name, base_desc = DEPLOYMENT_PROFILES[profile]
+
     tools_note = (f"允许的工具：{', '.join(allowed_tools)}" if allowed_tools
                   else "未限制工具（不建议）")
     return RoleCard.from_dict({
         "node_id": node_id,
         "domain": domain,
-        "display_name": "CodeBuddy · 公司电脑",
-        "description": (
-            "公司内网执行者。凭证留在内网，只回传摘要。"
-            f"{tools_note}"
-        ),
+        "display_name": base_name,
+        "description": f"{base_desc}{tools_note}",
         "heartbeat_interval": 30,
 
         # ★ 以什么角色接入 —— **worker：只被委托，不能发布任何任务**
@@ -1515,6 +1545,11 @@ def main() -> int:
         "NXS_NODE_ID", DEFAULT_NODE_ID))
     parser.add_argument("--domain", default=os.environ.get(
         "NXS_DOMAIN", "zone-work"))
+    parser.add_argument(
+        "--profile", default=os.environ.get("NXS_PROFILE", "workstation"),
+        choices=sorted(DEPLOYMENT_PROFILES),
+        help="部署形态，只影响清单里的显示文案（workstation=公司电脑 / "
+             "macbook=本地开发机）。权限与能力完全相同。")
     parser.add_argument("--url", default=os.environ.get("NXS_COORDINATOR_URL", ""))
     parser.add_argument("--ca-file", default=os.environ.get("NXS_CA_FILE", ""))
     parser.add_argument("--bin", default=os.environ.get("CODEBUDDY_BIN", DEFAULT_BIN))
@@ -1680,7 +1715,8 @@ def main() -> int:
         log.warning("⚠ --allow-raw 已开启：回传上限提到 4096 字节。"
                     "确认这些内容可以离开内网。")
 
-    card = build_card(args.node_id, args.domain, allowed_tools=allowed_tools)
+    card = build_card(args.node_id, args.domain, allowed_tools=allowed_tools,
+                      profile=args.profile)
     client = NodeClient(
         NodeConfig(
             args.node_id,

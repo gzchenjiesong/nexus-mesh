@@ -1316,8 +1316,23 @@ class TestNoDeadVocabulary:
         "docs/observability.md",
         "docs/artifact-size.md",
         "deploy/README.md",
-        "docs/design/01-system-definition.md",
         "traceability/MATRIX.md",
+    )
+
+    #: 设计档案 —— 豁免。
+    #:
+    #: ⚠ `docs/design/01-system-definition.md` 原本在描述性清单里，
+    #: 2026-10-30 移出。理由：它有一节「原角色 | 问题」的表格，
+    #: 逐条列出旧模型的缺陷（Issuer/Executor 的 4 种组合全不参与判定、
+    #: Relay 从未实现、Observer 没有通道）—— **那是改造的直接依据**，
+    #: 删掉就只剩结论，将来没人知道为什么改。
+    #:
+    #: 它同时含变更记录（v1.1 命名方案、待定项定案过程），
+    #: 性质与 03/04 的历史快照相同：正确性标准是"如实反映当时"。
+    #:
+    #: 判断依据不是"哪个文件方便"，而是**它是否在定义词汇表或记录历史**。
+    DESIGN_DOCS = (
+        "docs/design/01-system-definition.md",
     )
 
     #: 历史快照 —— 豁免。改了反而失真。
@@ -1355,6 +1370,61 @@ class TestNoDeadVocabulary:
             "    ② 确需引用旧写法 → 那一行加 <!-- ok:describes-removed -->\n"
             "    ③ 若整份文档是历史快照 → 加进 SNAPSHOT_DOCS 并说明理由\n"
             "  ⚠ 不要只是为了让它绿就改词表 —— 先判断是文档过时还是词表太宽"
+        )
+
+    #: 旧模型的角色名。新模型只有 `worker` / `driver` / `publisher`。
+    #:
+    #: ⚠ 这些词**不单独进 DEAD_VOCAB**：讲"为什么放弃 Relay"
+    #: 或"Observer 没有通道"时必须提到它们，那是改造依据。
+    #: 真正会误导的是**并列列表**——「Issuer 发布 / Executor 执行 /
+    #: Relay 中转 / Observer 只读」这种把旧模型当现状介绍的写法。
+    #: 见下面 test_no_legacy_role_roster。
+    LEGACY_ROLE_NAMES = ("Issuer", "Executor", "Relay", "Observer")
+
+    @covers("M11.F1")
+    def test_no_legacy_role_roster(self):
+        """★★ 不得把旧角色**并列**成一张"当前角色表"。
+
+        ⚠ **这条来自 2026-10-30 的一次真实现场**。
+
+        本机 Agent（work-macbook）接入后，问它"这个仓库是做什么的"，
+        它读了本地 README 后回答：
+
+            节点角色：Issuer(发布)、Executor(执行)、Relay(中转)、Observer(只读)
+
+        **这是旧模型，早就删了。** 而 README 的术语表当时确实还写着这一行
+        —— 因为 `TestNoDeadVocabulary` 的词表精确到字段路径
+        （`roles.issuer`），抓不到裸角色名。
+
+        单测抓不到、CI 抓不到，**是 Agent 读文档时抓到的**。
+
+        这条守护的判据是「一行内出现 **≥2 个**旧角色名」：
+        单独提一个通常是在讲历史（"Relay 从未实现"），
+        并列两个以上才是在给读者介绍"角色有这些"。
+        """
+        offenders: list[str] = []
+
+        for rel in self.DESCRIPTIVE_DOCS:
+            path = REPO_ROOT / rel
+            if not path.exists():
+                continue
+            for lineno, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1):
+                if "ok:describes-removed" in line:
+                    continue
+                found = [n for n in self.LEGACY_ROLE_NAMES if n in line]
+                if len(found) >= 2:
+                    offenders.append(
+                        f"{rel}:{lineno} {found} — {line.strip()[:60]}")
+
+        assert not offenders, (
+            "这些行把旧角色并列成了「当前角色表」：\n  "
+            + "\n  ".join(offenders)
+            + "\n\n  新模型的角色只有 worker / driver / publisher。"
+
+            "\n  ⚠ 若确实在讲历史（如「Relay 从未实现」），单独提一个角色名即可；"
+            "\n  若整份文档是设计档案或历史快照，加进 DESIGN_DOCS / SNAPSHOT_DOCS。"
+            "\n\n  **这类错误单测抓不到，但 Agent 会读到并照着回答。**"
         )
 
     @covers("M11.F1")

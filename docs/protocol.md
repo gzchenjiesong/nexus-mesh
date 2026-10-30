@@ -371,7 +371,7 @@ paused 的节点在网络上**完全合法**，只是暂时不接活。用准入
 |---|---|---|---|
 | `/nxs/register` | POST | 节点自注册 / 心跳（提交角色卡） | ✅ v0.3 |
 | `/nxs/poll` | GET | 拉取待办任务（返回即打租约） | ✅ v0.2 |
-| `/nxs/publish` | POST | 发布任务（需 Issuer 角色） | ✅ v0.2 |
+| `/nxs/publish` | POST | 发布任务（需角色 `can_issue: true`） | ✅ v0.2 |
 | `/nxs/result` | POST | 回传结果（含产物） | ✅ v0.2 |
 | `/nxs/fail` | POST | 报告失败 | ✅ v0.2 |
 | `/nxs/events` | GET | 订阅通知流（SSE，仅通知不含数据） | ✅ v0.2 |

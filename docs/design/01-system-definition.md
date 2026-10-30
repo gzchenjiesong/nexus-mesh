@@ -798,7 +798,7 @@ Core 不知道自己是跑在云服务器还是别处，也不知道数据存在
 |---|---|---|
 | **N1** | **系统命名** 已定案 | **系统名 Nexus · 工程名 Nexus Mesh · 代号 nxs。**见 01 章；本文档已完成全量替换 |
 | **N8** | **ASCII 代号** 已定案 | **nxs**。用于域名 nxs.example.com、环境变量 NXS_*、模块路径 nxs/*、API 前缀 /nxs/* |
-| **N2** | **Work 的 Issuer 角色是否开放**（Q9 的迁移） | 决定 7.5 权限矩阵里 work→cloud 那一格 |
+| **N2** | **Work 的发布权** 已定案 | **不开放。** 权限模型改造（2026-10）后 `work-desktop` 与 `work-macbook` 均为 `worker`（`can_issue=false`）——「内网机器不能派活」是那轮改造的起点。详见 [`06-agent-role-model.md`](06-agent-role-model.md) |
 | **N3** | **第一批任务类型清单**（Q8 的迁移） | 决定 M3 注册表初始内容与 M5 白名单；**P1 的交付前提** |
 | **N4** | 存储后端选型（SQLite 起步 vs 直接上 Postgres） | SQLite 在单机 + 低频下完全够用，且零运维。**建议起步用 SQLite，S2/S3 阶段再换** |
 | **N5** | 是否引入独立进程 vs 主 Agent 内嵌模块 | 按你的铁律应当是**独立进程**，否则边界会不断被侵蚀。但需确认主 Agent 侧的调用方式（MCP / HTTP） |
