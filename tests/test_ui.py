@@ -1088,8 +1088,16 @@ class TestSnapshotCarriesAudit:
         from unittest.mock import MagicMock
         from nxs.ui.server import UiServer
 
-        srv = UiServer.__new__(UiServer)
-        srv.ops_url = "http://x/nxs"
+        # ⚠ 用**真实构造函数**，再用 MagicMock 顶掉 _ops。
+        #
+        # 早先是 `UiServer.__new__(UiServer)` 硬塞几个属性 —— 那在
+        # 只读 snapshot 时能跑，但阶段 1 给 UiServer 加了 `_snapshot_lock`
+        # 与 `_last_good`（内存末次成功），__new__ 就缺这些属性了。
+        #
+        # 更根本的理由：**测试该用真实构造路径**。绕过 __init__ 意味着
+        # 新增的任何实例状态都不会被测试感知 —— 那种"测试绿但功能缺"的
+        # 漏洞正是本文件其它地方反复踩过的。
+        srv = UiServer("http://127.0.0.1:18800/nxs", b"x" * 32)
         ops = MagicMock()
         ops.nodes.return_value = [{"node_id": "a"}]
         ops.metrics.return_value = {"totals": {}}
@@ -1110,8 +1118,7 @@ class TestSnapshotCarriesAudit:
         from unittest.mock import MagicMock
         from nxs.ui.server import UiServer
 
-        srv = UiServer.__new__(UiServer)
-        srv.ops_url = "http://x/nxs"
+        srv = UiServer("http://127.0.0.1:18800/nxs", b"x" * 32)
         ops = MagicMock()
         ops.nodes.return_value = [{"node_id": "a"}]
         ops.metrics.side_effect = RuntimeError("boom1")

@@ -604,6 +604,21 @@ FEATURES: tuple[Feature, ...] = (
               "待审批提示与指标补齐（denied_by_rule／by_type／节点吞吐／运行时长）",
               "nxs/ui/page.py:renderPending · renderDenials · renderByType",
               ("G3",), "P1"),
+      # ---- F11／F12（2026-11-13 阶段 1）----
+      #
+      # 加这两个是因为一个结构性矛盾：观察窗的数据全部来自 coordinator
+      # 的 ops 端点，于是 coordinator 卡死时面板什么都拿不到 ——
+      # 而"它卡死了"正是面板唯一有意义的时刻。
+      #
+      # 2026-10-31 那次冻结 13 天，面板能说的只有"连不上"，和 curl 没区别。
+      Feature("M15.F11",
+              "本地探针（进程/wchan/线程/accept 队列 → 判定 dead／unresponsive／healthy）",
+              "nxs/ui/probe.py:probe_coordinator",
+              ("G3",), "P1"),
+      Feature("M15.F12",
+              "内存末次成功兜底（coordinator 挂时给最后已知状态 + 明确时间戳，不落盘）",
+              "nxs/ui/server.py:UiServer._fill_stale",
+              ("G3",), "P1"),
   )
 
 

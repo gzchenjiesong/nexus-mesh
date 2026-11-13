@@ -134,6 +134,48 @@ SHELL = """<!DOCTYPE html>
   .o-ops       { color: var(--accent); }
   .log-empty { color: var(--dim); padding: 16px 14px; }
   .trunc { color: var(--warn); font-size: 12px; margin-top: 6px; }
+
+  /* ---- 阶段 1：探针与陈旧态 ----
+   *
+   * 三态用**视觉层级**区分，不只是文案：
+   *   实时   → 正常
+   *   陈旧   → 整块降透明度 + 虚线边框 + 顶部横幅
+   *   无历史 → 只显示探针
+   *
+   * ⚠ 陈旧态刻意用 opacity 而非变灰：变灰会被误认为 disabled，
+   *   而降透明度保留可读性，又一眼看得出"这不是新的"。
+   */
+  .probe { border: 1px solid var(--line); border-left: 0; border-radius: 10px;
+           background: var(--card); padding: 13px 16px; margin: 18px 0; }
+  .probe .head { display: flex; align-items: baseline; gap: 10px;
+                 flex-wrap: wrap; margin-bottom: 8px; }
+  .probe .verdict { font-weight: 600; }
+  .probe .verdict.healthy      { color: var(--ok); }
+  .probe .verdict.dead         { color: var(--bad); }
+  .probe .verdict.unresponsive { color: var(--bad); }
+  .probe .verdict.unknown      { color: var(--dim); }
+  .probe .note { color: var(--fg); font-size: 12.5px; line-height: 1.6; }
+  .probe .facts { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 9px;
+                  font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+                  color: var(--dim); }
+  .probe .facts b { color: var(--fg); font-weight: 600; }
+  .probe .warn { color: var(--warn); font-size: 12.5px; margin-top: 8px;
+                 padding-left: 14px; }
+  .probe .warn li { margin-top: 3px; }
+  .probe .unavail { color: var(--dim); font-size: 11.5px; margin-top: 8px; }
+
+  .banner { border-radius: 10px; padding: 13px 16px; margin: 18px 0;
+            border: 1px solid var(--bad); background: var(--card); }
+  .banner.stale { border-color: var(--warn); }
+  .banner .t { font-weight: 600; }
+  .banner.stale .t { color: var(--warn); }
+  .banner .why { color: var(--dim); font-size: 12.5px; margin-top: 5px;
+                 line-height: 1.6; }
+  .banner .age { font-weight: 600; color: var(--warn); }
+
+  /* 陈旧数据整块降透明度 —— 与实时数据视觉隔离，绝不混排观感 */
+  .stale-data { opacity: .62; }
+  .stale-data table { border-style: dashed; }
 </style>
 </head>
 <body>
@@ -145,8 +187,11 @@ SHELL = """<!DOCTYPE html>
 </header>
 
 <div id="error"></div>
+<div id="stale"></div>
+<div id="probe"></div>
 <div id="pending"></div>
 
+<div id="live-region">
 <div class="bar" id="tiles"></div>
 
 <h2>节点</h2>
@@ -177,6 +222,7 @@ SHELL = """<!DOCTYPE html>
 
 <h2>系统级关联异常</h2>
 <div id="anomalies"></div>
+</div><!-- /live-region -->
 
 <footer>
   只读视图 —— 这里没有任何写操作。批准 / 吊销请用
@@ -564,6 +610,131 @@ function renderAnomalies(list) {
   }
 }
 
+// ---- 阶段 1：本地探针 ----
+//
+// 探针回答「coordinator 到底怎么了」—— 在 ops 端点拿不到数据时，
+// 它是唯一的线索。2026-10-31 那次冻结 13 天，面板只能说"连不上"，
+// 和 curl 没区别；有了探针才能说"进程活着、阻塞在锁上、6 个连接没人 accept"。
+const VERDICT_LABELS = {
+  healthy: "正常",
+  dead: "进程已停止",
+  unresponsive: "活着但不响应",
+  unknown: "无法判断"
+};
+
+function renderProbe(p) {
+  const host = document.getElementById("probe");
+  host.replaceChildren();
+  if (!p) return;
+
+  const box = el("div", "probe");
+  const head = el("div", "head");
+
+  const verdict = String(p.verdict || "unknown");
+  head.appendChild(el("span", "verdict " + verdict,
+    VERDICT_LABELS[verdict] || verdict));
+  head.appendChild(el("span", "meta", "本地探针 · " + (p.unit || "")));
+  box.appendChild(head);
+
+  if (p.note) box.appendChild(el("div", "note", p.note));
+
+  // 事实行：只显示拿到的项，拿不到的留给 unavailable
+  const facts = el("div", "facts");
+  const add = (label, value) => {
+    if (value === null || value === undefined || value === "") return;
+    const item = el("span");
+    item.appendChild(el("b", null, value));
+    item.appendChild(document.createTextNode(" " + label));
+    facts.appendChild(item);
+  };
+  add("PID", p.pid);
+  add("线程", p.threads);
+  add("MB", p.rss_mb);
+  if (p.port_listening === true) {
+    add("个连接待 accept", p.accept_queue ?? 0);
+  } else if (p.port_listening === false) {
+    add("端口未监听", p.port ?? "");
+  }
+  // wchan 单独处理：它后面要跟一句人话解释，而 add() 是"值 + 单位"的格式，
+  // 硬套会出现"（解释） wchan=xxx"这种顺序颠倒的读法，还会把括号套两层。
+  if (p.wchan) {
+    const item = el("span");
+    item.appendChild(document.createTextNode("wchan "));
+    item.appendChild(el("b", null, p.wchan));
+    if (p.wchan_hint) {
+      item.appendChild(document.createTextNode(" · " + p.wchan_hint));
+    }
+    facts.appendChild(item);
+  }
+  if (facts.childNodes.length) box.appendChild(facts);
+
+  // 告警：与 verdict 分开 —— verdict 答"能不能用"，这里答"稳不稳"
+  if (p.warnings && p.warnings.length) {
+    const ul = el("ul", "warn");
+    for (const w of p.warnings) ul.appendChild(el("li", null, w));
+    box.appendChild(ul);
+  }
+
+  // 探针自己的缺口要明说 —— 否则"unknown"看起来像服务出了问题
+  if (p.unavailable && p.unavailable.length) {
+    box.appendChild(el("div", "unavail",
+      "本机取不到的项：" + p.unavailable.join("、")));
+  }
+
+  host.appendChild(box);
+}
+
+// ---- 阶段 1：陈旧态横幅 ----
+//
+// ⚠ 这个横幅是「陈旧数据永不与实时数据混排」这条约束的落实处。
+//   没有它，页面上有节点列表但数据是十分钟前的 —— 那比空白更危险。
+function renderStale(data) {
+  const host = document.getElementById("stale");
+  const region = document.getElementById("live-region");
+  host.replaceChildren();
+
+  if (data.no_history) {
+    // 面板刚启动就遇上不可达：没有历史，只有探针
+    const box = el("div", "banner");
+    box.appendChild(el("div", "t", "coordinator 不可达，且没有历史数据"));
+    box.appendChild(el("div", "why",
+      "面板刚启动，还没成功取到过数据。下面的探针结果说明它当前的状态；"
+      + "数据区暂时为空。"));
+    host.appendChild(box);
+    if (region) region.classList.add("stale-data");
+    return;
+  }
+
+  if (!data.stale) {
+    if (region) region.classList.remove("stale-data");
+    return;
+  }
+
+  const age = data.stale_age_seconds;
+  const ageText = (age === null || age === undefined)
+    ? "时间未知"
+    : age < 60 ? Math.round(age) + " 秒前"
+    : age < 3600 ? Math.round(age / 60) + " 分钟前"
+    : (age / 3600).toFixed(1) + " 小时前";
+
+  const box = el("div", "banner stale");
+  const title = el("div", "t");
+  title.appendChild(document.createTextNode("coordinator 不可达 —— 以下是"));
+  title.appendChild(el("span", "age", ageText));
+  // ⚠ 这里不能用 markdown 加粗 —— el() 走 textContent，
+  //   星号会原样显示出来。要强调就用 CSS 类。
+  title.appendChild(document.createTextNode("的最后已知状态"));
+  box.appendChild(title);
+
+  box.appendChild(el("div", "why",
+    "数据不是实时的。上面是上次成功取到的快照，"
+    + "用于回答「它挂之前是什么样」。要判断它现在怎么了，看下面的本地探针。"));
+
+  host.appendChild(box);
+  // 整块降透明度 + 虚线边框：一眼看出"这不是新的"
+  if (region) region.classList.add("stale-data");
+}
+
 function showError(msg) {
   const host = document.getElementById("error");
   host.replaceChildren();
@@ -608,8 +779,23 @@ async function refresh() {
     }
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
-    showError(data.error ? ("coordinator 不可达：" + data.error) : "");
     const nodes = data.nodes || [];
+
+    // ⚠ 顺序有意义：先渲染「数据是什么状态」（陈旧/无历史），
+    //   再渲数据本身。否则用户会先看到一屏节点，然后才被告知那是旧的。
+    renderStale(data);
+
+    // 探针在失败时是唯一线索，放显眼位置（紧接横幅）
+    renderProbe(data.probe);
+
+    // error 只在**没有陈旧兜底**时才显示成错误条 ——
+    // 有兜底时，横幅已经说清「不可达」了，再叠一条错误是重复噪音
+    if (!data.stale && !data.no_history) {
+      showError(data.error ? ("coordinator 不可达：" + data.error) : "");
+    } else {
+      showError("");
+    }
+
     renderTiles(data.metrics);
     renderPending(nodes);
     renderNodes(nodes);
@@ -617,8 +803,16 @@ async function refresh() {
     renderByType(data.metrics);
     renderAudit(data.audit || [], data.audit_truncated, data.audit_heartbeats);
     renderAnomalies(data.metrics ? data.metrics.anomalies : []);
-    document.getElementById("stamp").textContent =
-      "最后更新 " + new Date().toLocaleTimeString("zh-CN");
+
+    // 时间戳要区分三种情况 —— 只写「最后更新」会让人以为数据是新的
+    const stamp = document.getElementById("stamp");
+    if (data.no_history) {
+      stamp.textContent = "无历史数据";
+    } else if (data.stale) {
+      stamp.textContent = "数据非实时（" + (data.stale_since || "时间未知") + "）";
+    } else {
+      stamp.textContent = "最后更新 " + new Date().toLocaleTimeString("zh-CN");
+    }
   } catch (e) {
     showError("取数据失败：" + e.message);
   }
