@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **1000** 个测试方法（已声明覆盖）· **143** 个纵向编号项（120 功能点 + 23 模块需求）
+共 **1015** 个测试方法（已声明覆盖）· **143** 个纵向编号项（120 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -27,7 +27,7 @@
 | **M1.F2** | 签名验签（常数时间比较） | `nxs/core/envelope.py:Envelope.verify` | G2 | P0 | S4 | 6 |
 | **M1.F3** | 时间窗校验（防重放） | `nxs/core/envelope.py:Envelope.verify（drift 判定）` | G2 | P0 | S4 | 4 |
 | **M1.F4** | 规范 JSON 序列化（签名确定性） | `nxs/core/envelope.py:canonical_bytes` | G2 | P0 | — | 1 |
-| **M1.F5** | nonce 去重防重放（有界缓存） | `nxs/edge/auth.py:Authenticator._check_nonce` | G2 | P0 | S4 | 4 |
+| **M1.F5** | nonce 去重防重放（有界缓存） | `nxs/edge/auth.py:Authenticator._check_nonce` | G2 | P0 | S4 | 19 |
 | **M1.F6** | 凭据管理（轮换／吊销即时生效） | `nxs/edge/auth.py:Authenticator.set_secret/revoke` | G2 | P0 | S10 | 1 |
 | **M1.F7** | 成员认证编排（四步校验顺序） | `nxs/edge/auth.py:Authenticator.verify` | G2 | P0 | S4 | 4 |
 | **M1.F8** | 信封格式校验（版本与结构） | `nxs/core/envelope.py:Envelope.from_dict` | G1,G2 | P0 | — | 1 |
