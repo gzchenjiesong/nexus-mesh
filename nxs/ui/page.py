@@ -999,21 +999,28 @@ window.__nxsTimer = setInterval(refresh, 5000);
 </html>
 """
 
-#: 凭据无效时返回的页面。
+#: 凭据失效页面的模板。``__RECOVER_BLOCK__`` / ``__RECOVER_SCRIPT__``
+#: 会被换成自动恢复那一段（没有恢复入口时换成空串）。
 #:
-#: ⚠ **这个页面是补的一个真实缺口。** 最初的实现里，token 无效时返回的是
-#: 纯文本 ``unauthorized`` —— 而用户的真实场景是"刷新一个带旧 token 的标签"，
-#: 那一步在**换 cookie 阶段**就被拒，根本加载不到主页面。
-#: 于是用户在浏览器里看到的就是裸的 "unauthorized" 一个词，
-#: 自然会以为系统坏了。
+#: ⚠ 这个页面**改过一次方向**（2026-11-13）。
 #:
-#: 主页面里的那些说明（"token 每次启动重新生成…"）永远显示不出来，
-#: 因为那条路径走不到。
+#: 原来它教用户「去服务器上执行 journalctl 取新链接」——那是**开发者视角**。
+#: 而用户站在浏览器里，手边没有终端。他看到一个说"凭据已失效"的页面，
+#: 唯一的自助出路是回服务台重新点卡片；页面却在教他开 SSH。
 #:
-#: 现在：**任何 401 都返回这一个页面**，不管是"没带 token"还是
-#: "token 过期/错误"。两种情况返回完全相同的内容，所以不泄露任何信息
-#: —— 与网关拒绝时只回 rule_id 是同一条思路。
-UNAUTHORIZED_PAGE = r"""<!DOCTYPE html>
+#: 现在：如果**知道**恢复入口（经 hub 反代进入时才给），就自动跳回
+#: hub 的 /api/nexus-enter 换一张新 token —— 那条路径本来就会从 journald
+#: 取最新 token（见 hub 的 backend/status.py），而且它自己在 Authelia
+#: 两因素认证后面。
+#:
+#: **这不放松任何安全边界**：token 仍然是随机的、仍然重启即换、
+#: 仍然不落盘。变的只是「失效之后怎么办」—— 从"要人操心"
+#: 变成"页面自己接上"。
+#:
+#: 页面用 sessionStorage 做**防循环**：60 秒内只自动跳一次。
+#: 没有它的话，万一 recover 目标也失效（比如 UI 恰在 hub 取到 token
+#: 之后又重启），就会 401 → 跳 → 401 → 跳，变成一个刷不完的循环。
+UNAUTHORIZED_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -1022,12 +1029,12 @@ UNAUTHORIZED_PAGE = r"""<!DOCTYPE html>
 <style>
   :root {
     --bg: #fbfbfc; --fg: #1c1d21; --dim: #6b7280;
-    --card: #ffffff; --line: #e5e7eb; --warn: #b45309;
+    --card: #ffffff; --line: #e5e7eb; --warn: #b45309; --accent: #1d4ed8;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #14161a; --fg: #e6e7ea; --dim: #9aa1ab;
-      --card: #1b1e23; --line: #2a2e35; --warn: #fbbf24;
+      --card: #1b1e23; --line: #2a2e35; --warn: #fbbf24; --accent: #7aa2f7;
     }
   }
   * { box-sizing: border-box; }
@@ -1043,15 +1050,22 @@ UNAUTHORIZED_PAGE = r"""<!DOCTYPE html>
     background: var(--card); border: 1px solid var(--line);
     border-radius: 12px; padding: 20px 24px;
   }
-  ol { margin: 0; padding-left: 22px; }
-  li { margin-bottom: 12px; }
-  li:last-child { margin-bottom: 0; }
+  .why { margin: 0; }
+  .why + .why { margin-top: 10px; }
+  a.btn {
+    display: inline-block; margin-top: 4px; padding: 9px 18px;
+    background: var(--accent); color: #fff; border-radius: 8px;
+    text-decoration: none; font-weight: 600; font-size: 13.5px;
+  }
+  a.btn:hover { filter: brightness(1.08); }
+  .count { color: var(--dim); font-size: 13.5px; margin-top: 10px; }
   code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 13.5px; background: var(--bg);
     border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
   }
   .note { color: var(--dim); font-size: 13.5px; margin-top: 18px; }
+  .note b { color: var(--fg); }
 </style>
 </head>
 <body>
@@ -1060,28 +1074,104 @@ UNAUTHORIZED_PAGE = r"""<!DOCTYPE html>
   <div class="sub">这不代表系统出了问题</div>
 
   <div class="card">
-    <ol>
-      <li>
-        观察窗的 <code>token</code> <strong>每次启动重新生成</strong>
-        （不落盘、不跨重启），所以服务一重启，旧链接就失效。
-      </li>
-      <li>
-        重新打开时，用访问服务器的那个脚本重新取一次链接
-        （例如 <code>nxs-view.sh</code>），它会自动带上当前 token
-        并验证链路。
-      </li>
-      <li>
-        如果你只是刷新了旧标签页，那个 token 已经过期 ——
-        换用新链接即可，不需要重启任何服务。
-      </li>
-    </ol>
+__RECOVER_BLOCK__
+    <p class="why">
+      观察窗的 <code>token</code> <strong>每次启动重新生成</strong>
+      （不落盘、不跨重启），所以服务一重启，旧链接就失效。
+      这是刻意的：token 一旦泄露，重启就能让它作废。
+    </p>
   </div>
 
   <div class="note">
-    需要<b>手动</b>取链接时，在服务器上执行：<br>
+    从<b>服务台</b>点 Nexus 卡片进入最省事 —— 它会自动带上当前 token。<br>
+    若在服务器上手动取链接：<br>
     <code>journalctl -u nexus-mesh-ui -n 40 | grep -oE 'http://127\.0\.0\.1:8080/\?t=\S+' | tail -1</code>
   </div>
 </div>
+__RECOVER_SCRIPT__
 </body>
 </html>
 """
+
+
+#: 「有恢复入口」时插进卡片里的那一段。
+_RECOVER_HTML = r'''    <p class="why">
+      <a class="btn" id="recover" href="__URL__">立即重新进入</a>
+    </p>
+    <div class="count" id="count"></div>'''
+
+#: 自动跳转的脚本。**必须先做防循环判断，再决定跳不跳。**
+_RECOVER_SCRIPT = r"""<script>
+"use strict";
+(function () {
+  var RECOVER = __URL_JS__;
+  var KEY = "nxs_ui_recover_at";
+  var GUARD_MS = 60000;          // 60 秒内只自动跳一次，防止 401 → 跳 → 401 循环
+  var DELAY_S = 3;
+
+  var count = document.getElementById("count");
+  if (!RECOVER) return;
+
+  var last = 0;
+  try { last = Number(sessionStorage.getItem(KEY) || 0) || 0; } catch (e) { last = 0; }
+  var waited = Date.now() - last;
+
+  if (last && waited < GUARD_MS) {
+    // 刚试过一次还没成功 —— 别再来一遍，说清情况让人决定
+    if (count) {
+      count.textContent = "刚尝试过自动恢复但未成功。"
+        + "若反复出现，可能是观察窗正在重启 —— 等十几秒后手动点上面的按钮。";
+    }
+    return;
+  }
+
+  try { sessionStorage.setItem(KEY, String(Date.now())); } catch (e) { /* 无痕模式 */ }
+
+  // 手动点按钮随时可用，不受防循环限制 —— 用户主动点是在表达意图
+  var left = DELAY_S;
+  function tick() {
+    if (count) {
+      count.textContent = left > 0
+        ? ("正在自动重新进入… " + left + " 秒（也可直接点上方的按钮）")
+        : "正在跳转…";
+    }
+    if (left <= 0) { window.location.href = RECOVER; return; }
+    left -= 1;
+    setTimeout(tick, 1000);
+  }
+  tick();
+})();
+</script>"""
+
+
+def unauthorized_page(recover_url: str | None = None) -> str:
+    """凭据失效页面。
+
+    :param recover_url: 自动恢复入口（通常是 hub 的 ``/api/nexus-enter``）。
+        为 ``None`` 时**不给**这个功能 —— 直接 SSH 隧道访问的场景下
+        跳到公网 hub 没有意义（可能根本连不通），留着反而添乱。
+
+    ## 为什么不区分「token 错」与「没带 token」
+
+    两种情况返回完全相同的页面。区分会泄露信息（攻击者能据此判断
+    某个 token 是否曾经有效），与网关拒绝时只回 rule_id 同理。
+
+    ## recover_url 从哪来
+
+    由服务端按请求的 ``Host`` 决定：只有**非本机**主机名（即经 hub 反代
+    进来）才给。SSH 隧道访问时 Host 是 ``127.0.0.1:18080``，不给 ——
+    那种场景下人是开着自己终端来的，照旧看手动说明更实在。
+    """
+    if not recover_url:
+        return (UNAUTHORIZED_TEMPLATE
+                .replace("__RECOVER_BLOCK__", "")
+                .replace("__RECOVER_SCRIPT__", ""))
+
+    import json as _json
+
+    return (UNAUTHORIZED_TEMPLATE
+            .replace("__RECOVER_BLOCK__",
+                     _RECOVER_HTML.replace("__URL__", recover_url))
+            .replace("__RECOVER_SCRIPT__",
+                     _RECOVER_SCRIPT.replace(
+                         "__URL_JS__", _json.dumps(recover_url))))

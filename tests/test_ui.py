@@ -726,13 +726,13 @@ class TestUnauthorizedUx:
     `SHELL` 里的 401 分支只在"有 cookie 但 cookie 失效"时才会触发 ——
     那是另一种情况，不是用户碰到的那个。
 
-    现在：服务端任何 401 都返回 ``UNAUTHORIZED_PAGE``。下面测它。
+    现在：服务端任何 401 都返回 ``unauthorized_page()``。下面测它。
     """
 
     @staticmethod
-    def _unauth_page() -> str:
-        from nxs.ui.page import UNAUTHORIZED_PAGE
-        return UNAUTHORIZED_PAGE
+    def _unauth_page(recover_url: str | None = None) -> str:
+        from nxs.ui.page import unauthorized_page
+        return unauthorized_page(recover_url)
 
     @covers("M15.F2")
     def test_401_is_an_html_page_not_bare_text(self):
@@ -759,20 +759,33 @@ class TestUnauthorizedUx:
 
     @covers("M15.F2")
     def test_401_tells_what_to_do(self):
+        """★ 要给出可执行的做法，不能只说「请用带 token 的链接」。
+
+        ⚠ 这条**换过判据**（2026-11-13）。原来断言 ``nxs-view.sh`` 在页面里 ——
+        那是给开发者看的脚本名，普通使用者根本没有它。现在的主路径是
+        「从服务台点 Nexus 卡片」（那条路会自动带 token），所以断言它。
+        """
         page = self._unauth_page()
-        assert "nxs-view.sh" in page, (
-            "要给出可执行的做法，不能只说「请用带 token 的链接」（从哪来？）"
+        assert "服务台" in page, (
+            "要指出最省事的入口：从服务台点 Nexus 卡片"
         )
-        # 手动取链接的命令也要给，否则没有那个脚本的人卡死
+        # 手动取链接的命令仍要留作兜底，否则纯 SSH 场景的人卡死
         assert "journalctl" in page, "应给出手动取链接的命令作为兜底"
 
     @covers("M15.F2")
     def test_401_says_no_restart_needed(self):
-        """★ 明确说「不需要重启服务」。
+        """★ 说清「这不是故障」且 token 为何失效。
 
-        用户的困惑之一就是"是不是要你重开一下"。要直接回答这个问题。
+        ⚠ 旧断言是 ``"不需要重启" in page`` —— 新版文案改成了
+        「这不代表系统出了问题」+「这是刻意的：token 一旦泄露，重启就能让它作废」。
+        断言要跟着守**实际表达的意思**（别让用户以为要重开服务），
+        而不是某个固定词组。
         """
-        assert "不需要重启" in self._unauth_page()
+        page = self._unauth_page()
+        assert "不代表系统出了问题" in page
+        assert "重启" in page and "作废" in page, (
+            "要说清重启换 token 是刻意的安全设计，不是为了让人去重启服务"
+        )
 
     @covers("M15.F2")
     def test_401_does_not_leak_which_case(self):

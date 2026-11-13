@@ -32,6 +32,20 @@ WorkingDirectory=/opt/nexus-mesh
 # ui.env 只有一行，由 deploy/install-ui-env.sh 生成。
 EnvironmentFile=/etc/nexus-mesh/ui.env
 Environment=PYTHONUNBUFFERED=1
+
+# ── 凭据失效后的自动恢复（2026-11-13） ─────────────────────────────
+#
+# token 没有 TTL，失效只有两种成因：服务重启、浏览器关掉。原来失效后
+# 401 页面教用户「去服务器跑 journalctl」——可用户在浏览器里，没终端。
+#
+# 配上这一行后，401 页面会自动跳回 hub 的 /api/nexus-enter 换新 token。
+# 那条路径本身在 Authelia 两因素认证后面，且会自己从 journald 取最新
+# token，所以**不放松任何安全边界**：token 仍随机、仍重启即换、仍不落盘。
+#
+# 这不是凭据，所以写在 unit 里而不是 ui.env（那个文件只放密钥）。
+# 改域名时改这一行。留空（删掉整行）→ 401 只给手动说明，不自动跳。
+Environment=NXS_UI_RECOVER_URL=https://hub.i-strategy-compass.cn/api/nexus-enter
+
 # hub 用自签证书，这里是让本进程信任那张 CA。
 # 只影响本进程，不碰系统证书库。
 Environment=SSL_CERT_FILE=/etc/nexus-mesh/tls/ca.pem

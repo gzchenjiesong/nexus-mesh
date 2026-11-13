@@ -401,6 +401,13 @@ def cmd_ui(args: argparse.Namespace) -> int:
 
     鉴权只有 token：每次启动重新生成、打印在终端、不落盘。
     不做账号密码 —— 能 SSH 登录这台机器的人本来就能直接 curl 运维端点。
+
+    ## 失效之后怎么办（``--recover-url``）
+
+    token 没有 TTL，失效只有两种成因：服务重启、浏览器关掉。
+    配了 ``--recover-url`` 时，401 页面会自动跳回 hub 的
+    ``/api/nexus-enter`` 换一张新 token —— 那条路径本身在 Authelia
+    两因素认证之后，所以**不放松任何安全边界**，只是省掉人工去取链接。
     """
     import os
 
@@ -423,7 +430,10 @@ def cmd_ui(args: argparse.Namespace) -> int:
     try:
         server = UiServer(url, raw_secret.encode(),
                           host=args.host, port=args.port,
-                          ca_file=_ca_file_for(args)).start()
+                          ca_file=_ca_file_for(args),
+                          recover_url=(args.recover_url
+                                       or os.environ.get("NXS_UI_RECOVER_URL")),
+                          ).start()
     except ConfigError as exc:
         _err(str(exc))
         return 2
@@ -445,6 +455,10 @@ def cmd_ui(args: argparse.Namespace) -> int:
     _info("")
     _info(_color("  ⚠ 链接里的 token 等于一次性钥匙，别贴到聊天或工单里。", "warn"))
     _info(_color("    它不落盘、不跨重启 —— 重启后换新的。", "dim"))
+    if server.recover_url:
+        _info(_color(f"    失效后页面会自动跳回 {server.recover_url} 换新 token", "dim"))
+    else:
+        _info(_color("    未配置 --recover-url：失效后只能手动再取一次链接", "dim"))
     _info("")
     _info(_color("  按 Ctrl-C 停止。", "dim"))
 
@@ -1085,6 +1099,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--ca-file", default=None,
                     help="信任的 CA 证书（coordinator 用自签证书时必需；"
                          "也可用环境变量 NXS_CA_FILE）")
+    sp.add_argument("--recover-url", default=None,
+                    help="凭据失效后的自动恢复入口，通常是 hub 的 "
+                         "/api/nexus-enter（也可用环境变量 "
+                         "NXS_UI_RECOVER_URL）。不配置时 401 页面只给"
+                         "手动说明 —— SSH 隧道场景不需要这个")
     sp.set_defaults(func=cmd_ui)
 
     return p

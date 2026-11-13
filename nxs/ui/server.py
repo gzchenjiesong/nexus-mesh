@@ -72,7 +72,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..core.errors import ConfigError
 from ..edge.client import OpsClient
-from .page import SHELL, UNAUTHORIZED_PAGE
+from .page import SHELL, unauthorized_page
 from .probe import probe_coordinator
 
 log = logging.getLogger(__name__)
@@ -107,8 +107,60 @@ def _port_from_url(url: str) -> int:
 #: cookie 名。带 token，HttpOnly + SameSite=Strict。
 COOKIE_NAME = "nxs_ui"
 
+#: cookie 保留多久（秒）。
+#:
+#: ⚠ 原来**没有** Max-Age，于是它是 session cookie —— 浏览器一关就没了，
+#: 下次还得重新取链接。而 token 本身根本没有 TTL，所以这个"短命 cookie"
+#: 保护不了任何东西：真正的失效点只有服务重启。
+#:
+#: 30 天与 hub 侧 Authelia 的 ``remember_me: '1M'`` 对齐，让两处
+#: 「多久不用重新登录」的预期一致。
+#:
+#: ⚠ 注意它**不等于** token 活 30 天：token 一变（重启），cookie 里的旧值
+#: 立刻失效。这个属性只解决"关浏览器"那一半。
+COOKIE_MAX_AGE = 30 * 24 * 3600
+
 #: token 长度（``secrets.token_urlsafe`` 的字节数）。32 字节 ≈ 256 位。
 TOKEN_BYTES = 32
+
+#: 判定「这是本机访问」的主机名。这些不给自动恢复入口。
+#:
+#: ⚠ 理由是场景不同，不是安全：走 SSH 隧道的人**本来就在终端旁边**，
+#: 他需要的是"在服务器上怎么再取一张"，而不是被跳去公网 hub
+#: （隧道场景下浏览器未必连得上公网域名）。
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]", ""})
+
+
+
+def _clean_recover_url(raw: str | None) -> str | None:
+    """校验并规整自动恢复入口。非法值返回 ``None``（降级为不提供）。
+
+    ## 为什么必须校验，而不只是拼进页面
+
+    这个 URL 会进两处：``href`` 属性 与 ``<script>`` 里的 JSON 字面量。
+    只要它含非法字符，两个注入面都成立：
+
+        href   ← ``"`` 或 ``javascript:``
+        script ← ``</script>`` 或裸的引号
+
+    来源是**运维配置**（unit 的 Environment / 命令行参数），不是用户输入，
+    所以不是"信任边界"问题。但配置写错一个引号就能让 401 页面变成
+    XSS 载体 —— 对一个安全敏感的页面，宁可直接拒绝。
+
+    规则刻意收得很紧：只接受 ``https://`` 或 ``http://`` 开头、
+    只含 URL 安全字符的字符串。枢纽的 enter 端点就是这种形态。
+    """
+    if not raw:
+        return None
+    candidate = raw.strip()
+    if not candidate.startswith(("https://", "http://")):
+        return None
+    # 只放行 URL 里正常出现的字符；< > " ' 空白 一律拒
+    if any(ch in candidate for ch in '<>"\' \t\r\n\\'):
+        return None
+    if len(candidate) > 300:
+        return None
+    return candidate
 
 
 class UiServer:
@@ -118,7 +170,8 @@ class UiServer:
                  host: str = "127.0.0.1", port: int = 8080,
                  refresh_hint_seconds: int = 5,
                  ca_file: str | None = None,
-                 coordinator_unit: str | None = None) -> None:
+                 coordinator_unit: str | None = None,
+                 recover_url: str | None = None) -> None:
         if host not in ALLOWED_HOSTS:
             raise ConfigError(
                 f"ui: 拒绝绑定 {host!r}。只允许 {sorted(ALLOWED_HOSTS)} —— "
@@ -162,6 +215,28 @@ class UiServer:
 
         #: 每次启动重新生成，**不落盘、不跨重启复用**。
         self.token = secrets.token_urlsafe(TOKEN_BYTES)
+
+        #: 凭据失效后的**自动恢复入口**（通常是 hub 的 ``/api/nexus-enter``）。
+        #:
+        #: ## 为什么需要它
+        #:
+        #: 2026-11-13 实测确认：token 没有 TTL，失效只有两种成因 ——
+        #: 服务重启（token 立刻换）和浏览器关掉（cookie 是 session cookie）。
+        #: 而失效之后，旧版页面教用户「去服务器跑 journalctl」，
+        #: 可用户站在浏览器里，手边没有终端。
+        #:
+        #: ## 为什么它不放松安全
+        #:
+        #: recover 目标在 hub，本身在 Authelia 两因素认证后面，且那条路径
+        #: 会自己从 journald 取**最新** token。所以它拿到的永远是新凭据，
+        #: 而不是"绕过校验"。token 仍然随机、仍然重启即换、仍然不落盘。
+        #:
+        #: ## 为空时的行为
+        #:
+        #: 没有配置 → 页面不显示自动恢复，只留手动说明。
+        #: 这是刻意留的降级：SSH 隧道场景下浏览器可能连不到公网 hub，
+        #: 硬跳过去只会白屏。
+        self.recover_url = _clean_recover_url(recover_url)
 
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -540,9 +615,18 @@ def _make_handler(server: UiServer) -> type[BaseHTTPRequestHandler]:
             **刷新一个带旧 token 的标签** —— 那一步在换 cookie 阶段就被拒，
             根本加载不到主页面。返回纯文本时用户只看到裸的
             "unauthorized" 一个词，会以为系统坏了。
+
+            ## 自动恢复入口按 Host 决定给不给（2026-11-13）
+
+            经 hub 反代进来时 Host 是真实域名，此时给自动恢复（跳回 hub
+            换新 token）；SSH 隧道/本机直连时 Host 是 127.0.0.1，不给 ——
+            走隧道的人就在终端旁边，他需要的是手动取链接的说明。
             """
+            host = (self.headers.get("Host") or "").split(":")[0].lower()
+            recover = (server.recover_url
+                       if host and host not in _LOCAL_HOSTS else None)
             self._send_bytes(HTTPStatus.UNAUTHORIZED,
-                             UNAUTHORIZED_PAGE.encode("utf-8"),
+                             unauthorized_page(recover).encode("utf-8"),
                              content_type="text/html; charset=utf-8")
 
         def _redirect(self, location: str, *, cookie: str | None = None) -> None:
@@ -588,7 +672,10 @@ def _make_handler(server: UiServer) -> type[BaseHTTPRequestHandler]:
                     return
                 cookie = (
                     f"{COOKIE_NAME}={server.token}; HttpOnly; SameSite=Strict; "
-                    f"Path=/"
+                    # Max-Age：不加的话是 session cookie，浏览器一关就没了。
+                    # token 本身没有 TTL，所以"短命 cookie"并不提供额外保护，
+                    # 只让人多跑一趟去重新取链接。
+                    f"Max-Age={COOKIE_MAX_AGE}; Path=/"
                 )
                 self._redirect("/", cookie=cookie)
                 return
@@ -662,9 +749,10 @@ def _make_handler(server: UiServer) -> type[BaseHTTPRequestHandler]:
 # ---------------------------------------------------------------------------
 
 def serve_ui(ops_url: str, ops_secret: bytes, *, host: str = "127.0.0.1",
-             port: int = 8080, ca_file: str | None = None
+             port: int = 8080, ca_file: str | None = None,
+             recover_url: str | None = None
              ) -> tuple[UiServer, str]:
     """启动并返回 ``(server, entry_url)``。调用方负责打印 entry_url。"""
     server = UiServer(ops_url, ops_secret, host=host, port=port,
-                      ca_file=ca_file).start()
+                      ca_file=ca_file, recover_url=recover_url).start()
     return server, server.entry_url
