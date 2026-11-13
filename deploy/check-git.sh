@@ -62,7 +62,7 @@ HINT
         | awk '{print $2}' || echo "（取不到指纹）"
     cat <<'HINT'
 
-    ② 打开这个**仓库的** deploy key 页面（不是账号级 SSH keys）：
+    ② 打开这个【仓库级】的 deploy key 页面（不是账号级 SSH keys）：
 
          https://github.com/gzchenjiesong/nexus-mesh/settings/keys
 
@@ -70,11 +70,11 @@ HINT
        Title: cvm-43.138.222.206
        Key:   粘贴上面那行
 
-       ⚠ **不要勾 "Allow write access"** —— 部署只需要读，
+       ⚠ 不要勾 "Allow write access" —— 部署只需要读，
          给它写权限等于让服务器能改仓库。
 
-       ⚠ 加错位置是常见失误：加到 **Settings → SSH and GPG keys**（账号级）
-         不会生效 —— deploy key 是**仓库级**的，必须从上面那个链接进。
+       ⚠ 加错位置是常见失误：加到 Settings → SSH and GPG keys（账号级）
+         不会生效 —— deploy key 是「仓库级」的，必须从上面那个链接进。
 
     ③ 回来重跑（加完立刻能验证）：
          bash /root/nexus-mesh-deploy/check-git.sh
@@ -82,7 +82,7 @@ HINT
   ⚠ 在此之前，部署仍可用（临时借本机凭据）：
        ssh -A root@<这台机器> 'bash /root/nexus-mesh-deploy/deploy.sh'
 
-  ⚠ **为什么不能长期靠 ssh -A 凑**：agent 转发只在交互式 SSH 会话里存在。
+  ⚠ 为什么不能长期靠 ssh -A 凑：agent 转发只在交互式 SSH 会话里存在。
      systemd timer、cron、CI 都没有它 —— 想加任何自动部署，
      这一步必须先做完。
 HINT
