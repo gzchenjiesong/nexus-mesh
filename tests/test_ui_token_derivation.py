@@ -483,3 +483,149 @@ class TestCheckWorksOnServer:
         text = self._script()
         assert "unit_gen" in text, "没有读 unit 里的 gen 用来比对"
         assert "改了没重启" in text, "不一致时没有明确诊断"
+
+
+class TestOnServerActuallyWorks:
+    """★★★ 用**真 bash 跑** ``on_server``，而不是查文本里有没有它。
+
+    ⚠⚠ **这个类是被一次真实失败逼出来的（2026-11-13）。**
+
+    第一版守护写的是：
+
+        assert "on_server()" in text
+        assert "nexus-mesh-ui" in text
+
+    —— 两条都绿，然后生产实测仍然失败：
+
+        $ nxs-open --check
+          找不到 SSH 密钥：/root/Downloads/key4workbuddy.pem
+
+    真因是 ``set -euo pipefail`` + ``grep -q`` 的 SIGPIPE 陷阱：
+
+        grep -q 找到匹配立即退出 → 上游 systemctl 被杀（141）
+        → pipefail 让整条管道返回非零 → on_server 判成"不在服务器上"
+
+    单看代码完全正常，grep 明明能匹配到那一行。**文本存在性判据守不住
+    这种东西** —— 这已经是本项目第 5 次栽在同一个模式上。
+
+    所以这里改成：造一个假的 ``systemctl``，用**真 bash**（带
+    ``set -euo pipefail``）执行页面里的那段函数，看它的退出码。
+    """
+
+    @staticmethod
+    def _extract_on_server() -> str:
+        """从脚本里抠出 on_server 函数体。"""
+        text = (REPO_ROOT / "deploy" / "open-ui.sh").read_text()
+        start = text.find("on_server() {")
+        assert start > 0, "找不到 on_server 函数"
+        # 找到配对的收尾 }（第 0 列）
+        end = text.find("\n}", start)
+        assert end > start, "找不到函数结尾"
+        return text[start:end + 2]
+
+    def _run_with_fake_systemctl(self, units_output: str,
+                                 *, expect: bool) -> None:
+        import os
+        import subprocess
+        import tempfile
+
+        func = self._extract_on_server()
+        # 假 systemctl：只回 list-unit-files 的内容。输出量大一些，
+        # 才容易触发 SIGPIPE（如果实现里还有 grep -q 的话）。
+        bindir = tempfile.mkdtemp(prefix="nxs-fakebin-")
+        fake = pathlib.Path(bindir) / "systemctl"
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' {' '.join(repr(units_output).split())}\n",
+            encoding="utf-8")
+        # 上面那行太绕，直接写清楚
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat <<'OUT'\n" + units_output + "\nOUT\n",
+            encoding="utf-8")
+        fake.chmod(0o755)
+
+        script = (
+            "set -euo pipefail\n"
+            + func + "\n"
+            + "if on_server; then exit 0; else exit 9; fi\n"
+        )
+        env = dict(os.environ)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(["bash", "-c", script], capture_output=True,
+                                text=True, env=env, timeout=30,
+                                check=False)
+        expected = 0 if expect else 9
+        assert result.returncode == expected, (
+            f"on_server 判断错误（期望退出码 {expected}，实际 "
+            f"{result.returncode}）。\n"
+            f"stderr: {result.stderr[-500:]}\n"
+            f"假 systemctl 输出前 200 字: {units_output[:200]!r}"
+        )
+
+    @covers("M15.F2")
+    def test_detects_present_unit(self):
+        """★★★ 有 nexus-mesh-ui 单元 → 必须判成「在服务器上」。
+
+        ⚠⚠ **造数条件必须真的能触发 SIGPIPE，否则这条测试是假绿。**
+
+        第一版这里塞了 80 行填充（约 4 KB），结果：把实现改回
+        ``grep -q`` 之后，**文本检查红了、这条行为测试却是绿的** ——
+        因为 4 KB 远小于管道缓冲区（Linux 默认 64 KB），
+        ``cat`` 一次就写完了，``grep -q`` 提前退出也不会让上游收到 SIGPIPE。
+
+        真实条件需要两条同时成立：
+
+            ① 输出量 > 管道缓冲区（否则上游在 grep 退出前就写完了）
+            ② 匹配行靠近**开头**（否则上游快写完才匹配上）
+
+        所以这里是 3000 行 ≈ 150 KB，目标行在第 10 行。
+        实测这个组合能把 ``grep -q`` 的实现打红。
+        """
+        head = "UNIT FILE    STATE    PRESET"
+        before = "\n".join(
+            f"aaa-early-unit-{i:03d}.service    static    -" for i in range(9))
+        after = "\n".join(
+            f"zzz-late-unit-{i:04d}.service    static    -" for i in range(3000))
+        units = "\n".join([
+            head, before,
+            "nexus-mesh-ui.service    enabled    enabled",
+            after,
+        ])
+        assert len(units) > 64 * 1024, (
+            f"假输出只有 {len(units)} 字节，没超过管道缓冲区 —— "
+            "触发不了 SIGPIPE，这条测试会假绿"
+        )
+        self._run_with_fake_systemctl(units, expect=True)
+
+    @covers("M15.F2")
+    def test_detects_absent_unit(self):
+        """★ 没有该单元 → 判成「不在服务器上」（本机场景）。"""
+        units = ("UNIT FILE    STATE    PRESET\n"
+                 "other.service    static    -\n"
+                 "another.service  disabled  enabled\n")
+        self._run_with_fake_systemctl(units, expect=False)
+
+    @covers("M15.F2")
+    def test_no_grep_q_in_pipe(self):
+        """★★ 源码层面也不许出现 ``| grep -q`` —— 防有人改回去。
+
+        ⚠ 这条是**辅助**：上面两条行为测试才是主判据。两者并存是因为
+        行为测试依赖"假 systemctl 输出足够长"，而源码检查不依赖环境。
+
+        ⚠⚠ 判据必须**剥掉注释**再查（第一版直接 ``in func`` 就误伤了）：
+        函数里的注释正在解释这个陷阱，而解释里当然会写出那个写法。
+        这是本项目第 6 次栽在「文本存在性判据」上 —— 同一个模式：
+        只要判据是"这段文本里有没有某个词"，就一定会误伤或被绕过。
+        """
+        func = self._extract_on_server()
+        # 只留非注释行
+        code_lines = [
+            ln for ln in func.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        code = "\n".join(code_lines)
+        assert "grep -q" not in code, (
+            "on_server 的**代码**里又出现了 grep -q —— 在 set -o pipefail "
+            "下会因 SIGPIPE 误判。用 case 匹配或先落变量。"
+        )

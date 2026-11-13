@@ -69,8 +69,27 @@ done
 on_server() {
     # 有本机 nexus-mesh-ui 单元就是服务器。比 hostname 比对可靠：
     # 改名、换 IP、走内网 DNS 都不影响这个判断。
-    command -v systemctl >/dev/null 2>&1 \
-        && systemctl list-unit-files 2>/dev/null | grep -q '^nexus-mesh-ui'
+    #
+    # ⚠⚠ **绝对不能用 ``systemctl list-unit-files | grep -q``。**
+    #
+    # 这是 ``set -euo pipefail`` 的经典陷阱，实测踩到过：
+    #
+    #     grep -q 找到匹配就立即退出
+    #         → 上游 systemctl 收到 SIGPIPE 被杀（退出码 141）
+    #         → pipefail 让整条管道返回非零
+    #         → on_server 判成「不在服务器上」
+    #
+    # 症状正是：明明在服务器上，脚本却去本机路径找 SSH 密钥。
+    # 而单看代码完全正常 —— grep 明明能匹配到那一行。
+    #
+    # 改成先落变量、再用 case 匹配：没有管道，就不会有 SIGPIPE。
+    command -v systemctl >/dev/null 2>&1 || return 1
+    local units
+    units=$(systemctl list-unit-files 2>/dev/null || true)
+    case "$units" in
+        *nexus-mesh-ui*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 #: 在服务器上跑一段脚本：本机就直接 bash，否则走 SSH。
