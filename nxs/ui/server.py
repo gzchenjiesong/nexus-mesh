@@ -59,7 +59,10 @@
 
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -120,8 +123,64 @@ COOKIE_NAME = "nxs_ui"
 #: 立刻失效。这个属性只解决"关浏览器"那一半。
 COOKIE_MAX_AGE = 30 * 24 * 3600
 
-#: token 长度（``secrets.token_urlsafe`` 的字节数）。32 字节 ≈ 256 位。
+#: token 的字节数（HMAC-SHA256 输出，32 字节 ≈ 256 位）。
 TOKEN_BYTES = 32
+
+#: token 派生标签。改它等于让**所有**已发出的 token 立刻作废。
+#:
+#: ⚠ 带 ``v1`` 是为了将来换算法时能干净切换：改成 ``v2`` 就全量轮换，
+#: 不需要动 gen（那个是日常轮换用的）。
+TOKEN_DERIVE_LABEL = "ui-token:v1"
+
+#: 默认的 token 代数。运维改它来轮换（见 ``derive_token``）。
+DEFAULT_TOKEN_GEN = "0"
+
+#: 环境变量名：token 代数。
+ENV_TOKEN_GEN = "NXS_UI_TOKEN_GEN"
+
+
+def derive_token(ops_secret: bytes, gen: str = DEFAULT_TOKEN_GEN) -> str:
+    """从运维密钥按 ``gen`` 派生观察窗的 token。**确定性、不落盘。**
+
+    ## 为什么不再「每次重启随机生成」（2026-11-13 决策）
+
+    原来用 ``secrets.token_urlsafe(32)``，每次启动换一个。问题实测过：
+    一次会话里我做了 5 次部署，用户正在看的面板就失效了 5 次。
+
+    而「每次变」提供的唯一价值是**泄露后重启即止血** —— 因为
+    「不可猜测性」来自 256 位熵，跟频率无关。
+
+    现在主入口统一到服务台的 Authelia 两因素认证之后（``nexus`` 子域），
+    token 的角色从「唯一的门」降级为「Authelia 配错时的兜底」。
+    这时固定化是划算的：部署不再踢人，而止血改为显式动作（改 gen 重启）。
+
+    ## 三个性质
+
+    * **确定性** —— 同 secret + 同 gen 永远得到同一 token。所以重启不变。
+    * **不可预测** —— HMAC-SHA256 单向；不知道 ops_secret 就推不出来。
+      持有 ops_secret 的人本来就能直接读运维端点，token 对他没有意义。
+    * **可轮换** —— 改 gen 或改 ops_secret 都会让旧 token 立刻失效。
+
+    ⚠ **不落盘**：token 每次启动从密钥重算，磁盘上没有它（铁律④）。
+    这比「把 token 存文件再复用」干净 —— 后者会在磁盘留下第二份凭据。
+
+    ## 为什么输出 43 个字符
+
+    ``base64.urlsafe_b64encode(32 字节)`` 给 44 字符（含一个 ``=`` padding）。
+    去掉 padding 得 43 字符，与原来 ``token_urlsafe(32)`` 的长度和字符集一致
+    —— 这样 URL、cookie 的处理代码一行都不用改。
+    """
+    if len(ops_secret) < 16:
+        # 与 nxs.mgmt.config.MIN_SECRET_LENGTH 对齐。弱密钥派生出的 token
+        # 看起来一样随机，但实际可暴力枚举 —— 那种"安全假象"最难发现。
+        raise ConfigError(
+            f"ui: 运维密钥过短（{len(ops_secret)} < 16 字节），"
+            f"无法安全派生观察窗 token"
+        )
+    message = f"{TOKEN_DERIVE_LABEL}:gen{gen or DEFAULT_TOKEN_GEN}".encode("utf-8")
+    mac = hmac.new(ops_secret, message, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode("ascii").rstrip("=")
+
 
 #: 判定「这是本机访问」的主机名。这些不给自动恢复入口。
 #:
@@ -171,7 +230,8 @@ class UiServer:
                  refresh_hint_seconds: int = 5,
                  ca_file: str | None = None,
                  coordinator_unit: str | None = None,
-                 recover_url: str | None = None) -> None:
+                 recover_url: str | None = None,
+                 token_gen: str | None = None) -> None:
         if host not in ALLOWED_HOSTS:
             raise ConfigError(
                 f"ui: 拒绝绑定 {host!r}。只允许 {sorted(ALLOWED_HOSTS)} —— "
@@ -213,23 +273,34 @@ class UiServer:
         #: 保护 _last_good 的锁。ThreadingHTTPServer 会并发调 snapshot。
         self._snapshot_lock = threading.Lock()
 
-        #: 每次启动重新生成，**不落盘、不跨重启复用**。
-        self.token = secrets.token_urlsafe(TOKEN_BYTES)
+        #: 观察窗 token。**从运维密钥派生，重启不变；不落盘。**
+        #:
+        #: ⚠ 这里改过一次方向（2026-11-13）。原来是
+        #: ``secrets.token_urlsafe(32)``，每次启动换一个 —— 一次会话里
+        #: 部署 5 次就踢掉用户 5 次。而「每次变」唯一的价值是止血，
+        #: 「不可猜测性」来自 256 位熵与频率无关。
+        #:
+        #: 主入口统一到服务台 Authelia 之后，token 降级为兜底，固定化划算。
+        #: 要止血就改 gen（环境变量 ``NXS_UI_TOKEN_GEN``）后重启，
+        #: 见 :func:`derive_token`。
+        self.token_gen = str(token_gen if token_gen is not None
+                             else DEFAULT_TOKEN_GEN)
+        self.token = derive_token(ops_secret, self.token_gen)
 
         #: 凭据失效后的**自动恢复入口**（通常是 hub 的 ``/api/nexus-enter``）。
         #:
         #: ## 为什么需要它
         #:
-        #: 2026-11-13 实测确认：token 没有 TTL，失效只有两种成因 ——
-        #: 服务重启（token 立刻换）和浏览器关掉（cookie 是 session cookie）。
+        #: 2026-11-13 实测确认：token 失效只有两种成因 ——
+        #: 运维轮换（改 gen / 改密钥）和浏览器关掉（cookie 曾是 session cookie）。
         #: 而失效之后，旧版页面教用户「去服务器跑 journalctl」，
         #: 可用户站在浏览器里，手边没有终端。
         #:
         #: ## 为什么它不放松安全
         #:
         #: recover 目标在 hub，本身在 Authelia 两因素认证后面，且那条路径
-        #: 会自己从 journald 取**最新** token。所以它拿到的永远是新凭据，
-        #: 而不是"绕过校验"。token 仍然随机、仍然重启即换、仍然不落盘。
+        #: 会自己从 journald 取**当前** token。所以它拿到的是有效凭据，
+        #: 而不是"绕过校验"。token 仍然不可预测、仍然不落盘。
         #:
         #: ## 为空时的行为
         #:

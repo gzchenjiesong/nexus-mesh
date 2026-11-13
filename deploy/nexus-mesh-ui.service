@@ -46,6 +46,25 @@ Environment=PYTHONUNBUFFERED=1
 # 改域名时改这一行。留空（删掉整行）→ 401 只给手动说明，不自动跳。
 Environment=NXS_UI_RECOVER_URL=https://hub.i-strategy-compass.cn/api/nexus-enter
 
+# ── token 代数（轮换开关） ────────────────────────────────────────────
+#
+# token 由 NXS_OPS_SECRET 派生，**重启不变**，所以部署不再踢掉在线标签页。
+# 代价是失去"重启即止血"，改为**显式轮换**：把下面这个数字加一，重启。
+#
+#     0 → 1     所有已发出的 token 立刻作废
+#
+# 什么时候需要：怀疑链接泄露过（截图、转发、录屏、贴到工单里）、
+# 或者有人离职/失去信任。
+#
+# ⚠ 轮换后旧标签会 401，但不会卡死 —— 401 页面会自动跳回 hub 换新 token
+#   （见上面的 NXS_UI_RECOVER_URL），人几乎无感。
+#
+# 也可以直接用脚本：bash deploy/rotate-ui-token.sh
+#
+# 写在这里而不是 ui.env：它不是凭据（凭据只是 NXS_OPS_SECRET 那一个），
+# 而 ui.env 由白名单脚本生成、只放密钥。
+Environment=NXS_UI_TOKEN_GEN=0
+
 # hub 用自签证书，这里是让本进程信任那张 CA。
 # 只影响本进程，不碰系统证书库。
 Environment=SSL_CERT_FILE=/etc/nexus-mesh/tls/ca.pem

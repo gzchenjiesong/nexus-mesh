@@ -310,12 +310,30 @@ def drill_ui(transports: dict) -> None:
         except Exception:  # noqa: BLE001
             check("拒绝绑定 0.0.0.0", True)
 
-        # ⑥ token 不跨重启复用
+        # ⑥ token 的稳定性与轮换（2026-11-13 性质反转）
+        #
+        # 旧：验证「每次启动换新 token」（不跨重启复用）
+        # 新：验证「同 gen 重启不变」（部署不踢人）+「换 gen 立刻作废」（止血）
+        #
+        # 为什么反转：一次会话部署 5 次就踢掉在线标签页 5 次，而
+        # 「每次变」唯一的价值是止血 —— 不可猜测性来自 256 位熵，
+        # 与频率无关。主入口统一到服务台 Authelia 之后，token 降级为兜底，
+        # 固定化更划算；止血改为显式轮换（deploy/rotate-ui-token.sh）。
         another = UiServer(gateway_url, secret, port=0).start()
         try:
-            check("每次启动换新 token", another.token != server.token)
+            check("同 gen 重启 token 不变（部署不踢人）",
+                  another.token == server.token,
+                  "换了 token，部署会踢掉在线标签页")
         finally:
             another.stop()
+
+        rotated = UiServer(gateway_url, secret, port=0, token_gen="drill-1")
+        try:
+            check("换 gen 立刻作废旧 token（止血）",
+                  rotated.token != server.token,
+                  "改 gen 却没换 token —— 失去止血能力")
+        finally:
+            rotated.stop()
     finally:
         server.stop()
 

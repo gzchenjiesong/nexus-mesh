@@ -119,6 +119,36 @@ else
 fi
 
 echo
+echo "═══ ③c 同步运维脚本 ═══"
+# ⚠ 与 ③b 同源的问题，只是对象是脚本而不是 unit（2026-11-13）。
+#
+# `/root/nexus-mesh-deploy/` 下曾放着 deploy.sh / nxs-view.sh 的**副本**，
+# 于是"改的是仓库那份、执行的是旧副本"。这里把仓库里的运维脚本装到
+# 固定位置，让运维敲的路径稳定、而内容始终来自 git。
+#
+# ⚠ 只装**幂等**的只读/自检类脚本。deploy.sh 自己不在其中 ——
+#   它是鸡生蛋，靠 /root 那个薄壳 exec 到仓库这份（见 deploy/entrypoint.sh）。
+install -d -m 755 /usr/local/lib/nexus-mesh 2>/dev/null || true
+script_changed=0
+for src in deploy/open-ui.sh deploy/rotate-ui-token.sh; do
+    [ -e "$src" ] || continue
+    name=$(basename "$src")
+    dst="/usr/local/lib/nexus-mesh/$name"
+    if ! cmp -s "$src" "$dst"; then
+        install -m 755 "$src" "$dst"
+        echo "  更新 $name"
+        script_changed=1
+    fi
+done
+# 便利入口：PATH 里能直接敲 open-ui
+ln -sfn /usr/local/lib/nexus-mesh/open-ui.sh /usr/local/bin/nxs-open 2>/dev/null || true
+if [ "$script_changed" = "1" ]; then
+    echo "  已安装到 /usr/local/lib/nexus-mesh（nxs-open 指向它）"
+else
+    echo "  全部与仓库一致"
+fi
+
+echo
 echo "═══ ④ 重启服务 ═══"
 # ⚠ 顺序有意义：mesh 先起（桥接要连它），ui 最后（它要查 mesh）
 for s in "${SERVICES[@]}"; do

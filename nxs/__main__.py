@@ -413,6 +413,7 @@ def cmd_ui(args: argparse.Namespace) -> int:
 
     from .mgmt.config import ENV_OPS_SECRET, MIN_SECRET_LENGTH
     from .ui import UiServer
+    from .ui.server import ENV_TOKEN_GEN
 
     url = args.url or os.environ.get("NXS_COORDINATOR_URL", "")
     if not url:
@@ -433,6 +434,8 @@ def cmd_ui(args: argparse.Namespace) -> int:
                           ca_file=_ca_file_for(args),
                           recover_url=(args.recover_url
                                        or os.environ.get("NXS_UI_RECOVER_URL")),
+                          token_gen=(args.token_gen
+                                     or os.environ.get("NXS_UI_TOKEN_GEN")),
                           ).start()
     except ConfigError as exc:
         _err(str(exc))
@@ -445,20 +448,33 @@ def cmd_ui(args: argparse.Namespace) -> int:
     _info("")
     _info(_color("  观察窗已启动（只读）", "ok"))
     _info("")
-    _info(f"  在本机打开：{_color(server.entry_url, 'b')}")
-    _info("")
-    _info(_color("  从别的机器访问，先建 SSH 隧道：", "dim"))
-    _info(_color(f"    ssh -N -L {server.port}:127.0.0.1:{server.port} "
-                 f"user@这台机器", "dim"))
-    _info(_color(f"    然后浏览器打开 http://127.0.0.1:{server.port}/?t=<上面那串>",
-                 "dim"))
-    _info("")
-    _info(_color("  ⚠ 链接里的 token 等于一次性钥匙，别贴到聊天或工单里。", "warn"))
-    _info(_color("    它不落盘、不跨重启 —— 重启后换新的。", "dim"))
+    # ⚠ 输出口径改过（2026-11-13）：**不再教人建 SSH 隧道**。
+    #
+    # 原来的输出是「从别的机器访问，先建 SSH 隧道 … 然后浏览器打开
+    # http://127.0.0.1:8080/?t=<那串>」。有了服务台统一入口之后，
+    # 那个流程是多余的：从 hub 点卡片进去，Authelia 两因素认证后自动
+    # 拿到 token，比手工建隧道快，也不用手抄一串密钥。
+    #
+    # 保留「本机地址」这一行是为了排障（确认它真的起来了）。
     if server.recover_url:
-        _info(_color(f"    失效后页面会自动跳回 {server.recover_url} 换新 token", "dim"))
+        # recover_url 指向 hub 的 /api/nexus-enter，其 origin 就是服务台
+        hub = server.recover_url.split("/api/")[0]
+        _info(f"  入口：{_color(hub, 'b')}  （服务台里的 Nexus 卡片）")
+        _info(_color("    统一经服务台的 Authelia 两因素认证进入，", "dim"))
+        _info(_color("    不需要 SSH 隧道，也不用手抄 token。", "dim"))
     else:
-        _info(_color("    未配置 --recover-url：失效后只能手动再取一次链接", "dim"))
+        # 没配统一入口时才退回本机链接 —— 否则用户无路可进
+        _info(f"  本机入口：{_color(server.entry_url, 'b')}")
+        _info(_color("    ⚠ 未配置 --recover-url，没有统一入口。", "warn"))
+        _info(_color("    从别的机器访问需要建隧道：", "dim"))
+        _info(_color(f"      ssh -N -L {server.port}:127.0.0.1:{server.port} "
+                     f"user@这台机器", "dim"))
+    _info("")
+    _info(_color(f"  监听：https://… 经反代 → {server.host}:{server.port}"
+                 f"（只报本机回环，不对外）", "dim"))
+    _info(_color("  token 由运维密钥派生、重启不变、不落盘。", "dim"))
+    _info(_color(f"    当前代数 gen={server.token_gen}；"
+                 f"要轮换就改 {ENV_TOKEN_GEN} 后重启。", "dim"))
     _info("")
     _info(_color("  按 Ctrl-C 停止。", "dim"))
 
@@ -1104,6 +1120,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "/api/nexus-enter（也可用环境变量 "
                          "NXS_UI_RECOVER_URL）。不配置时 401 页面只给"
                          "手动说明 —— SSH 隧道场景不需要这个")
+    sp.add_argument("--token-gen", default=None,
+                    help="token 代数。token 由运维密钥派生、重启不变；"
+                         "改这个值（并重启）即轮换，旧链接立刻作废。"
+                         "也可用环境变量 NXS_UI_TOKEN_GEN，默认 0")
     sp.set_defaults(func=cmd_ui)
 
     return p

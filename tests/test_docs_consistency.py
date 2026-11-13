@@ -975,10 +975,22 @@ class TestWebUiBoundary:
 
     @covers("M15.F4")
     def test_acceptance_guide_describes_the_window(self):
-        """验收手册必须说清"界面在哪、怎么验"，而不只是"没有 UI"。"""
+        """验收手册必须说清"界面在哪、怎么验"，而不只是"没有 UI"。
+
+        ⚠ 判据改过一次（2026-11-13）：原来断言 ``"SSH" in text``，
+        守的是「说清怎么从别的机器访问」。现在观察窗有了统一入口
+        （``https://nexus.<域名>``，经服务台 Authelia 两因素），
+        主路径不再是 SSH 隧道，所以判据改为守「说清了统一入口」。
+
+        原意没丢：手册仍然必须回答"我从别的机器怎么进去"。
+        只是答案从「建隧道 + 抄 token」变成了「打开域名」。
+        """
         text = _read(DOCS / "acceptance-guide.md")
         assert "nxs ui" in text, "验收手册没提观察窗"
-        assert "SSH" in text, "没说怎么从别的机器访问"
+        assert "nexus." in text and "https://" in text, (
+            "没说统一入口（https 域名）—— 别人不知道怎么从别的机器访问"
+        )
+        assert "open-ui.sh" in text, "没给出一键打开/自检的方式"
         # 旧的"零前端"说法必须已经改掉
         assert "零前端代码**" not in text.replace("**", ""), (
             "验收手册还在说「零前端代码」—— 观察窗已经实现了"

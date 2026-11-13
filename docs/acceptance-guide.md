@@ -190,24 +190,36 @@
 
 #### 怎么验观察窗
 
+**主路径（统一入口，不需要隧道）**
+
+```bash
+# 浏览器打开（经服务台 Caddy + Authelia 密码/TOTP）
+https://nexus.<域名>/
+
+# 或从本机一键打开 + 自检
+deploy/open-ui.sh
+deploy/open-ui.sh --check      # 服务/token/数据/401 页面逐层查
+```
+
+**备用路径（本机直连，仅排障用）**
+
 ```bash
 # 服务器上
 nxs ui --url http://127.0.0.1:18100/nxs --port 8080
-# 输出里会打印：http://127.0.0.1:8080/?t=<token>
-
-# 你电脑上建隧道
-ssh -N -L 8080:127.0.0.1:8080 user@服务器
-
-# 浏览器打开那个带 token 的链接（token 会立刻换成 cookie，URL 恢复干净）
+# 输出打印本机入口：http://127.0.0.1:8080/?t=<token>
 ```
 
 | 验收点 | 怎么验 | 通过判据 |
 |---|---|---|
 | 只读 | 页面找任何"批准/吊销"按钮 | **没有**。改状态只能用 `nxs ops` |
 | 鉴权 | 不带 token 直接访问 | 401 |
-| token 不落盘 | 重启 `nxs ui` | token 变了；旧链接失效 |
-| 只听本机 | `nxs ui --host 0.0.0.0` | 拒绝启动，并提示用 SSH 隧道 |
+| token 派生稳定 | 重启 `nxs ui`（同 gen） | token **不变**；在线标签页不受影响 |
+| 轮换止血 | `deploy/rotate-ui-token.sh`（gen+1） | 旧 token 立刻 401；旧标签自动跳回服务台换新 |
+| token 不落盘 | 检查 `/etc/nexus-mesh/` 与 `/tmp` | 找不到 token；它每次启动从密钥重算 |
+| 只听本机 | `nxs ui --host 0.0.0.0` | 拒绝启动，并提示用隧道 |
 | 写方法 | `curl -X POST .../api/state` | 405 + `Allow: GET` |
+| 401 自动恢复 | 带旧 cookie 且 Host 为真实域名访问 | 页面有「立即重新进入」+ 3 秒倒计时 |
+| 401 隧道降级 | 带旧 cookie 且 Host 为 127.0.0.1 | **无**自动跳转，保留 journalctl 手动说明 |
 | coordinator 挂了 | 停掉 coordinator 再刷页面 | 显示"coordinator 不可达：…"，**不是白屏** |
 | 名称/简介 | 看节点行 | 显示 `display_name` 与 `description` |
 

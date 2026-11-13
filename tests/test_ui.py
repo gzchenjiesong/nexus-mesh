@@ -214,20 +214,67 @@ class TestTokenAuth:
         assert b"Nexus Mesh" in body
 
     @covers("M15.F2")
-    def test_token_is_fresh_per_server(self, live_coordinator):
-        """★ 每次启动换新 token，绝不跨重启复用。
+    def test_token_is_stable_within_a_generation(self, live_coordinator):
+        """★★ 同 secret + 同 gen → token 相同；重启不变。
 
-        如果复用，一个昨天泄漏的链接今天还能用。
+        ⚠⚠ **这条测试守的性质反过来了**（2026-11-13 决策变更）。
+
+        原来它叫 ``test_token_is_fresh_per_server``，断言两次启动 token
+        必须不同，理由是「如果复用，一个昨天泄漏的链接今天还能用」。
+
+        那条理由**依然成立**，但它衡量的代价失衡了：一次会话里我部署
+        5 次，用户正在看的面板就失效 5 次。而「每次变」唯一的价值是止血
+        —— 「不可猜测性」来自 256 位熵，与频率无关。
+
+        前提也变了：主入口统一到服务台 Authelia 两因素之后，token 从
+        「唯一的门」降级为「Authelia 配错时的兜底」。
+
+        所以现在：**稳定 + 显式轮换**。止血这件事没有消失，只是从
+        「顺手重启」变成「改 gen 重启」（见 test_rotation_kills_old_token）。
+        轮换还更可靠 —— 以前重启是常态（部署就会重启），所以"止血"
+        其实是副作用；现在是刻意的动作，会记在变更里。
         """
         first = UiServer(live_coordinator, SECRET, port=0).start()
         second = UiServer(live_coordinator, SECRET, port=0).start()
         try:
-            assert first.token != second.token
-            # 且两者都不短（256 位熵）
+            assert first.token == second.token, (
+                "同 gen 重启却换了 token —— 部署会把在线标签页踢掉"
+            )
+            # 仍然要够长（256 位熵），这跟稳不稳定是两件事
             assert len(first.token) >= 32
         finally:
             first.stop()
             second.stop()
+
+    @covers("M15.F2")
+    def test_rotation_kills_old_token(self, live_coordinator):
+        """★★★ 改 gen 必须让旧 token 立刻失效 —— 这是止血能力本身。
+
+        ⚠ 这条是上面那条的**代价承担者**：稳定性不是白拿的。
+        如果这条不成立，那"token 固定"就等于"泄露即永久"，
+        整个决策就不成立了。
+        """
+        old = UiServer(live_coordinator, SECRET, port=0,
+                       token_gen="0").start()
+        new = UiServer(live_coordinator, SECRET, port=0,
+                       token_gen="1").start()
+        try:
+            assert old.token != new.token, (
+                "改 gen 却没换 token —— 失去止血能力"
+            )
+            # 旧 token 对新服务必须 401（不是"两个都能用"）
+            status, _, _ = _get(f"{new.base_url}/",
+                                cookie=f"nxs_ui={old.token}")
+            assert status == 401, (
+                f"轮换后旧 token 仍然可用（HTTP {status}）—— 止血失败"
+            )
+            # 新 token 正常
+            status, _, _ = _get(f"{new.base_url}/",
+                                cookie=f"nxs_ui={new.token}")
+            assert status == 200
+        finally:
+            old.stop()
+            new.stop()
 
     @covers("M15.F2")
     def test_token_not_written_to_disk(self, live_ui):
