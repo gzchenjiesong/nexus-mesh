@@ -50,6 +50,38 @@
 #
 # 薄壳多这十几行，换来的是：/opt/nexus-mesh 出问题时它会**明确告诉你去修
 # 什么**，而不是神秘地 file not found。
+#
+# ==============================================================================
+#  ⚠ 副产品：这个目录里的其他文件都是**符号链接**，指向仓库
+# ==============================================================================
+#
+#     check-git.sh            → /opt/nexus-mesh/deploy/check-git.sh
+#     install-ui-env.sh       → ...
+#     nexus-mesh-ui.service   → ...
+#     verify-tls-resilience.py → ...
+#
+# ## 这带来的一个真实踩坑（2026-11-13）
+#
+# 我改了 `deploy/check-git.sh`，想"快速同步到服务器"，于是：
+#
+#     scp deploy/check-git.sh nexus-hub:/root/nexus-mesh-deploy/
+#
+# 看起来只动了 /root 下的文件。但那个路径是**符号链接**，scp 顺着链接
+# 写进了 /opt/nexus-mesh/deploy/check-git.sh —— 也就是**仓库的工作区**。
+#
+# 后果：下次 `git pull` 报
+#
+#     error: Your local changes to deploy/check-git.sh
+#            would be overwritten by merge. Aborting
+#
+# 而那个"本地改动"其实是我自己刚提交过的内容 —— 一个自造的冲突。
+#
+# ## 正确做法
+#
+# **改仓库 → commit → push → 跑部署脚本。** 部署脚本会 git pull，
+# 符号链接自然指向新内容。永远不要 scp 到符号链接上。
+#
+# 需要临时验证某个改动时，拷到 /tmp 跑，别覆盖仓库。
 # ==============================================================================
 
 set -euo pipefail
