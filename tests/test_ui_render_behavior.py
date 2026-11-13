@@ -64,6 +64,7 @@ class FakeEl {
     this.style = { cssText: "" };
     this.title = "";
     this.colSpan = 1;
+    this._attrs = {};
   }
   // className 与 classList 必须是**同一个集合**的两个视图 ——
   // 页面里两种写法都有（el() 用 className，renderStale 用 classList）
@@ -80,8 +81,8 @@ class FakeEl {
       toggle: (c) => (s.has(c) ? (s.delete(c), false) : (s.add(c), true)),
     };
   }
-  appendChild(c) { this.children.push(c); return c; }
-  prepend(c) { this.children.unshift(c); return c; }
+  appendChild(c) { c.parent = this; this.children.push(c); return c; }
+  prepend(c) { c.parent = this; this.children.unshift(c); return c; }
   replaceChildren() { this.children = []; this._text = ""; }
   set textContent(v) {
     this._text = (v === undefined || v === null) ? "" : String(v);
@@ -93,9 +94,88 @@ class FakeEl {
   get innerText() { return this.textContent; }
   get childNodes() { return this.children; }
   get firstChild() { return this.children[0] || null; }
+
+  // ⚠ closest 是 renderNodes 里 ``body.closest("table")`` 要用的
+  //   （labelCells 需要拿到 table 元素读表头）。桩里不实现它，
+  //   渲染会直接抛错 —— 这正是桩该有的行为：缺 API 就红，而不是静默跳过。
+  closest(sel) {
+    let n = this.parent;
+    while (n) {
+      if (sel === "table" && n.tagName === "TABLE") return n;
+      if (sel === "tbody" && n.tagName === "TBODY") return n;
+      n = n.parent;
+    }
+    return null;
+  }
+
+  // querySelector / querySelectorAll 的极简版。
+  //
+  // ⚠ **必须支持后代选择器**（"thead th"）。第一版只按单个标签名匹配，
+  //   于是 ``table.querySelectorAll("thead th")`` 返回空 —— 表头读不到、
+  //   labelCells 填不出任何 data-label，而测试全绿。这正是"桩比真实
+  //   环境宽松"造成的假绿。
+  _walk(out) {
+    for (const c of this.children) { out.push(c); c._walk(out); }
+    return out;
+  }
+  querySelectorAll(sel) {
+    const parts = String(sel).trim().toUpperCase().split(/\s+/);
+    let pool = [this];
+    for (const tag of parts) {
+      const next = [];
+      for (const node of pool) {
+        // 从当前节点的子树里找，但**不包含自己**
+        for (const d of node._walk([])) {
+          if (d.tagName === tag) next.push(d);
+        }
+      }
+      pool = next;
+      if (!pool.length) return [];
+    }
+    return pool;
+  }
+  querySelector(sel) {
+    return this.querySelectorAll(sel)[0] || null;
+  }
+  getAttribute(name) {
+    if (name === "data-label") return this._attrs["data-label"] ?? null;
+    if (name === "id") return this.id ?? null;
+    return this._attrs[name] ?? null;
+  }
+  setAttribute(name, v) { this._attrs[name] = String(v); }
+  hasAttribute(name) {
+    if (name === "colspan") return (this.colSpan || 1) > 1;
+    return name in this._attrs;
+  }
 }
 
 const _registry = new Map();
+
+//: 节点表的骨架。**必须真的建出 table > thead + tbody#nodes 的层级** ——
+//: labelCells 靠 ``tbody.closest("table")`` 找到表头取列名。桩里不给
+//: 父节点的话，closest 返回 null，labelCells 直接 return，
+//: 于是"有没有填 data-label"这件事在测试里根本看不到（假绿）。
+const _nodesTable = (() => {
+  const table = new FakeEl("table");
+  const thead = new FakeEl("thead");
+  const htr = new FakeEl("tr");
+  for (const name of ["名称 / 简介", "节点", "域", "状态", "批准",
+                      "角色", "吞吐（收/成/败）", "水位", "回传", "能力"]) {
+    const th = new FakeEl("th");
+    th.textContent = name;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  table.appendChild(thead);
+  return table;
+})();
+_nodesTable.appendChild(_nodesTable._nodesBody = (() => {
+  const tb = new FakeEl("tbody");
+  tb.id = "nodes";
+  return tb;
+})());
+_registry.set("nodes", _nodesTable._nodesBody);
+
 const document = {
   createElement: (tag) => new FakeEl(tag),
   getElementById: (id) => {
@@ -116,6 +196,18 @@ renderAll(DATA);
 
 const out = {};
 for (const [id, e] of _registry.entries()) out[id] = e.textContent;
+
+//: 节点表的每个单元格：文本 + data-label + class。
+//: ⚠ 不额外回吐这些，就没法验证「窄屏卡片化时列名有没有填上」——
+//: 那是纯 CSS 依赖的属性，textContent 里看不到它。
+out.__cells = [..._nodesTable.querySelectorAll("tbody")[0].children]
+  .map(tr => [...tr.children].map(td => ({
+    text: td.textContent,
+    label: td.getAttribute ? td.getAttribute("data-label") : null,
+    cls: td.className || "",
+    colspan: td.colSpan || 0,
+  })));
+
 console.log(JSON.stringify(out));
 """
 
@@ -355,4 +447,98 @@ class TestFirstLoadHint:
         text = _render(_healthy_payload())
         assert text.get("boot", "").strip() == "", (
             f"渲染完成后首次加载提示还在：{text.get('boot')!r}"
+        )
+
+
+class TestNarrowScreenLabelsAreFilled:
+    """★★ 窄屏卡片化依赖 ``data-label`` —— 必须验证它**真的被填上了**。
+
+    ## 为什么单独一个类
+
+    窄屏（<760px）下 ``thead`` 被隐藏，列名只能靠
+    ``td::before { content: attr(data-label) }`` 显示。也就是说：
+    **data-label 没填 = 手机上每一行只有值、没有列名**，读起来是一串
+    无意义的数字。而这种缺陷不会报错、页面"看起来有内容"。
+
+    ## 桩里的一个假绿（记下来）
+
+    第一版这里有两条坑：
+
+    ① 桩的 ``getElementById("nodes")`` 返回一个**游离**的 tbody，
+       没有 table 父节点 → ``closest("table")`` 返回 null →
+       ``labelCells`` 直接 return → 什么都没填，测试却全绿。
+
+    ② 桩只回吐 ``textContent``，而 ``data-label`` 是属性、不在文本里，
+       所以就算填了也看不见。
+
+    修法：桩里真的建出 ``table > thead + tbody#nodes`` 骨架，
+    并把每个单元格的 ``data-label`` / class 一起回吐。
+    """
+
+    @covers("M15.F10")
+    def test_every_non_title_cell_gets_a_label(self):
+        """★★★ 除标题列外，每个单元格都要有 data-label。"""
+        cells = _render(_healthy_payload())["__cells"]
+        assert cells, "没有回吐节点单元格 —— 桩的骨架没建好"
+
+        missing = []
+        for row in cells:
+            for c in row:
+                if "row-title" in c["cls"]:
+                    continue
+                if c["colspan"]:
+                    continue
+                if not c["label"]:
+                    missing.append(c["text"][:20])
+        assert not missing, (
+            "这些单元格没有 data-label —— 手机上会只显示值、没有列名：\n  "
+            + "\n  ".join(missing)
+        )
+
+    @covers("M15.F10")
+    def test_labels_match_table_headers(self):
+        """★ 标签内容必须是真实列名（取自表头），不能是占位符。"""
+        cells = _render(_healthy_payload())["__cells"]
+        labels = [c["label"] for row in cells for c in row if c["label"]]
+        assert labels, "一个 data-label 都没有"
+        # 关键列名必须在
+        for name in ("节点", "域", "状态", "水位", "回传"):
+            assert name in labels, f"缺列名 {name!r} —— 那一行在窄屏上没有标签"
+        # 不该出现空串或占位符
+        assert all(x.strip() for x in labels), f"有空的 data-label：{labels}"
+
+    @covers("M15.F10")
+    def test_title_cell_is_not_labelled(self):
+        """★ 标题列（节点名/简介）不该有 data-label。
+
+        它是卡片标题，前面加「名称 / 简介:」既占位置又奇怪。
+        """
+        cells = _render(_healthy_payload())["__cells"]
+        first_row = cells[0]
+        title = first_row[0]
+        assert "row-title" in title["cls"], (
+            f"第一个单元格没标 row-title：class={title['cls']!r}"
+        )
+        assert not title["label"], (
+            f"标题列不该有 data-label，但它有：{title['label']!r}"
+        )
+
+    @covers("M15.F10")
+    def test_empty_state_row_has_no_labels(self):
+        """★ 空态行（colspan 占满）不该有 data-label。
+
+        那是一整行一句话（「（注册表为空）」），不是字段。
+        有标签会让它显示成「名称 / 简介: （注册表为空）」，读着像数据。
+        """
+        payload = _healthy_payload()
+        payload["nodes"] = []
+        payload["metrics"]["nodes"] = []
+        cells = _render(payload)["__cells"]
+        flat = [c for row in cells for c in row]
+        assert flat, "空态行没渲染"
+        assert all(not c["label"] for c in flat), (
+            f"空态行被填了 data-label：{[c['label'] for c in flat]}"
+        )
+        assert any(c["colspan"] for c in flat), (
+            "空态行没有 colspan —— 桩或渲染逻辑变了，改这里"
         )

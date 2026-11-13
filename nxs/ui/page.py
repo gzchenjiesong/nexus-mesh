@@ -219,6 +219,95 @@ SHELL = """<!DOCTYPE html>
   /* 陈旧数据整块降透明度 —— 与实时数据视觉隔离，绝不混排观感 */
   .stale-data { opacity: .62; }
   .stale-data table { border-style: dashed; }
+
+  /* ==================================================================
+   * 窄屏（<760px）：表格转卡片堆叠
+   * ==================================================================
+   *
+   * ⚠ **这段是补的一个实测缺陷（2026-11-13）。** 390px 下节点表宽 716px，
+   * 整页横向溢出 **358px** —— 而交接文档 §8 点名过「表格多，这条最容易挂」。
+   *
+   * 为什么不用横向滚动：手机上看监控面板，横滚意味着"永远只能看到
+   * 前两列"，而节点表的重点（状态/吞吐/水位）恰在后半段。滚动条不是解法。
+   *
+   * 做法：每行变成一张卡片，列名由 td 的 data-label 提供（渲染时按表头
+   * 自动填，见 labelCells）。这样**新增表格自动适配**，不用逐表写媒体查询。
+   *
+   * 为什么不隐藏次要列：本面板的定位是「给人查看运行情况」，少显示一列
+   * 就等于少一个判断依据。宁可长一点，也要把数据留着。
+   *
+   * ⚠ **断点 760 是实测出来的，不是拍的。** 逐 10px 扫 660–820：
+   *
+   *       690px → 溢出 58px      730px → 溢出 18px
+   *       700px → 溢出 48px      740px → 溢出  8px
+   *       710px → 溢出 38px      750px → 不溢出（表格模式的最小可用宽度）
+   *       720px → 溢出 28px
+   *
+   * 所以表格模式的临界点是 750px，这里取 760 留 10px 余量。
+   * （第一版我拍了 680px，结果 681–749px 区间仍溢出 —— 断点设低的后果
+   * 是"看起来修好了 390px，实际上换了个宽度继续坏"。）
+   */
+  @media (max-width: 759px) {
+    /* ⚠ **table / tbody 必须一起改成 block。**
+     *
+     * 第一版只改了 tr 和 td 的 display，结果表格还是 table 布局
+     * （table + table-row-group），会按内容自动撑宽 —— 实测仍溢出 11px。
+     * 卡片化的前提是整条链都脱离表格布局。 */
+    table, tbody, tr, td, th { display: block; }
+    table { width: 100%; border: 0; border-radius: 0;
+            background: transparent; overflow: visible; }
+    thead { display: none; }
+
+    tbody tr {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }
+    /* 待审批的高亮要跟着卡片走，否则白底上看不出 */
+    tbody tr.row-pending { border-color: var(--warn); }
+
+    /* ⚠ 选择器必须带类，否则被 ``.log td`` 盖掉。
+     *
+     * ``.log th, .log td { padding: 7px 11px; white-space: nowrap; }``
+     * 是类选择器（特异性 0,1,1），元素选择器 ``tbody td``（0,0,2）赢不了它。
+     * 实测症状：padding 仍是 7px 11px，且 **nowrap 让日志表直接撑破**。
+     * ``table tbody td`` / ``table.log tbody td`` 都是 (0,1,2)，才压得住。 */
+    table tbody td,
+    table.log tbody td {
+      display: flex;
+      gap: 10px;
+      padding: 3px 0;
+      border-bottom: 0;
+      /* 关键：必须解除 .log td 的 nowrap，否则长内容不换行、撑破容器 */
+      white-space: normal;
+      /* 长文本（能力列表、错误信息）必须能换行 */
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    table tbody td::before,
+    table.log tbody td::before {
+      content: attr(data-label);
+      flex: 0 0 5.6em;
+      color: var(--dim);
+      font-size: 12px;
+      /* 与值的第一行基线对齐 */
+      padding-top: 2px;
+      white-space: normal;
+    }
+    /* 空态行（colspan 占满）没有列名，也不该有标签位 */
+    table tbody td:not([data-label])::before { content: none; }
+    table tbody td:not([data-label]) { display: block; }
+
+    /* 卡片标题：节点名/简介占整行，当标题用 */
+    table tbody td.row-title {
+      display: block;
+      padding: 0 0 8px;
+      margin-bottom: 6px;
+      border-bottom: 1px solid var(--line);
+    }
+  }
 </style>
 </head>
 <body>
@@ -295,6 +384,36 @@ function el(tag, cls, text) {
   //   节点自报的文本不可信，textContent 从结构上不解析标记。
   if (text !== undefined && text !== null) node.textContent = String(text);
   return node;
+}
+
+//: 给表体的每个单元格补上 ``data-label``（取自对应表头）。
+//:
+//: 窄屏（≤680px）下表格会转成卡片堆叠，那时表头被隐藏，列名只能靠
+//: ``td::before { content: attr(data-label) }`` 显示。所以渲染完必须调一次。
+//:
+//: ⚠ **为什么按表头自动填，而不是每个 render 函数里手写列名。**
+//:
+//: 手写意味着「加一列就得记得同步改窄屏标签」—— 而漏掉的表现是：
+//: 手机上那一行只显示值、没有标签，读起来是一串无意义的数字。
+//: 那种缺陷没人会主动报（因为"看起来有内容"），但信息已经废了一半。
+//: 自动填只有一处逻辑，新增表格天然适配。
+//:
+//: ⚠ 跳过两类单元格：
+//:   · ``row-title``（节点名/简介）—— 它是卡片标题，不该带「名称 / 简介:」
+//:   · 带 ``colspan`` 的（空态提示行）—— 那是整行一句话，不是字段
+function labelCells(table) {
+  if (!table) return;
+  const heads = [...table.querySelectorAll("thead th")]
+    .map(th => th.textContent.trim());
+  if (!heads.length) return;
+  for (const tr of table.querySelectorAll("tbody tr")) {
+    [...tr.children].forEach((td, i) => {
+      if (td.classList.contains("row-title")) return;
+      if (td.hasAttribute("colspan")) return;
+      const label = heads[i];
+      if (label) td.setAttribute("data-label", label);
+    });
+  }
 }
 
 function fmtMs(v) {
@@ -414,7 +533,8 @@ function renderNodes(nodes, emptyReason) {
     // 待审批的行整行高亮 —— 一眼扫到，不用逐行读"批准"列
     if (!n.approved) tr.className = "row-pending";
 
-    const cName = el("td");
+    // row-title：窄屏卡片化时它是标题，不带「名称 / 简介:」标签
+    const cName = el("td", "row-title");
     cName.appendChild(el("div", "name", n.display_name || "（未命名）"));
     if (n.description) cName.appendChild(el("div", "desc", n.description));
     tr.appendChild(cName);
@@ -524,6 +644,7 @@ function renderNodes(nodes, emptyReason) {
 
     body.appendChild(tr);
   }
+  labelCells(body.closest("table"));
 }
 
 function renderDenials(m) {
@@ -563,6 +684,7 @@ function renderDenials(m) {
   }
   table.appendChild(tb);
   host.appendChild(table);
+  labelCells(table);
 }
 
 function renderByType(m) {
@@ -612,6 +734,7 @@ function renderByType(m) {
   }
   table.appendChild(tb);
   host.appendChild(table);
+  labelCells(table);
 }
 
 function outcomeKey(o) {
@@ -708,6 +831,7 @@ function renderAudit(records, truncated, heartbeats, error) {
   }
   table.appendChild(tb);
   host.appendChild(table);
+  labelCells(table);
 
   if (truncated) {
     host.appendChild(el("div", "trunc",
