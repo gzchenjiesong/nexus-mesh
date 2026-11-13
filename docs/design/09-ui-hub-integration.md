@@ -914,3 +914,90 @@ grep -q 找到匹配立即退出 → 上游被打 SIGPIPE（141）
 
 教训：**验证「A 之后 B 仍成立」时必须确认 A 真的发生了**，
 否则结论是空的。这和「预览脚本在验证假数据」是同一类错误。
+
+---
+
+## 十、上线后故障：「未获取到 Token」（2026-11-13 晚）
+
+用户点服务台 Nexus 卡片，页面显示取不到 token。**这是我上一轮改动的
+直接后果** —— 两个改动叠加破坏了一个既有的跨系统接口。
+
+### 故障链
+
+```
+① nexus-mesh 把 token 改为「由运维密钥派生、重启不变」
+② nexus-mesh 同时删掉了启动时打印 ?t=<token> 的输出（消除长期泄露面）
+        ↓
+③ hub 的 /api/nexus-enter 靠正则从 journald 抓 ?t=…
+   抓到了上一版遗留的**作废 token**
+        ↓
+④ 校验不过 → 返回 None → 503 / 卡片 state=warn note="token 未取到"
+```
+
+现场证据：
+
+```
+日志最后一条    xHXNhzeQQX74ZaFD…  → HTTP 401（已作废）
+当前有效 token  -oXyTq_LcCf0kZCM…  → HTTP 303
+```
+
+**我看漏了什么**：改 token 生成方式时，我只检查了 nexus-mesh 仓库内部
+（测试、文档、脚本全过），没有问「**还有谁在消费这个 token**」。
+而 `journald 里的 ?t=` 就是一个隐式接口。
+
+### 为什么「从日志抓」本身就是脆弱设计
+
+日志是 append-only，**必然**积累历史 token。「取最后一个再校验」这种
+模式意味着：任何格式变化、历史残留、甚至日志被截断，都会让它失效。
+它「碰巧能用」只是因为以前 token 每次重启都变、且每次启动都打印。
+
+### 修法：hub 改为自行派生
+
+hub 以 **root** 运行，本来就能读 `/etc/nexus-mesh/ui.env`。所以让它
+用密钥派生 token **不增加任何权限面** —— 区别只是"代码里是否使用它"。
+
+```
+base64url(HMAC-SHA256(secret, "ui-token:v1:gen{N}")).rstrip("=")
+```
+
+取用顺序改为：**派生 → 校验 → 日志兜底 → 校验**。两步都要校验，因为
+`ui.env` 改了但 UI 进程还没重启时，派生结果会短暂对不上。
+
+日志兜底保留但**已基本是死代码**（当前版本不再打印 token）。留着只为
+两种情况救场：`ui.env` 不可读、或回滚到旧版 nexus-mesh。
+
+### 新风险：跨仓库的隐式契约
+
+修完之后，「派生算法」成了两个仓库之间的契约：
+
+```
+nexus-mesh   nxs/ui/server.py   : derive_token()
+private-hub  backend/status.py  : nexus_token_derive()
+```
+
+两边各一份实现（hub 零第三方依赖、不 import 对方的包）。**任何一边
+改了 label 或拼接格式，另一边会静默算出另一个 token** —— 症状还是
+「未获取到 Token」，且没有任何报错指向根因。这比原故障更难查。
+
+三重守护：
+
+| 位置 | 形式 |
+|---|---|
+| `private-hub/backend/check_token_parity.py` | golden vector 对比 4 组输入 |
+| `private-hub/deploy/deploy.sh` 1/8 预检 | **部署前**跑上面那个，分叉直接中止 |
+| `nexus-mesh/tests/test_token_derivation_parity.py` | 同一组 vector + label/格式各自 pin 死 |
+
+⚠ 第三项里的 `test_golden_vector_is_pinned` 特别值得说：它不关心算法
+怎么实现，只关心**结果不变**。所以既允许内部重构，又会在结果变化时
+立刻喊人 —— 而结果变化就意味着 hub 会分叉。
+
+### 教训
+
+**改一个被别的系统消费的东西时，必须先找出所有消费者。**
+
+我上一轮的检查范围是「这个仓库内」，而 token 的消费者在另一个仓库。
+`journald 里的 ?t=` 没有出现在任何接口文档里，它是靠「启动时打印」
+这个行为隐式形成的契约 —— 而我把那个行为删了。
+
+排查方法：改之前 grep 整个**部署链路**（含相邻仓库、部署脚本、外部
+消费方），而不只是当前仓库。
