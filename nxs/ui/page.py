@@ -203,8 +203,10 @@ SHELL = """<!DOCTYPE html>
       <th style="width:8%">域</th>
       <th style="width:8%">状态</th>
       <th style="width:9%">批准</th>
-      <th style="width:14%">角色</th>
-      <th style="width:13%">吞吐（收/成/败）</th>
+      <th style="width:13%">角色</th>
+      <th style="width:12%">吞吐（收/成/败）</th>
+      <th style="width:9%">水位</th>
+      <th style="width:9%">回传</th>
       <th>能力</th>
     </tr>
   </thead>
@@ -290,11 +292,23 @@ function renderTiles(m) {
   host.appendChild(tile("完成", t.completed ?? 0));
   host.appendChild(tile("失败", t.failed ?? 0));
   host.appendChild(tile("拒绝", t.denied ?? 0));
+  // ---- 延迟分位数 ----
+  //
+  // ⚠ `latency_samples < 2` 时**不显示分位数**（交接文档 §6 明确要求）。
+  //   原因：1 个样本的 p50/p95/p99 是同一个数，"分位数"没有意义，
+  //   画出来会让人以为延迟很稳定 —— 而实际是样本不够。
+  //   显示 "—" + 明确写「样本不足」，比给一个假数字诚实。
   const lat = (m && m.latency_ms) || {};
-  host.appendChild(tile("p50", fmtMs(lat.p50), "ms"));
-  host.appendChild(tile("p95", fmtMs(lat.p95), "ms"));
-  host.appendChild(tile("p99", fmtMs(lat.p99), "ms"));
-  host.appendChild(tile("样本", (m && m.latency_samples) ?? 0));
+  const samples = (m && m.latency_samples) ?? 0;
+  const enough = samples >= 2;
+  host.appendChild(tile("p50", enough ? fmtMs(lat.p50) : "—", enough ? "ms" : null));
+  host.appendChild(tile("p95", enough ? fmtMs(lat.p95) : "—", enough ? "ms" : null));
+  host.appendChild(tile("p99", enough ? fmtMs(lat.p99) : "—", enough ? "ms" : null));
+  const sampleTile = tile("样本", samples);
+  if (!enough) {
+    sampleTile.appendChild(el("div", "desc", "样本不足，不算分位数"));
+  }
+  host.appendChild(sampleTile);
   // 运行时长：判断"指标为什么是小数字"的第一手信息 ——
   // 刚重启时所有累计值都很小，没有这个会误以为网络很空闲。
   if (m && m.uptime_seconds !== undefined) {
@@ -335,7 +349,7 @@ function renderNodes(nodes) {
   if (!nodes.length) {
     const tr = el("tr");
     const td = el("td", "meta", "（注册表为空）");
-    td.colSpan = 8;
+    td.colSpan = 10;
     tr.appendChild(td);
     body.appendChild(tr);
     return;
@@ -415,6 +429,29 @@ function renderNodes(nodes) {
       cTp.appendChild(busy);
     }
     tr.appendChild(cTp);
+
+    // ---- 水位（backlog_ratio）----
+    //
+    // ⚠ `backlog_ratio` 为 `None` 时表示**无穷大**（capacity 为 0，除零）。
+    //   不能显示成 0 或空白 —— 那会被读成"没有积压"，与实际正好相反。
+    //   交接文档 §6 明确要求显示为 ∞。
+    const cLevel = el("td", "num");
+    const ratio = n.backlog_ratio;
+    if (ratio === null || ratio === undefined) {
+      cLevel.appendChild(el("span", "o-denied", "∞"));
+      cLevel.title = "容量为 0，积压比无穷大";
+    } else {
+      cLevel.textContent = (ratio).toFixed(1) + "×";
+      // 积压超过容量本身就是异常信号（>1×）
+      if (ratio > 1) cLevel.className = "num o-denied";
+    }
+    tr.appendChild(cLevel);
+
+    // ---- 回传字节（bytes_out）----
+    const cBytes = el("td", "num");
+    cBytes.textContent = (n.bytes_out === undefined || n.bytes_out === null)
+      ? "—" : fmtBytes(n.bytes_out);
+    tr.appendChild(cBytes);
 
     const caps = (n.capabilities || []).join(", ") || "—";
     tr.appendChild(el("td", "caps", caps));
@@ -603,9 +640,36 @@ function renderAnomalies(list) {
   }
   for (const a of list) {
     const box = el("div", "anomaly");
-    box.appendChild(el("div", "r", (a.severity || "") + " · " + (a.rule || "")));
-    if (a.detail) box.appendChild(el("div", "why", a.detail));
-    if (a.rationale) box.appendChild(el("div", "why", a.rationale));
+
+    // 标题行：severity · rule · subject
+    const head = el("div", "r");
+    head.textContent = (a.severity || "") + " · " + (a.rule || "");
+    if (a.subject) head.textContent += " · " + a.subject;
+    box.appendChild(head);
+
+    // message：发生了什么
+    if (a.message) box.appendChild(el("div", "why", a.message));
+
+    // ⚠ rationale 是这类规则存在的**资格证明**，必须显示。
+    //   交接文档 §4 原文：「丢掉 rationale 就等于丢掉了这条规则的可信度」。
+    //   它回答的是「凭什么单看每个指标都正常，这却算异常」。
+    if (a.rationale) {
+      const r = el("div", "why");
+      r.appendChild(el("span", "tag", "为什么算异常"));
+      r.appendChild(document.createTextNode(" " + a.rationale));
+      box.appendChild(r);
+    }
+
+    // ⚠ suggestion 同样必须显示：只说"有问题"不给动作，等于把判断
+    //   全推给运维。交接文档 §8 交付标准明确列了这一项。
+    if (a.suggestion) {
+      const s = el("div", "why");
+      s.appendChild(el("span", "tag", "建议动作"));
+      s.appendChild(document.createTextNode(" " + a.suggestion));
+      s.style.marginTop = "6px";
+      box.appendChild(s);
+    }
+
     host.appendChild(box);
   }
 }

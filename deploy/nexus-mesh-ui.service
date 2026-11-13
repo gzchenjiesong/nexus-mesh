@@ -1,0 +1,64 @@
+[Unit]
+Description=Nexus Mesh · 只读观察窗（本机网页看板）
+Documentation=https://github.com/gzchenjiesong/nexus-mesh
+# hub 没起也不影响本服务（它会在页面上显示「hub 不可达」），
+# 所以用 Wants 而不是 Requires —— 观察窗最该工作的时刻正是 hub 出事时。
+After=network-online.target nexus-mesh.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nxs
+Group=nxs
+WorkingDirectory=/opt/nexus-mesh
+
+# ⚠⚠ 凭据只给 OPS 密钥，**不要指向 nxs.env**（2026-11-13 修）
+#
+# nxs.env 是给常驻进程用的**全量**凭据文件，里面有：
+#
+#     NXS_OPS_SECRET            ← 观察窗只需要这一个
+#     NXS_SECRET_COORDINATOR    ← 不需要
+#     NXS_SECRET_HERMES_WORKING ← 不需要
+#     NXS_SECRET_TASKFLOW       ← 不需要
+#     NXS_SECRET_WORK_DESKTOP   ← 不需要
+#     NXS_SECRET_WORK_MACBOOK   ← 不需要
+#
+# 实测确认过：改之前 UI 进程环境里六把密钥全在。
+# **一个只读观察窗握着网络里全部 5 个节点的身份** —— 它一旦被攻破，
+# 攻击者拿到的不是只读运维通道，而是能直接冒充任一节点发任务的完整身份。
+#
+# 这与「不做写操作」不在一个量级：前者防误操作，**这一条防提权**。
+#
+# ui.env 只有一行，由 deploy/install-ui-env.sh 生成。
+EnvironmentFile=/etc/nexus-mesh/ui.env
+Environment=PYTHONUNBUFFERED=1
+# hub 用自签证书，这里是让本进程信任那张 CA。
+# 只影响本进程，不碰系统证书库。
+Environment=SSL_CERT_FILE=/etc/nexus-mesh/tls/ca.pem
+
+ExecStart=/opt/nexus-mesh/.venv/bin/python -m nxs ui \
+    --url https://127.0.0.1:18800/nxs --port 8080
+
+Restart=always
+RestartSec=5
+TimeoutStartSec=15
+TimeoutStopSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# 观察窗不写任何东西 —— 连可写路径都不给
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nexus-mesh-ui
+
+[Install]
+WantedBy=multi-user.target

@@ -29,7 +29,8 @@ NODES = [
                          "max_response_level": "summary"},
      "capabilities": ["agent.ask"],
      "received": 3, "completed": 3, "failed": 0,
-     "pending": 0, "in_flight": 0},
+     "pending": 0, "in_flight": 0,
+     "backlog_ratio": 0.0, "bytes_out": 0},
     {"node_id": "work-macbook", "display_name": "CodeBuddy · MacBook",
      "description": "本地开发机执行者",
      "domain": "zone-work", "state": "alive", "approved": True,
@@ -38,7 +39,21 @@ NODES = [
                          "max_response_level": "summary"},
      "capabilities": ["work.query"],
      "received": 9, "completed": 6, "failed": 3,
-     "pending": 2, "in_flight": 1},
+     "pending": 2, "in_flight": 1,
+     # 这两个是阶段 3a 新用的字段
+     "backlog_ratio": 1.5, "bytes_out": 18432},
+    # ⚠ capacity=0 时 backlog_ratio 为 None（除零）——
+    #   前端必须显示 ∞，不能显示 0 或空白（那会被读成"没有积压"）
+    {"node_id": "work-desktop", "display_name": "CodeBuddy · 公司电脑",
+     "description": "内网执行者（capacity=0 的边缘情形）",
+     "domain": "zone-work", "state": "stale", "approved": False,
+     "role": "worker",
+     "role_definition": {"can_issue": False, "serves": ["work.query"],
+                         "max_response_level": "summary"},
+     "capabilities": ["work.query"],
+     "received": 0, "completed": 0, "failed": 0,
+     "pending": 0, "in_flight": 0,
+     "backlog_ratio": None, "bytes_out": 0},
 ]
 
 METRICS = {
@@ -157,6 +172,44 @@ STATES: dict[str, dict] = {
         "stale_age_seconds": 1080.0,
         "no_history": False,
         "probe": _probe_like_crash(),
+    },
+    # ④ 稀疏：样本不足（不画分位数）+ 有组合异常（验 rationale/suggestion）
+    "sparse": {
+        "at": "2026-11-13T17:10:00+08:00",
+        "coordinator_url": "https://127.0.0.1:18800/nxs",
+        "nodes": NODES,
+        "metrics": {
+            "uptime_seconds": 120,
+            "totals": {"submitted": 1, "completed": 1, "failed": 0, "denied": 0},
+            # 只有 1 个样本 → 必须不显示分位数
+            "latency_ms": {"p50": 42.0, "p95": 42.0, "p99": 42.0},
+            "latency_samples": 1,
+            "denied_by_rule": {},
+            "by_type": {"work.query": {"submitted": 1, "completed": 1,
+                                       "failed": 0}},
+            "anomalies": [{
+                "severity": "warn",
+                "rule": "probe_pattern",
+                "subject": "work-macbook",
+                "message": "同一节点在 60 秒内产生 5 次不同类型拒绝",
+                "rationale": (
+                    "单看每一项都正常：5 次拒绝分散在不同规则上，"
+                    "没有任何单规则超过阈值。但同一个节点短时间内"
+                    "试遍多个类型，是权限试探的形态。"
+                ),
+                "suggestion": (
+                    "确认该节点是否在调试；若不是，"
+                    "检查它的凭据是否泄露。"
+                ),
+                "evidence": {"window_seconds": 60, "distinct_types": 5},
+            }],
+        },
+        "audit": AUDIT,
+        "audit_truncated": False, "audit_heartbeats": 12,
+        "error": None,
+        "stale": False, "stale_since": None, "stale_age_seconds": None,
+        "no_history": False,
+        "probe": _probe_healthy(),
     },
     # ③ 无历史：面板刚启动就遇上不可达
     "no_history": {

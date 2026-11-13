@@ -3,7 +3,7 @@
 > **本文件由 `tests/test_traceability.py` 自动生成，请勿手工编辑。**
 > 修改编号请改 `traceability/registry.py`，修改覆盖请给测试加 `@covers`。
 
-共 **892** 个测试方法（已声明覆盖）· **142** 个纵向编号项（119 功能点 + 23 模块需求）
+共 **900** 个测试方法（已声明覆盖）· **142** 个纵向编号项（119 功能点 + 23 模块需求）
 
 ## 设计目标
 
@@ -250,7 +250,7 @@ _（未实现，暂无功能点）_
 
 | 编号 | 名称／约束 | 实现位置 | G | P | S | 覆盖测试 |
 |---|---|---|---|---|---|---|
-| **M15.F1** | 只读 UI 进程（只听 127.0.0.1，拒绝公网绑定） | `nxs/ui/server.py:UiServer` | G3 | P1 | — | 4 |
+| **M15.F1** | 只读 UI 进程（只听 127.0.0.1，拒绝公网绑定） | `nxs/ui/server.py:UiServer` | G3 | P1 | — | 7 |
 | **M15.F2** | 一次性 token 鉴权（启动生成 · HttpOnly cookie · 不落盘） | `nxs/ui/server.py:_make_handler` | G3 | P1 | — | 15 |
 | **M15.F3** | 数据只经运维端点（不 import app／存储后端） | `nxs/ui/server.py:UiServer.snapshot` | G3 | P1 | — | 4 |
 | **M15.F4** | 节点列表视图（名称／简介／角色／状态／能力） | `nxs/ui/page.py:SHELL · nxs/ui/server.py:snapshot` | G3 | P1 | — | 3 |
@@ -259,7 +259,7 @@ _（未实现，暂无功能点）_
 | **M15.F7** | 自报字段服务端校验（长度上限 · 拒控制字符） | `nxs/core/models.py:_clean_self_reported` | G3 | P1 | — | 1 |
 | **M15.F8** | 只读保证（无写方法 · 405 带 Allow） | `nxs/ui/server.py:Handler.do_POST` | G3 | P1 | — | 4 |
 | **M15.F9** | 运行日志视图（审计流 · 尾部读 · ops/audit 端点 · 按 outcome 着色） | `nxs/ui/page.py:renderAudit · nxs/mgmt/audit.py:read_recent · nxs/edge/gateway.py:_ops_audit` | G3 | P1 | — | 17 |
-| **M15.F10** | 待审批提示与指标补齐（denied_by_rule／by_type／节点吞吐／运行时长） | `nxs/ui/page.py:renderPending · renderDenials · renderByType` | G3 | P1 | — | 6 |
+| **M15.F10** | 待审批提示与指标补齐（denied_by_rule／by_type／节点吞吐／运行时长） | `nxs/ui/page.py:renderPending · renderDenials · renderByType` | G3 | P1 | — | 11 |
 | **M15.F11** | 本地探针（进程/wchan/线程/accept 队列 → 判定 dead／unresponsive／healthy） | `nxs/ui/probe.py:probe_coordinator` | G3 | P1 | — | 13 |
 | **M15.F12** | 内存末次成功兜底（coordinator 挂时给最后已知状态 + 明确时间戳，不落盘） | `nxs/ui/server.py:UiServer._fill_stale` | G3 | P1 | — | 5 |
 

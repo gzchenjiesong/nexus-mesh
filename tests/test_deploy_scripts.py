@@ -2519,3 +2519,107 @@ def _find_pwsh() -> str | None:
         if os.path.isfile(exe) and os.access(exe, os.X_OK):
             return exe
     return None
+
+
+class TestUiUnitCredentialScope:
+    """★★ 观察窗的 unit 只能拿到 OPS 密钥，不能拿到节点身份密钥。
+
+    ⚠⚠ **这来自一次真实的安全缺陷（2026-11-13 实测发现）。**
+
+    改之前 `nexus-mesh-ui.service` 里是：
+
+        EnvironmentFile=/etc/nexus-mesh/nxs.env
+
+    而 nxs.env 是给常驻进程用的**全量**凭据文件。实测 `/proc/<pid>/environ`
+    确认，那个只读观察窗的进程里有六把密钥：
+
+        NXS_OPS_SECRET            ← 它只需要这一个
+        NXS_SECRET_COORDINATOR    ← 不需要
+        NXS_SECRET_HERMES_WORKING ← 不需要
+        NXS_SECRET_TASKFLOW       ← 不需要
+        NXS_SECRET_WORK_DESKTOP   ← 不需要
+        NXS_SECRET_WORK_MACBOOK   ← 不需要
+
+    ## 为什么这比「有写操作」严重得多
+
+    | 风险 | 后果 |
+    |---|---|
+    | 有写操作按钮 | 误操作一次 |
+    | **握有全部节点密钥** | 面板一旦被攻破，攻击者能**直接冒充任一节点发任务** |
+
+    前者防的是误操作，**这一条防的是提权**。
+
+    ## 为什么用「白名单提取」而不是手工写
+
+    手工写会漏，而"漏"在这里的表现是：一个只读页面悄悄握着全部身份，
+    **没人会发现**。脚本从 nxs.env 里只挑 OPS 那一行，其余一概不复制 ——
+    这样即使将来 nxs.env 新增密钥，ui.env 也不会跟着变多。
+    """
+
+    @covers("M15.F1")
+    def test_ui_unit_does_not_reference_full_credentials(self):
+        """★ unit 的 EnvironmentFile 不得指向 nxs.env（全量凭据）。"""
+        unit = REPO_ROOT / "deploy" / "nexus-mesh-ui.service"
+        assert unit.exists(), "UI 的 unit 必须纳入版本管理（不该只在服务器上手工维护）"
+
+        text = unit.read_text(encoding="utf-8")
+        env_lines = [
+            line.strip() for line in text.splitlines()
+            if line.strip().startswith("EnvironmentFile=")
+        ]
+        assert env_lines, "unit 里没有 EnvironmentFile"
+
+        for line in env_lines:
+            assert "nxs.env" not in line, (
+                f"unit 指向了全量凭据文件：{line}\n"
+                "  那里面有全部节点的身份密钥（NXS_SECRET_*），\n"
+                "  而观察窗只需要 NXS_OPS_SECRET。\n"
+                "  给它多余的密钥 = 面板被攻破时可冒充任一节点。"
+            )
+            assert "ui.env" in line, (
+                f"EnvironmentFile 应指向 ui.env（最小集），实际：{line}"
+            )
+
+    @covers("M15.F1")
+    def test_installer_uses_whitelist_not_copy(self):
+        """★★ 生成脚本必须**白名单提取**，不能整个复制。
+
+        若脚本是「cp nxs.env ui.env」，那等于没改。
+        白名单提取的好处：nxs.env 将来新增密钥，ui.env 不会跟着变多。
+        """
+        script = REPO_ROOT / "deploy" / "install-ui-env.sh"
+        assert script.exists(), "缺 install-ui-env.sh（运维步骤必须可复现）"
+
+        text = script.read_text(encoding="utf-8")
+
+        # 必须声明「只要这一个」
+        assert "NXS_OPS_SECRET" in text, "脚本里没提到 OPS 密钥"
+
+        # 不能整个复制（用变量名也会绕过字面量检查，所以要按命令形态判）
+        #
+        # ⚠ 第一版写成 `"cp " not in text or "nxs.env ui.env" not in text`，
+        # 反向验证时**没红** —— 因为注入的是 `cp "$SRC_ENV" "$DST_ENV"`，
+        # 里面没有字面量 "nxs.env ui.env"，第一个条件也不成立。
+        #
+        # 教训：判断"不许整个复制"不能只看字面路径，要看**是否出现
+        # 以源变量为参数的 cp 命令**。
+        import re
+        copy_cmds = re.findall(r"\bcp\s+\S*(?:SRC_ENV|nxs\.env)\S*\s+\S*(?:DST_ENV|ui\.env)", text)
+        assert not copy_cmds, (
+            f"脚本里出现了整个复制：{copy_cmds}\n"
+            "  nxs.env 是全量凭据，复制它等于没改。必须白名单提取。"
+        )
+
+        # 必须有 prefix 精确匹配（避免 NXS_OPS_SECRET_OLD 这类被误取）
+        assert "^${name}=" in text or '^${name}=' in text, (
+            "提取时要按行首精确匹配，防止前缀相近的变量被误取"
+        )
+
+    @covers("M15.F1")
+    def test_installer_check_mode_rejects_node_secrets(self):
+        """★ `--check` 模式必须能检出「混进了 NXS_SECRET_*」。"""
+        text = (REPO_ROOT / "deploy" / "install-ui-env.sh").read_text(encoding="utf-8")
+        assert "NXS_SECRET_" in text, (
+            "--check 里没有「不得含 NXS_SECRET_*」这项检查 —— "
+            "那样配错了也发现不了"
+        )

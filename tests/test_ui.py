@@ -1364,3 +1364,82 @@ class TestHeartbeatNoiseIsFiltered:
             "前端没接收心跳数 —— 空日志时无法解释原因"
         )
         assert "心跳" in SHELL
+
+
+class TestStage3aDisplayGaps:
+    """★★ 交接文档 §8 交付标准里缺的四项展示（2026-11-13 补）。
+
+    逐项核对时发现后端**已经在返回**这些数据，只是前端没画：
+
+        backlog_ratio   后端有，前端 0 引用
+        bytes_out       后端有，前端 0 引用
+        suggestion      后端有，前端 0 引用
+        样本不足处理     后端给 latency_samples，前端不看
+    """
+
+    @covers("M15.F10")
+    def test_node_table_has_level_and_bytes(self):
+        """★ 节点表要有「水位」「回传」两列。"""
+        assert "backlog_ratio" in SHELL, (
+            "前端没读 backlog_ratio —— 水位列不会显示"
+        )
+        assert "bytes_out" in SHELL, (
+            "前端没读 bytes_out —— 回传字节列不会显示"
+        )
+        assert "水位" in SHELL and "回传" in SHELL
+
+    @covers("M15.F10")
+    def test_backlog_ratio_none_shows_infinity(self):
+        """★★ `backlog_ratio: None` 必须显示 `∞`，不能是 0 或空白。
+
+        ⚠ `None` 的含义是**无穷大**（capacity 为 0，除零）。
+        显示成 0 或空白会被读成「没有积压」—— 与事实正好相反。
+
+        交接文档 §6 明确要求：「`backlog_ratio: None` 要显示为 `∞`，
+        不要显示 0 或空白」。
+        """
+        assert "∞" in SHELL, (
+            "页面里没有 ∞ 符号 —— None 会被显示成别的（0 或空白），"
+            "而那读起来像「没有积压」"
+        )
+
+    @covers("M15.F10")
+    def test_anomaly_shows_suggestion(self):
+        """★★ 异常必须显示 `suggestion`，不能只显示 message。
+
+        交接文档 §8 交付标准：「显示 anomalies，**含 rationale 与 suggestion**」。
+        只说「有问题」不给动作，等于把判断全推给运维。
+        """
+        assert "a.suggestion" in SHELL, (
+            "前端没读 anomalies[].suggestion —— "
+            "只报问题不给建议动作，运维还得自己想怎么办"
+        )
+        assert "建议动作" in SHELL
+
+    @covers("M15.F10")
+    def test_anomaly_shows_rationale_with_label(self):
+        """★ rationale 要带「为什么算异常」标签 —— 它是规则的资格证明。
+
+        衔接既有约定：这个面板与普通监控的区别就在于不只说「有问题」，
+        还说「为什么这算问题」。光有文字没有标签，人可能不知道那是什么。
+        """
+        assert "a.rationale" in SHELL
+        assert "为什么算异常" in SHELL
+
+    @covers("M15.F10")
+    def test_latency_hidden_when_samples_insufficient(self):
+        """★★ `latency_samples < 2` 时不画分位数，明确说「样本不足」。
+
+        ⚠ 1 个样本的 p50/p95/p99 是同一个数 —— 画出来会让人以为
+        延迟很稳定，而实际是样本不够。**给假数字比不给更糟。**
+
+        交接文档 §6：「分位数样本不足时不要画，明确写「样本不足」」。
+        """
+        assert "latency_samples" in SHELL, "前端没读 latency_samples"
+        assert "样本不足" in SHELL, (
+            "没有「样本不足」文案 —— 样本不够时仍会画出分位数"
+        )
+        # 必须有「够不够」的判定，而不是无条件显示
+        assert "enough" in SHELL or "samples >= 2" in SHELL, (
+            "没看到样本数判定逻辑 —— 可能是无条件画分位数"
+        )
