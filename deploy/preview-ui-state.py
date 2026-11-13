@@ -215,6 +215,7 @@ STATES: dict[str, dict] = {
         "nodes": NODES, "metrics": METRICS, "audit": AUDIT,
         "audit_truncated": False, "audit_heartbeats": 997,
         "error": None,
+        "audit_error": None,
         "stale": False, "stale_since": None, "stale_age_seconds": None,
         "no_history": False,
         "probe": _probe_healthy(),
@@ -226,6 +227,7 @@ STATES: dict[str, dict] = {
         "nodes": NODES, "metrics": METRICS, "audit": AUDIT,
         "audit_truncated": False, "audit_heartbeats": 997,
         "error": "URLError: <urlopen error timed out>",
+        "audit_error": None,
         "stale": True,
         "stale_since": "2026-11-13T16:52:00+08:00",
         "stale_age_seconds": 1080.0,
@@ -270,6 +272,7 @@ STATES: dict[str, dict] = {
         "audit": AUDIT,
         "audit_truncated": False, "audit_heartbeats": 12,
         "error": None,
+        "audit_error": None,
         "stale": False, "stale_since": None, "stale_age_seconds": None,
         "no_history": False,
         "probe": _probe_healthy(),
@@ -281,22 +284,27 @@ STATES: dict[str, dict] = {
         "nodes": [], "metrics": None, "audit": [],
         "audit_truncated": False, "audit_heartbeats": 0,
         "error": "URLError: <urlopen error timed out>",
+        "audit_error": None,
         "stale": False, "stale_since": None, "stale_age_seconds": None,
         "no_history": True,
+        # 与服务端 _fill_stale 一致：从未连上就没读过审计文件
+        "audit_error": "coordinator 不可达，从未读到过运行日志",
         "probe": _probe_like_crash(),
     },
 }
 
+#: 预览怎么把状态画出来 —— **直接调页面自己的 renderAll()**。
+#:
+#: ⚠ 这里原来是一段手写的调用序列（renderStale / renderProbe /
+#:   renderNodes / …），也就是「预览的接线」与「真实 refresh 的接线」
+#:   是两份代码。给 renderNodes 加了「空态原因」参数后，这一份不会
+#:   跟着变 —— 预览依旧全绿，而它跑的是过时的接线。
+#:
+#:   页面现在把整条序列收进 renderAll(data)，两边共用：
+#:   预览跑的就是生产接线，参数不可能再对不上。
 RENDERS = (
-    "renderStale(REAL);"
-    "renderProbe(REAL.probe);"
-    "renderTiles(REAL.metrics);"
-    "renderPending(REAL.nodes);"
-    "renderNodes(REAL.nodes);"
-    "renderDenials(REAL.metrics);"
-    "renderByType(REAL.metrics);"
-    "renderAudit(REAL.audit, REAL.audit_truncated, REAL.audit_heartbeats);"
-    "renderAnomalies(REAL.metrics ? REAL.metrics.anomalies : []);"
+    "renderAll(REAL);"
+    # stamp 被 renderAll 写成「最后更新 …」，预览里换成「预览」以免误导
     "document.getElementById('stamp').textContent='预览';"
 )
 

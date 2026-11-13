@@ -348,6 +348,15 @@ class UiServer:
             #: 否则人会疑惑"节点明明每 30 秒心跳，怎么日志里一条都没有"。
             #: 非零不代表出错，而是"这段时间没发生任务"。
             "audit_heartbeats": 0,
+            #: 审计流**读取失败**的原因。为 ``None`` 表示这次读成功了。
+            #:
+            #: ⚠ 没有这个字段时，前端无法区分下面两种完全不同的情况：
+            #:
+            #:     读取成功但确实没有记录 → 「暂无审计记录」是对的
+            #:     读取失败             → 说「暂无」就是**在撒谎**
+            #:
+            #: 空列表本身不携带这个区别 —— 所以必须单独给一个信号。
+            "audit_error": None,
             "error": None,
             # ---- 阶段 1 新增 ----
             #: 是否在用陈旧数据（来自内存末次成功）。
@@ -428,6 +437,8 @@ class UiServer:
             prev = out["error"]
             marker = f"audit: {type(exc).__name__}: {exc}"
             out["error"] = f"{prev} · {marker}" if prev else marker
+            # 单独记一份：前端要用它区分「没有记录」与「读不到」
+            out["audit_error"] = f"{type(exc).__name__}: {exc}"
 
         # ---- 存一份末次成功 ----
         #
@@ -452,6 +463,9 @@ class UiServer:
             # ⚠ 明说 no_history，不要用空列表冒充"网络里没有节点"。
             #   后者会让人以为注册表是空的，而实际是没读到。
             out["no_history"] = True
+            # 运行日志同理：从来没连上过 coordinator，就没读过审计文件。
+            # 让前端说「暂无审计记录」等于撒谎 —— 那是「确实没有」的意思。
+            out["audit_error"] = "coordinator 不可达，从未读到过运行日志"
             return
 
         out["nodes"] = copy.deepcopy(last["nodes"])

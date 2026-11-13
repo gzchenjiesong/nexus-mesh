@@ -382,12 +382,20 @@ function renderPending(nodes) {
   host.appendChild(box);
 }
 
-function renderNodes(nodes) {
+function renderNodes(nodes, emptyReason) {
   const body = document.getElementById("nodes");
   body.replaceChildren();
   if (!nodes.length) {
     const tr = el("tr");
-    const td = el("td", "meta", "（注册表为空）");
+    // ⚠ **空列表有两种含义，不能混成一句。**
+    //
+    //   注册表真的没有成员   → 「（注册表为空）」
+    //   从来没取到过数据     → 「没读到」
+    //
+    // 混成前者会让人以为网络里一个节点都没有，从而去查注册表 ——
+    // 而实际是面板连不上。这是本项目第 N 次同类问题：空值被静默
+    // 降级成一个看起来正常的默认值。
+    const td = el("td", "meta", emptyReason || "（注册表为空）");
     td.colSpan = 10;
     tr.appendChild(td);
     body.appendChild(tr);
@@ -513,7 +521,14 @@ function renderNodes(nodes) {
 function renderDenials(m) {
   const host = document.getElementById("denials");
   host.replaceChildren();
-  const d = (m && m.denied_by_rule) || {};
+  // ⚠ metrics 为 null = 指标这次没读到，**不是"没有拒绝"**。
+  //   说「无拒绝记录」会让人以为一切合规，与事实相反。
+  if (!m) {
+    host.appendChild(el("div", "none",
+      "指标不可用 —— 无法判断是否有拒绝。见上方错误信息。"));
+    return;
+  }
+  const d = m.denied_by_rule || {};
   const keys = Object.keys(d);
   if (!keys.length) {
     host.appendChild(el("div", "none", "无拒绝记录。"));
@@ -545,7 +560,13 @@ function renderDenials(m) {
 function renderByType(m) {
   const host = document.getElementById("bytype");
   host.replaceChildren();
-  const bt = (m && m.by_type) || {};
+  // 同 renderDenials：metrics 缺失不等于「没有任务」
+  if (!m) {
+    host.appendChild(el("div", "none",
+      "指标不可用 —— 无法判断任务分布。见上方错误信息。"));
+    return;
+  }
+  const bt = m.by_type || {};
   const keys = Object.keys(bt);
   if (!keys.length) {
     host.appendChild(el("div", "none", "暂无任务。"));
@@ -590,7 +611,7 @@ function outcomeKey(o) {
   return String(o || "").split(":")[0];
 }
 
-function renderAudit(records, truncated, heartbeats) {
+function renderAudit(records, truncated, heartbeats, error) {
   const host = document.getElementById("audit");
   const stamp = document.getElementById("logstamp");
   host.replaceChildren();
@@ -606,11 +627,17 @@ function renderAudit(records, truncated, heartbeats) {
   stamp.textContent = parts.length ? "（" + parts.join(" · ") + "）" : "";
 
   if (!records.length) {
-    // 空列表有两种含义，别混成一句
+    // 空列表有**三种**含义，别混成一句：
+    //
+    //   读取失败         → 说「暂无」就是在撒谎（最重要的一种）
+    //   只有心跳         → 说明「这段时间没发生任务」，那是正常的
+    //   真的没有记录     → 「暂无审计记录」
     host.appendChild(el("div", "log-empty",
-      heartbeats > 0
-        ? "这段时间只有心跳（" + heartbeats + " 条），没有任务事件。"
-        : "暂无审计记录。"));
+      error
+        ? ("运行日志读取失败（" + error + "）—— 不代表没有记录。")
+        : heartbeats > 0
+          ? "这段时间只有心跳（" + heartbeats + " 条），没有任务事件。"
+          : "暂无审计记录。"));
     return;
   }
 
@@ -884,6 +911,61 @@ function showUnauthorized() {
   if (window.__nxsTimer) clearInterval(window.__nxsTimer);
 }
 
+//: 把一份 `/api/state` 画到页面上。**这是唯一的渲染入口。**
+//
+// ⚠ 抽成独立函数是有原因的（2026-11-13）：
+//
+//   `deploy/preview-ui-state.py` 要把某一种状态画出来给人看。它原来
+//   自己写着一段调用序列（renderStale/renderProbe/renderNodes/…），
+//   于是「预览的调用序列」与「真实 refresh 的调用序列」是**两份代码**。
+//   加了新参数（比如 renderNodes 的空态原因）时，预览那份不会跟着变
+//   —— 预览仍然是绿的，而它跑的是过时的接线。
+//
+//   预览脚本本身已经踩过两次同类坑（手写假数据 → 验证的是假数据）。
+//   现在两边共用这一个函数，预览跑的就是生产接线。
+function renderAll(data) {
+  const nodes = data.nodes || [];
+
+  // ⚠ 顺序有意义：先渲染「数据是什么状态」（陈旧/无历史），
+  //   再渲数据本身。否则用户会先看到一屏节点，然后才被告知那是旧的。
+  renderStale(data);
+
+  // 探针在失败时是唯一线索，放显眼位置（紧接横幅）
+  renderProbe(data.probe);
+
+  // error 只在**没有陈旧兜底**时才显示成错误条 ——
+  // 有兜底时，横幅已经说清「不可达」了，再叠一条错误是重复噪音
+  if (!data.stale && !data.no_history) {
+    showError(data.error ? ("coordinator 不可达：" + data.error) : "");
+  } else {
+    showError("");
+  }
+
+  renderTiles(data.metrics);
+  renderPending(nodes);
+  // ⚠ 空列表的原因必须传下去：`no_history` 是「没读到」，不是「注册表为空」。
+  //   不传的话，面板连不上时会显示「（注册表为空）」—— 那是在说反话。
+  renderNodes(nodes, data.no_history
+    ? "没有数据 —— coordinator 不可达，面板从未成功读到过注册表"
+      + "（这不代表注册表为空）"
+    : "");
+  renderDenials(data.metrics);
+  renderByType(data.metrics);
+  renderAudit(data.audit || [], data.audit_truncated, data.audit_heartbeats,
+              data.audit_error);
+  renderAnomalies(data.metrics ? data.metrics.anomalies : []);
+
+  // 时间戳要区分三种情况 —— 只写「最后更新」会让人以为数据是新的
+  const stamp = document.getElementById("stamp");
+  if (data.no_history) {
+    stamp.textContent = "无历史数据";
+  } else if (data.stale) {
+    stamp.textContent = "数据非实时（" + (data.stale_since || "时间未知") + "）";
+  } else {
+    stamp.textContent = "最后更新 " + new Date().toLocaleTimeString("zh-CN");
+  }
+}
+
 async function refresh() {
   try {
     const res = await fetch("api/state", { headers: { "Accept": "application/json" } });
@@ -892,41 +974,7 @@ async function refresh() {
       return;
     }
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    const nodes = data.nodes || [];
-
-    // ⚠ 顺序有意义：先渲染「数据是什么状态」（陈旧/无历史），
-    //   再渲数据本身。否则用户会先看到一屏节点，然后才被告知那是旧的。
-    renderStale(data);
-
-    // 探针在失败时是唯一线索，放显眼位置（紧接横幅）
-    renderProbe(data.probe);
-
-    // error 只在**没有陈旧兜底**时才显示成错误条 ——
-    // 有兜底时，横幅已经说清「不可达」了，再叠一条错误是重复噪音
-    if (!data.stale && !data.no_history) {
-      showError(data.error ? ("coordinator 不可达：" + data.error) : "");
-    } else {
-      showError("");
-    }
-
-    renderTiles(data.metrics);
-    renderPending(nodes);
-    renderNodes(nodes);
-    renderDenials(data.metrics);
-    renderByType(data.metrics);
-    renderAudit(data.audit || [], data.audit_truncated, data.audit_heartbeats);
-    renderAnomalies(data.metrics ? data.metrics.anomalies : []);
-
-    // 时间戳要区分三种情况 —— 只写「最后更新」会让人以为数据是新的
-    const stamp = document.getElementById("stamp");
-    if (data.no_history) {
-      stamp.textContent = "无历史数据";
-    } else if (data.stale) {
-      stamp.textContent = "数据非实时（" + (data.stale_since || "时间未知") + "）";
-    } else {
-      stamp.textContent = "最后更新 " + new Date().toLocaleTimeString("zh-CN");
-    }
+    renderAll(await res.json());
   } catch (e) {
     showError("取数据失败：" + e.message);
   }

@@ -1627,7 +1627,9 @@ class TestNodeTableDataSource:
         """
         import re
 
-        m = re.search(r"function renderNodes\(nodes\)\s*\{(.*?)\n\}",
+        # 参数表用 [^)]* 兜住 —— 加参数（比如空态原因）不该让这条测试失效，
+        # 它要守的是「函数体里读了哪些字段」，不是签名长什么样。
+        m = re.search(r"function renderNodes\([^)]*\)\s*\{(.*?)\n\}",
                       SHELL, re.S)
         assert m, "SHELL 里找不到 renderNodes 函数 —— 前端结构变了，改这里的解析"
         body = m.group(1)
