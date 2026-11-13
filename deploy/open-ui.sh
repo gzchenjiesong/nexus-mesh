@@ -60,9 +60,27 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-ssh_cmd() {
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
-        "$SSH_USER@$HUB_HOST" "$@"
+#: 我在服务器上还是在本机？
+#:
+#: ⚠ **这个判断是补的一个真实缺陷。** 脚本原来无条件走 ``ssh_cmd``，
+#: 部署时它被装到服务器的 /usr/local/bin/nxs-open —— 在服务器上敲
+#: ``nxs-open --check`` 会去本机路径找 ~/Downloads/key4workbuddy.pem，
+#: 报「找不到 SSH 密钥」。而那时人已经在服务器上了，根本不需要 SSH。
+on_server() {
+    # 有本机 nexus-mesh-ui 单元就是服务器。比 hostname 比对可靠：
+    # 改名、换 IP、走内网 DNS 都不影响这个判断。
+    command -v systemctl >/dev/null 2>&1 \
+        && systemctl list-unit-files 2>/dev/null | grep -q '^nexus-mesh-ui'
+}
+
+#: 在服务器上跑一段脚本：本机就直接 bash，否则走 SSH。
+run_remote() {
+    if on_server; then
+        bash -s
+    else
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            "$SSH_USER@$HUB_HOST" "bash -s"
+    fi
 }
 
 need_key() {
@@ -76,10 +94,15 @@ need_key() {
 
 # ------------------------------------------------------------------ 轮换
 if [ "$MODE" = "rotate" ]; then
-    need_key
+    on_server || need_key
     echo "→ 轮换观察窗 token（旧链接会全部作废）…"
     # 脚本在仓库里，服务器上跑的是同一份（deploy/ 已随 git 同步）
-    ssh_cmd 'bash /opt/nexus-mesh/deploy/rotate-ui-token.sh'
+    if on_server; then
+        bash /opt/nexus-mesh/deploy/rotate-ui-token.sh
+    else
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            "$SSH_USER@$HUB_HOST" 'bash /opt/nexus-mesh/deploy/rotate-ui-token.sh'
+    fi
     echo
     echo "  完成。旧标签页会自动跳回服务台换新 token，不需要手动处理。"
     echo "  ⚠ 如果你把旧链接贴到过别处，现在它已经无效了 —— 这正是轮换的目的。"
@@ -88,9 +111,14 @@ fi
 
 # ------------------------------------------------------------------ 自检
 if [ "$MODE" = "check" ]; then
-    need_key
-    echo "→ 服务器侧自检…"
-    ssh_cmd 'bash -s' <<'REMOTE'
+    # 在服务器上不需要密钥；在本机才需要（要 SSH 过去）
+    on_server || need_key
+    if on_server; then
+        echo "→ 本机自检（检测到我在服务器上）…"
+    else
+        echo "→ 服务器侧自检（经 SSH）…"
+    fi
+    run_remote <<'REMOTE'
 set -u
 echo "  ① 服务状态"
 for s in nexus-mesh nexus-mesh-ui; do
@@ -101,7 +129,13 @@ echo "  ② token 代数与是否落盘"
 PID=$(systemctl show nexus-mesh-ui -p MainPID --value 2>/dev/null || echo 0)
 if [ "${PID:-0}" != "0" ] && [ -r "/proc/$PID/environ" ]; then
     gen=$(tr '\0' '\n' < "/proc/$PID/environ" | grep -oP '^NXS_UI_TOKEN_GEN=\K.*' || true)
+    unit_gen=$(grep -oP '^Environment=NXS_UI_TOKEN_GEN=\K.*' \
+                 /etc/systemd/system/nexus-mesh-ui.service 2>/dev/null || true)
     echo "     代数 gen=${gen:-（未设置，默认 0）}"
+    # 进程内与 unit 里的值可能不一致 —— 那是"改了 unit 但没重启"
+    if [ -n "${unit_gen:-}" ] && [ "${gen:-0}" != "$unit_gen" ]; then
+        echo "     ⚠ unit 写的是 $unit_gen，进程用的是 ${gen:-0} —— 改了没重启" >&2
+    fi
     # 铁律④：token 不该出现在任何文件里
     found=$(grep -rl "nxs_ui=" /etc/nexus-mesh/ 2>/dev/null | head -3 || true)
     if [ -n "$found" ]; then

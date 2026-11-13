@@ -420,3 +420,66 @@ class TestTokenNotInLogs:
         assert "ui-token:v1:gen" in text, (
             "--check 没有自己算 token —— 说明还在依赖日志抓取"
         )
+
+
+class TestCheckWorksOnServer:
+    """★★ `nxs-open --check` 在**服务器上**也必须能用。
+
+    ⚠⚠ **这来自一次实测失败（2026-11-13）。**
+
+    脚本原来无条件走 ``ssh_cmd``，而部署时它被装到服务器的
+    ``/usr/local/bin/nxs-open``。于是运维在服务器上敲：
+
+        $ nxs-open --check
+          找不到 SSH 密钥：/root/Downloads/key4workbuddy.pem
+          设 NXS_SSH_KEY 指向正确的密钥。
+
+    —— 人已经在服务器上了，根本不需要 SSH，却被要求提供本机密钥路径。
+    ``--check`` 恰好是「打不开时该先跑」的那个命令，它不可用最伤。
+
+    修法：先判断本机/远端。判断依据是「本机有 nexus-mesh-ui 单元」，
+    比比对 hostname 可靠（改名、换 IP、内网 DNS 都不影响）。
+    """
+
+    @staticmethod
+    def _script() -> str:
+        return (REPO_ROOT / "deploy" / "open-ui.sh").read_text()
+
+    @covers("M15.F2")
+    def test_detects_server_locally(self):
+        text = self._script()
+        assert "on_server()" in text, "没有本机/远端判断"
+        assert "nexus-mesh-ui" in text, "判断依据缺失"
+        # 走 systemctl 而不是 hostname 比对
+        assert "list-unit-files" in text, (
+            "用 hostname 之类判断会很脆（改名/换 IP 就失效）"
+        )
+
+    @covers("M15.F2")
+    def test_check_does_not_require_key_on_server(self):
+        """★★ 在服务器上不该要求 SSH 密钥。"""
+        text = self._script()
+        # 找 --check 分支
+        i = text.find('if [ "$MODE" = "check" ]')
+        assert i > 0
+        j = text.find('if [ "$MODE" = "open" ]', i)
+        if j < 0:
+            j = text.find("# ------------------------------------------------------------------ 打开", i)
+        branch = text[i:j if j > i else i + 1200]
+
+        # 必须是条件式：on_server 时不要求
+        assert "on_server || need_key" in branch or "on_server &&" in branch, (
+            "check 分支无条件要密钥 —— 在服务器上跑会直接失败"
+        )
+
+    @covers("M15.F2")
+    def test_warns_when_unit_and_process_gen_differ(self):
+        """★★ gen 不一致必须报出来 —— 那是「改了没重启」。
+
+        这正是本次部署里我踩过的坑：rotate 脚本改了 unit 并重启，
+        我另写的验收脚本却从 ui.env 读 gen（那里没有），算出旧 token，
+        一度以为"轮换没生效"。**配置有三处可能不一致时，必须显式比对。**
+        """
+        text = self._script()
+        assert "unit_gen" in text, "没有读 unit 里的 gen 用来比对"
+        assert "改了没重启" in text, "不一致时没有明确诊断"
