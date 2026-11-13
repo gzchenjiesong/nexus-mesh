@@ -90,11 +90,35 @@ if [ "$CHECK_ONLY" = "1" ]; then
         grep -o '^NXS_SECRET_[A-Z_]*' "$DST_ENV" | sed 's/^/      /'
         exit 1
     fi
+    if ! grep -q '^NXS_UI_TOKEN_GEN=' "$DST_ENV"; then
+        echo "  ⚠ 缺少 NXS_UI_TOKEN_GEN —— 重跑本脚本会补上（默认 0）"
+    fi
     echo "  ✓ 只含观察窗需要的变量，权限 600"
     echo "    变量清单："
     grep -o '^[A-Z_]*' "$DST_ENV" | sed 's/^/      /'
     exit 0
 fi
+
+# ---- ②b 保留 token 代数（轮换状态）----
+#
+# ⚠⚠ **这一小段是补的一个真实缺陷（2026-11-13）。**
+#
+# token 代数 ``NXS_UI_TOKEN_GEN`` 决定 token 是什么（改它就轮换）。
+# 它原来写在 unit 里，而 unit 由部署脚本从仓库同步 —— 于是：
+#
+#     运维跑 rotate-ui-token.sh（gen 0 → 1，旧 token 作废）
+#     下次部署（从仓库同步 unit，gen 被写回 0）
+#     → **轮换被静默撤销，旧 token 重新有效**
+#
+# 止血会在下次部署时失效，而部署脚本只会说"全部与仓库一致"。
+#
+# 所以 gen 归到 ui.env（本机状态，部署不覆盖）。这个脚本重新生成
+# ui.env 时必须**保留**已有值，否则同样会撤销轮换。
+prev_gen=""
+if [ -f "$DST_ENV" ]; then
+    prev_gen=$(grep -oP '^NXS_UI_TOKEN_GEN=\K.*' "$DST_ENV" 2>/dev/null || true)
+fi
+[ -n "$prev_gen" ] || prev_gen="0"
 
 # ---- ③ 写入 ----
 # 头部注释说明来源与为什么只有这几行 —— 后来人看到只有一行不会以为漏了
@@ -113,6 +137,8 @@ fi
 #
 HEADER
     cat "$tmp"
+    # token 代数：轮换状态，重新生成时保留原值（首次为 0）
+    echo "NXS_UI_TOKEN_GEN=$prev_gen"
 } > "$DST_ENV"
 
 chmod 600 "$DST_ENV"

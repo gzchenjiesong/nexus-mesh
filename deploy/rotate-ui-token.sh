@@ -35,6 +35,7 @@
 set -euo pipefail
 
 UNIT=/etc/systemd/system/nexus-mesh-ui.service
+ENVFILE=/etc/nexus-mesh/ui.env
 SERVICE=nexus-mesh-ui
 MODE=rotate
 TARGET=""
@@ -56,10 +57,10 @@ die() { echo "  ✗ $*" >&2; exit 1; }
 
 # 读当前代数。**必须精确匹配行首**，否则遇到 NXS_UI_TOKEN_GEN_OLD 这类
 # 前缀相近的变量会取错 —— 那会导致"以为轮换了其实没变"。
-current=$(grep -oP '^Environment=NXS_UI_TOKEN_GEN=\K\S+' "$UNIT" 2>/dev/null || true)
+current=$(grep -oP '^NXS_UI_TOKEN_GEN=\K\S+' "$ENVFILE" 2>/dev/null || true)
 if [ -z "$current" ]; then
     current="0"
-    echo "  ⚠ unit 里没有 NXS_UI_TOKEN_GEN，按默认 0 处理"
+    echo "  ⚠ ui.env 里没有 NXS_UI_TOKEN_GEN，按默认 0 处理"
 fi
 
 if [ "$MODE" = "check" ]; then
@@ -99,30 +100,39 @@ echo "  token 代数: $current → $new"
 # ---- 改 unit ----
 # 用 python 改而不是 sed：sed -i 在不同平台/版本上的行为差异会咬人，
 # 而这个文件改错会导致服务起不来。
-python3 - "$UNIT" "$new" <<'PY'
+# ⚠⚠ **写 ui.env，不是 unit。**
+#
+# unit 是部署脚本从仓库同步的**模板** —— 改它会被下次部署覆盖，
+# 于是"轮换"变成"下次部署后自动撤销"。实测踩到过：
+# 轮换到 gen=1，部署一次再看又回到 0，而部署脚本只说"全部与仓库一致"。
+#
+# ui.env 是本机状态，部署不覆盖（install-ui-env.sh 也会保留已有值）。
+python3 - "$ENVFILE" "$new" <<'PY'
+import os
 import re
 import sys
+import tempfile
 
 path, new = sys.argv[1], sys.argv[2]
 text = open(path, encoding="utf-8").read()
 
-pattern = re.compile(r"^Environment=NXS_UI_TOKEN_GEN=\S*$", re.M)
+pattern = re.compile(r"^NXS_UI_TOKEN_GEN=\S*$", re.M)
 if pattern.search(text):
-    text = pattern.sub(f"Environment=NXS_UI_TOKEN_GEN={new}", text, count=1)
+    text = pattern.sub(f"NXS_UI_TOKEN_GEN={new}", text, count=1)
 else:
-    # 没有就插在 RECOVER_URL 后面（同一块配置区）
-    anchor = re.compile(r"^(Environment=NXS_UI_RECOVER_URL=\S*)$", re.M)
-    if anchor.search(text):
-        text = anchor.sub(rf"\1\nEnvironment=NXS_UI_TOKEN_GEN={new}",
-                          text, count=1)
-    else:
-        text = text.rstrip("\n") + f"\nEnvironment=NXS_UI_TOKEN_GEN={new}\n"
+    text = text.rstrip("\n") + f"\nNXS_UI_TOKEN_GEN={new}\n"
 
-open(path, "w", encoding="utf-8").write(text)
-print("    已写入 unit")
+# 原子写：这个文件是凭据文件，写一半断电会留下半截
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    fh.write(text)
+os.chmod(tmp, 0o600)          # 保持 600（里面是密钥）
+os.replace(tmp, path)
+print("    已写入 ui.env")
 PY
 
-systemctl daemon-reload
+# 不用 daemon-reload（unit 没变，改的是 EnvironmentFile 内容）。
+# 但**必须重启** —— systemd 只在启动时读 EnvironmentFile。
 systemctl restart "$SERVICE"
 sleep 2
 printf '  %s: %s\n' "$SERVICE" "$(systemctl is-active "$SERVICE")"

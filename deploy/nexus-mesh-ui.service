@@ -61,9 +61,21 @@ Environment=NXS_UI_RECOVER_URL=https://hub.i-strategy-compass.cn/api/nexus-enter
 #
 # 也可以直接用脚本：bash deploy/rotate-ui-token.sh
 #
-# 写在这里而不是 ui.env：它不是凭据（凭据只是 NXS_OPS_SECRET 那一个），
-# 而 ui.env 由白名单脚本生成、只放密钥。
-Environment=NXS_UI_TOKEN_GEN=0
+# ⚠⚠ **这个值刻意不写在这里，而是放 /etc/nexus-mesh/ui.env。**
+#
+# 原因实测（2026-11-13）：unit 是**模板**，由部署脚本从仓库同步过来。
+# 而 gen 会在运维轮换时改变 —— 两件事冲突：
+#
+#     ① 运维跑 rotate-ui-token.sh  → 改 unit，gen 0 → 1（旧 token 作废）
+#     ② 下次部署                  → 从仓库同步 unit，gen 又被写回 0
+#     ③ 结果：轮换被静默撤销，旧 token 重新有效
+#
+# 也就是说「止血」会在下一次部署时失效，而**没人会发现** —— 部署脚本
+# 只会说"全部与仓库一致"。这正是本文件上半部分记的那类问题：
+# 改的东西没生效，而所有输出都看起来正常。
+#
+# 所以：**模板放仓库（unit），运行时状态放本机（ui.env）**。
+# ui.env 由 install-ui-env.sh 生成，它会保留已有的 gen 值。
 
 # hub 用自签证书，这里是让本进程信任那张 CA。
 # 只影响本进程，不碰系统证书库。

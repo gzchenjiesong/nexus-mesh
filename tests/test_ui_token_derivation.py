@@ -230,21 +230,34 @@ class TestRotationScript:
 
         ⚠ 用宽松匹配会误改 ``NXS_UI_TOKEN_GEN_OLD`` 这类前缀相近的变量，
         或者改到注释里的示例。这类错误会静默发生。
+
+        ⚠ 目标文件**改过**（2026-11-13）：从 unit 改为 ui.env。
+        原来改 unit 会被部署脚本同步覆盖，等于撤销轮换。
         """
         text = self._script()
         assert "grep -oP" in text and "\\K" in text, (
             "没有精确提取当前值 —— 宽松匹配可能取到相邻变量的值"
         )
-        # 写入时用锚定行首的正则，不是字符串替换
-        assert "^Environment=NXS_UI_TOKEN_GEN=" in text or \
-               "Environment=NXS_UI_TOKEN_GEN=" in text
+        # 写入时用锚定行首的正则（现在针对 ui.env 的行格式）
+        assert "^NXS_UI_TOKEN_GEN=" in text, (
+            "写入用的正则没锚定行首 —— 可能改到前缀相近的变量"
+        )
 
     @covers("M15.F2")
-    def test_unit_declares_token_gen(self):
-        """★ unit 里必须有 NXS_UI_TOKEN_GEN —— 否则脚本要自己插。"""
-        unit = (REPO_ROOT / "deploy" / "nexus-mesh-ui.service").read_text()
-        assert "Environment=NXS_UI_TOKEN_GEN=" in unit, (
-            "unit 没声明 token 代数 —— 运维不知道有这个开关"
+    def test_envfile_is_the_source_of_gen(self):
+        """★ gen 的**唯一来源**是 ui.env，不是 unit。
+
+        ⚠ 这条替换了原来的 ``test_unit_declares_token_gen``。
+        原断言要求 unit 里必须有 gen —— 那正是导致「轮换被部署撤销」
+        的设计。现在反过来：unit 里不该有，ui.env 里必须有。
+        """
+        text = self._script()
+        assert "ENVFILE=/etc/nexus-mesh/ui.env" in text, (
+            "轮换脚本没指向 ui.env —— gen 会写回被部署覆盖的 unit"
+        )
+        # 且读当前值时读的是 ENVFILE
+        assert 'grep -oP \'^NXS_UI_TOKEN_GEN=\\K\\S+\' "$ENVFILE"' in text, (
+            "读当前 gen 时没读 ui.env"
         )
 
     @covers("M15.F2")
@@ -629,3 +642,101 @@ class TestOnServerActuallyWorks:
             "on_server 的**代码**里又出现了 grep -q —— 在 set -o pipefail "
             "下会因 SIGPIPE 误判。用 case 匹配或先落变量。"
         )
+
+
+class TestRotationSurvivesDeploy:
+    """★★★ 轮换结果必须**活过下一次部署**。
+
+    ⚠⚠ **这来自一次实测（2026-11-13）。**
+
+    轮换脚本第一版改的是 ``/etc/systemd/system/nexus-mesh-ui.service``
+    里的 ``Environment=NXS_UI_TOKEN_GEN``。而我刚给部署脚本加了
+    「③b 从仓库同步 unit」—— 于是：
+
+        ① 运维跑 rotate-ui-token.sh        gen 0 → 1，旧 token 作废 ✓
+        ② 下次部署（③b 同步 unit）          gen 被写回 0
+        ③ 结果：**轮换被静默撤销，旧 token 重新有效**
+
+    而部署脚本只会说「全部与仓库一致」。我在验收时看到 `gen=0` 才发现的
+    —— 那一刻我以为是轮换失败了，其实是被部署覆盖了。
+
+    ## 设计原则
+
+        模板 → 仓库（unit 由部署同步）
+        运行时状态 → 本机（ui.env 由 install 生成，部署不覆盖）
+
+    ``gen`` 是运维动作改出来的运行时状态，所以它属于 ui.env。
+
+    ⚠ 这也说明「部署以仓库为唯一源头」不能无条件套用：**模板可以**，
+    状态不行。分不清这两者，就会做出"每次部署都重置运维操作"的系统。
+    """
+
+    @covers("M15.F2")
+    def test_unit_does_not_set_gen(self):
+        """★★ unit 里不许写死 gen —— 否则部署会覆盖轮换。"""
+        unit = (REPO_ROOT / "deploy" / "nexus-mesh-ui.service").read_text()
+        # 剥注释：注释里会解释为什么不该写
+        code = "\n".join(
+            ln for ln in unit.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        )
+        assert "Environment=NXS_UI_TOKEN_GEN=" not in code, (
+            "unit 里写死了 gen —— 部署同步 unit 时会把轮换结果写回默认值，"
+            "止血动作在下一次部署后失效"
+        )
+
+    @covers("M15.F2")
+    def test_rotate_writes_envfile_not_unit(self):
+        """★★ 轮换必须写 ui.env，不能写 unit。"""
+        text = (REPO_ROOT / "deploy" / "rotate-ui-token.sh").read_text()
+        code = "\n".join(
+            ln for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        )
+        assert "ENVFILE=" in code and "ui.env" in code, (
+            "轮换没写 ui.env —— 写 unit 会被部署覆盖"
+        )
+        # 写入目标必须是 ENVFILE
+        assert '"$ENVFILE"' in code, (
+            "刷写目标不是 $ENVFILE —— 检查是不是又改回 unit 了"
+        )
+
+    @covers("M15.F2")
+    def test_install_env_preserves_existing_gen(self):
+        """★★ 重新生成 ui.env 时必须保留已有 gen。
+
+        ``install-ui-env.sh`` 是白名单重写 —— 天真的实现会从头生成，
+        从而把 gen 抹掉（同样撤销轮换）。所以它必须先读旧值。
+        """
+        text = (REPO_ROOT / "deploy" / "install-ui-env.sh").read_text()
+        assert "prev_gen" in text, (
+            "install-ui-env 没有保留旧 gen —— 重跑它就会撤销轮换"
+        )
+        code_lines = [
+            ln for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        code = "\n".join(code_lines)
+        assert "prev_gen" in code, "只在注释里提到，代码里没真的保留"
+
+    @covers("M15.F2")
+    def test_deploy_fills_missing_gen_without_overwriting(self):
+        """★★★ 部署要补缺失的 gen，但**绝不覆盖**已有值。
+
+        ⚠ 这两个要求是矛盾的：补缺失 = 写；不覆盖 = 别写。
+        判据必须同时验证两半，否则实现成"每次都写成 0"也过。
+        """
+        text = (REPO_ROOT / "deploy" / "deploy.sh").read_text()
+        i = text.find("③b2")
+        assert i > 0, "部署脚本里没有补 gen 的步骤"
+        j = text.find("③c", i)
+        block = text[i:j if j > i else i + 1200]
+
+        # 必须**先判断存在性**再决定写
+        assert "grep -q '^NXS_UI_TOKEN_GEN='" in block, (
+            "没有判断 gen 是否已存在 —— 会无条件覆盖"
+        )
+        # 写入只能发生在 else 分支（不存在时）
+        assert ">> /etc/nexus-mesh/ui.env" in block, "缺失时没有真的写入"
+        # 「保留」分支必须在写入分支之外
+        assert "保留" in block, "没有明确的「保留已有值」分支"

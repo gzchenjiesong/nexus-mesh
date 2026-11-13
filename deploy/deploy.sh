@@ -119,6 +119,23 @@ else
 fi
 
 echo
+echo "═══ ③b2 确保 ui.env 有 token 代数 ═══"
+# ⚠ 老部署的 ui.env 里没有 NXS_UI_TOKEN_GEN（这一项是新加的）。
+# 不补的话会退回代码默认值 0 —— 而如果之前轮换过（gen=1），
+# 就等于**把轮换静默撤销**。所以这里只在缺失时补，绝不覆盖已有值。
+if [ -f /etc/nexus-mesh/ui.env ]; then
+    if grep -q '^NXS_UI_TOKEN_GEN=' /etc/nexus-mesh/ui.env; then
+        echo "  已有 gen=$(grep -oP '^NXS_UI_TOKEN_GEN=\K.*' /etc/nexus-mesh/ui.env)（保留）"
+    else
+        echo "NXS_UI_TOKEN_GEN=0" >> /etc/nexus-mesh/ui.env
+        chmod 600 /etc/nexus-mesh/ui.env
+        echo "  补上 NXS_UI_TOKEN_GEN=0（首次）"
+    fi
+else
+    echo "  ⚠ /etc/nexus-mesh/ui.env 不存在 —— 先跑 deploy/install-ui-env.sh"
+fi
+
+echo
 echo "═══ ③c 同步运维脚本 ═══"
 # ⚠ 与 ③b 同源的问题，只是对象是脚本而不是 unit（2026-11-13）。
 #
