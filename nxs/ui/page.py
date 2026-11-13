@@ -36,6 +36,18 @@ SHELL = """<!DOCTYPE html>
     --card: #ffffff; --ok: #15803d; --warn: #b45309; --bad: #b91c1c;
     --accent: #1d4ed8;
   }
+  /* ⚠ 尊重系统的「减少动态效果」设置。
+     本页面目前几乎没有动画，这条是为将来加过渡时兜底 —— 与其那时
+     忘了写，不如现在就把开关放在这里。 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #14161a; --fg: #e6e7ea; --dim: #9aa1ab; --line: #2a2e35;
@@ -44,6 +56,33 @@ SHELL = """<!DOCTYPE html>
     }
   }
   * { box-sizing: border-box; }
+
+  /* ---- 浏览器原生表面的主题化 ----
+   *
+   * ⚠ 这一块是「被做过」与「拼装的」最便宜的区分信号。
+   *
+   * 它们是浏览器**默认**提供的表面（选中高亮、光标、滚动条、焦点框），
+   * 不主题化时会在暗色模式下露出刺眼的系统默认色（比如深蓝选中块、
+   * 白色滚动条）。用户说不清哪里不对，但会觉得"不像是给这个站点做的"。
+   */
+  ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent);
+                color: var(--fg); }
+  html { caret-color: var(--accent); scrollbar-color: var(--line) transparent;
+         scrollbar-width: thin; }
+  /* WebKit 系需要单独写伪元素 */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+  /* 键盘焦点必须可见 —— 用 :focus-visible 而不是 :focus，
+     否则鼠标点击也会出现焦点框，视觉噪音 */
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
+                   border-radius: 3px; }
+  a { text-underline-offset: 2px; }
+
+  /* 表格与卡片的数字用等宽数位 —— 数列才能对齐扫读 */
+  .num, .tile .v, table td, .log .num { font-variant-numeric: tabular-nums; }
+
   body {
     margin: 0; padding: 28px 32px 60px;
     background: var(--bg); color: var(--fg);
@@ -52,7 +91,7 @@ SHELL = """<!DOCTYPE html>
   }
   header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
   h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: .2px; }
-  .meta { color: var(--dim); font-size: 12.5px; }
+  .meta { color: var(--dim); font-size: 13.5px; }
   .meta b { color: var(--fg); font-weight: 600; }
   .spacer { flex: 1; }
 
@@ -61,31 +100,31 @@ SHELL = """<!DOCTYPE html>
     background: var(--card); border: 1px solid var(--line); border-radius: 10px;
     padding: 12px 16px; min-width: 104px;
   }
-  .tile .k { color: var(--dim); font-size: 11.5px; letter-spacing: .4px;
+  .tile .k { color: var(--dim); font-size: 12px; letter-spacing: .4px;
              text-transform: uppercase; }
   .tile .v { font-size: 21px; font-weight: 640; font-variant-numeric: tabular-nums; }
   .tile .u { font-size: 12px; color: var(--dim); font-weight: 400; }
 
-  h2 { font-size: 13px; letter-spacing: .5px; text-transform: uppercase;
+  h2 { font-size: 13.5px; letter-spacing: .5px; text-transform: uppercase;
        color: var(--dim); margin: 28px 0 10px; font-weight: 600; }
 
   table { width: 100%; border-collapse: collapse; background: var(--card);
           border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line);
            vertical-align: top; }
-  th { font-size: 11.5px; letter-spacing: .4px; text-transform: uppercase;
+  th { font-size: 12px; letter-spacing: .4px; text-transform: uppercase;
        color: var(--dim); font-weight: 600; background: transparent; }
   tr:last-child td { border-bottom: none; }
 
   .name { font-weight: 600; }
-  .desc { color: var(--dim); font-size: 12.5px; margin-top: 2px;
+  .desc { color: var(--dim); font-size: 13.5px; margin-top: 2px;
           max-width: 42ch; word-break: break-word; }
   .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 12.5px; color: var(--dim); }
+        font-size: 13.5px; color: var(--dim); }
   .caps { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 12px; color: var(--dim); }
   .tags { display: flex; gap: 4px; flex-wrap: wrap; }
-  .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  .tag { font-size: 12px; padding: 1px 7px; border-radius: 999px;
          border: 1px solid var(--line); color: var(--dim); }
   .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
          margin-right: 6px; vertical-align: 1px; }
@@ -97,9 +136,9 @@ SHELL = """<!DOCTYPE html>
 
   .anomaly { border-left: 3px solid var(--bad); background: var(--card);
              border-radius: 0 8px 8px 0; padding: 11px 15px; margin-bottom: 8px; }
-  .anomaly .r { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px;
+  .anomaly .r { font-family: ui-monospace, Menlo, monospace; font-size: 13.5px;
                 color: var(--bad); font-weight: 600; }
-  .anomaly .why { color: var(--dim); font-size: 12.5px; margin-top: 3px; }
+  .anomaly .why { color: var(--dim); font-size: 13.5px; margin-top: 3px; }
   .none { color: var(--ok); }
   .err { border: 1px solid var(--bad); color: var(--bad); background: var(--card);
          border-radius: 8px; padding: 13px 16px; margin: 18px 0; }
@@ -108,17 +147,17 @@ SHELL = """<!DOCTYPE html>
   .pending { border-left: 3px solid var(--warn); background: var(--card);
              border-radius: 0 8px 8px 0; padding: 13px 16px; margin: 18px 0; }
   .pending .t { font-weight: 600; color: var(--warn); }
-  .pending .how { color: var(--dim); font-size: 12.5px; margin-top: 6px; }
+  .pending .how { color: var(--dim); font-size: 13.5px; margin-top: 6px; }
   .pending code { background: var(--bg); border: 1px solid var(--line);
                   border-radius: 4px; padding: 1px 5px; font-size: 12px; }
   .row-pending { background: color-mix(in srgb, var(--warn) 9%, transparent); }
 
   .log { width: 100%; border-collapse: collapse; background: var(--card);
          border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
-         font-size: 12.5px; }
+         font-size: 13.5px; }
   .log th, .log td { padding: 7px 11px; border-bottom: 1px solid var(--line);
                      white-space: nowrap; }
-  .log th { font-size: 11px; letter-spacing: .4px; color: var(--dim);
+  .log th { font-size: 12px; letter-spacing: .4px; color: var(--dim);
             font-weight: 600;
             text-transform: none; }
   .log tr:last-child td { border-bottom: none; }
@@ -126,7 +165,7 @@ SHELL = """<!DOCTYPE html>
   .log .flow { font-family: ui-monospace, Menlo, monospace; }
   .log .num { font-variant-numeric: tabular-nums; text-align: right;
               color: var(--dim); }
-  .log .rule { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  .log .rule { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
   .o-completed { color: var(--ok); font-weight: 600; }
   .o-failed    { color: var(--bad); font-weight: 600; }
   .o-denied    { color: var(--warn); font-weight: 600; }
@@ -154,22 +193,22 @@ SHELL = """<!DOCTYPE html>
   .probe .verdict.dead         { color: var(--bad); }
   .probe .verdict.unresponsive { color: var(--bad); }
   .probe .verdict.unknown      { color: var(--dim); }
-  .probe .note { color: var(--fg); font-size: 12.5px; line-height: 1.6; }
+  .probe .note { color: var(--fg); font-size: 13.5px; line-height: 1.6; }
   .probe .facts { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 9px;
                   font-family: ui-monospace, Menlo, monospace; font-size: 12px;
                   color: var(--dim); }
   .probe .facts b { color: var(--fg); font-weight: 600; }
-  .probe .warn { color: var(--warn); font-size: 12.5px; margin-top: 8px;
+  .probe .warn { color: var(--warn); font-size: 13.5px; margin-top: 8px;
                  padding-left: 14px; }
   .probe .warn li { margin-top: 3px; }
-  .probe .unavail { color: var(--dim); font-size: 11.5px; margin-top: 8px; }
+  .probe .unavail { color: var(--dim); font-size: 12px; margin-top: 8px; }
 
   .banner { border-radius: 10px; padding: 13px 16px; margin: 18px 0;
             border: 1px solid var(--bad); background: var(--card); }
   .banner.stale { border-color: var(--warn); }
   .banner .t { font-weight: 600; }
   .banner.stale .t { color: var(--warn); }
-  .banner .why { color: var(--dim); font-size: 12.5px; margin-top: 5px;
+  .banner .why { color: var(--dim); font-size: 13.5px; margin-top: 5px;
                  line-height: 1.6; }
   .banner .age { font-weight: 600; color: var(--warn); }
 
@@ -927,8 +966,8 @@ UNAUTHORIZED_PAGE = r"""<!DOCTYPE html>
           "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   }
   .wrap { max-width: 620px; margin: 0 auto; }
-  h1 { font-size: 17px; margin: 0 0 6px; font-weight: 600; }
-  .sub { color: var(--warn); font-size: 13px; margin-bottom: 22px; }
+  h1 { font-size: 18px; margin: 0 0 6px; font-weight: 600; }
+  .sub { color: var(--warn); font-size: 13.5px; margin-bottom: 22px; }
   .card {
     background: var(--card); border: 1px solid var(--line);
     border-radius: 12px; padding: 20px 24px;
@@ -938,10 +977,10 @@ UNAUTHORIZED_PAGE = r"""<!DOCTYPE html>
   li:last-child { margin-bottom: 0; }
   code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12.5px; background: var(--bg);
+    font-size: 13.5px; background: var(--bg);
     border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
   }
-  .note { color: var(--dim); font-size: 12.5px; margin-top: 18px; }
+  .note { color: var(--dim); font-size: 13.5px; margin-top: 18px; }
 </style>
 </head>
 <body>

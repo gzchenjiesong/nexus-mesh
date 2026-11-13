@@ -1443,3 +1443,85 @@ class TestStage3aDisplayGaps:
         assert "enough" in SHELL or "samples >= 2" in SHELL, (
             "没看到样本数判定逻辑 —— 可能是无条件画分位数"
         )
+
+
+class TestVisualBaseline:
+    """★ 视觉基线：字阶与原生表面主题化（交接文档 §6）。
+
+    这两项不是"好看"，是**可读性与一致性的硬指标**：
+
+        字阶步进 < 1.125  → 相邻两档肉眼分不出，等于白设
+        原生表面不主题化   → 暗色模式下露出系统默认色（深蓝选中块、
+                            白色滚动条），用户说不清哪不对但会觉得"不是这个站点的"
+    """
+
+    @covers("M15.F10")
+    def test_font_scale_has_no_adjacent_step_below_1125(self):
+        """★★ 字阶相邻档步进必须 ≥ 1.125。
+
+        ⚠ 改前有 8 档，前四档步进只有 **1.04x**：
+
+            11 → 11.5 → 12 → 12.5 → 13
+            1.045  1.043  1.042  1.040
+
+        **五档小字挤在 1.04 倍内，肉眼无法区分** —— 那不是在分层级，
+        只是在制造视觉噪音。已收敛到 4 档（12 / 13.5 / 18 / 21）。
+        """
+        import re
+
+        sizes = sorted({float(x) for x in
+                        re.findall(r"font-size:\s*([\d.]+)px", SHELL)})
+        assert len(sizes) >= 2, "没找到字号定义"
+
+        bad = []
+        for i in range(len(sizes) - 1):
+            step = sizes[i + 1] / sizes[i]
+            if step < 1.125:
+                bad.append(f"{sizes[i]:g} → {sizes[i+1]:g}（{step:.3f}）")
+
+        assert not bad, (
+            "这些相邻字号步进小于 1.125，肉眼分不出：\n  "
+            + "\n  ".join(bad)
+            + f"\n\n  当前全部字号：{['%g' % s for s in sizes]}"
+        )
+
+    @covers("M15.F10")
+    def test_native_surfaces_are_themed(self):
+        """★★ 浏览器原生表面必须主题化。
+
+        交接文档 §6 点名这一组：「这是「被做过」而非「拼装的」
+        最便宜的信号」。
+        """
+        required = {
+            "::selection": "选中高亮",
+            "caret-color": "光标颜色",
+            "scrollbar-width": "滚动条宽度（Firefox）",
+            "::-webkit-scrollbar": "滚动条（WebKit）",
+            ":focus-visible": "键盘焦点框",
+            "text-underline-offset": "下划线间距",
+        }
+        missing = [f"{k}（{v}）" for k, v in required.items() if k not in SHELL]
+        assert not missing, (
+            "这些原生表面没有主题化，在暗色模式下会露出系统默认色：\n  "
+            + "\n  ".join(missing)
+        )
+
+    @covers("M15.F10")
+    def test_reduced_motion_is_respected(self):
+        """★ `prefers-reduced-motion` 下要关掉动画。
+
+        目前页面几乎没有动画，但这条**是为将来兜底** ——
+        等加了过渡再补，很容易忘。
+        """
+        assert "prefers-reduced-motion" in SHELL
+
+    @covers("M15.F10")
+    def test_keyboard_focus_uses_focus_visible_not_focus(self):
+        """★ 焦点框用 `:focus-visible` 而不是 `:focus`。
+
+        `:focus` 会让鼠标点击也出现焦点框 —— 那是视觉噪音，
+        而噪音会让人干脆去掉整个焦点样式，结果是键盘用户看不到焦点。
+        """
+        assert ":focus-visible" in SHELL
+        # 不能只有 :focus（那说明没区分键盘与鼠标）
+        assert ":focus-visible" in SHELL, "缺 :focus-visible"
