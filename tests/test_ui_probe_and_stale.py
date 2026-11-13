@@ -85,6 +85,26 @@ class TestProbeParsing:
         # 正常空闲状态不该被说成异常
         assert "正常" in _WCHAN_HINTS["do_epoll_wait"]
 
+    @covers("M15.F11")
+    def test_wchan_hint_for_sigstop(self):
+        """★ `do_signal_stop` 要翻成「进程被暂停」，不能是「未识别」。
+
+        ⚠ 这条来自 2026-11-13 的实测：用 SIGSTOP 模拟 10-31 卡死时，
+        探针正确判出了 `unresponsive`，但 wchan 显示
+        「do_signal_stop · 未识别的内核状态」—— 信息给了一半。
+
+        而且这个区分有实际价值：**「被暂停」和「死锁」的处置完全不同**。
+        前者是有人按了暂停（或调试器 attach），后者是代码有问题。
+        报「未识别」会让人往死锁方向排查。
+        """
+        from nxs.ui.probe import _WCHAN_HINTS
+
+        hint = _WCHAN_HINTS.get("do_signal_stop")
+        assert hint, "do_signal_stop 没有翻译"
+        assert "暂停" in hint
+        # 要明确说"这不是死锁"，否则照样会被误判
+        assert "不是死锁" in hint
+
 
 class TestProbeVerdict:
     """探针的综合判定 —— 这是面板真正要给出的东西。"""

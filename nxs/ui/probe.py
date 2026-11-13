@@ -88,6 +88,7 @@ _WCHAN_HINTS: dict[str, str] = {
     "inet_csk_accept": "等待新连接（accept 循环正常）",
     "poll_schedule_timeout": "定时等待（如心跳循环）",
     "hrtimer_nanosleep": "定时休眠（如心跳循环）",
+    "do_signal_stop": "进程被暂停（SIGSTOP）—— 不是死锁，是有人按了暂停",
     "0": "正在运行（未阻塞）",
 }
 
