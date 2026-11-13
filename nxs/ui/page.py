@@ -212,6 +212,10 @@ SHELL = """<!DOCTYPE html>
                  line-height: 1.6; }
   .banner .age { font-weight: 600; color: var(--warn); }
 
+  /* 首次加载提示。刻意用低调的 dim 色、不加边框：
+     它是「稍等」，不是「出事了」—— 后者由 #error / #stale 负责。 */
+  #boot { color: var(--dim); font-size: 13.5px; padding: 12px 0; }
+
   /* 陈旧数据整块降透明度 —— 与实时数据视觉隔离，绝不混排观感 */
   .stale-data { opacity: .62; }
   .stale-data table { border-style: dashed; }
@@ -226,6 +230,10 @@ SHELL = """<!DOCTYPE html>
 </header>
 
 <div id="error"></div>
+<!-- 首次加载提示：交接文档 §8 要求「加载中有骨架或明确提示」。
+     空白的数据区与「真的没有数据」长得一模一样，等几秒会让人以为坏了。
+     renderAll() 第一件事就是把它清掉。 -->
+<div id="boot">正在读取 coordinator 的运维端点……</div>
 <div id="stale"></div>
 <div id="probe"></div>
 <div id="pending"></div>
@@ -925,6 +933,10 @@ function showUnauthorized() {
 //   现在两边共用这一个函数，预览跑的就是生产接线。
 function renderAll(data) {
   const nodes = data.nodes || [];
+
+  // 首次加载提示到此为止 —— 后面无论如何都会画出「数据是什么状态」，
+  // 那一行再留着就是重复噪音。
+  document.getElementById("boot").replaceChildren();
 
   // ⚠ 顺序有意义：先渲染「数据是什么状态」（陈旧/无历史），
   //   再渲数据本身。否则用户会先看到一屏节点，然后才被告知那是旧的。

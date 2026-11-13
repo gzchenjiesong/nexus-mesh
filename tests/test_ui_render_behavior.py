@@ -334,3 +334,25 @@ class TestRenderEntryIsSingle:
         )
         for fn in ("renderStale(REAL)", "renderNodes(REAL", "renderAudit(REAL"):
             assert fn not in text, f"预览里还自己调 {fn}"
+
+
+class TestFirstLoadHint:
+    """★ 首次加载要有明确提示（交接文档 §8：「加载中有骨架或明确提示」）。
+
+    ⚠ 空白的数据区与「真的没有数据」长得一模一样。coordinator 慢的时候
+    （旧连接会等满超时）用户会盯着几个空白标题看上好几秒，无从判断
+    是坏了还是在读。
+    """
+
+    @covers("M15.F10")
+    def test_boot_hint_exists_in_markup(self):
+        assert 'id="boot"' in SHELL, "页面里没有首次加载提示"
+        assert "正在读取" in SHELL, "提示文案要说清在做什么"
+
+    @covers("M15.F10")
+    def test_boot_hint_cleared_after_render(self):
+        """★ 渲染后提示必须消失 —— 否则会与真实状态叠着显示。"""
+        text = _render(_healthy_payload())
+        assert text.get("boot", "").strip() == "", (
+            f"渲染完成后首次加载提示还在：{text.get('boot')!r}"
+        )
