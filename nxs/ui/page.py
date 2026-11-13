@@ -453,6 +453,17 @@ function renderNodes(nodes) {
     tr.appendChild(cRole);
 
     // ---- 吞吐 ----
+    //
+    // ⚠ **数据契约：从这一行往下的字段（received/completed/failed/
+    //   pending/in_flight/backlog_ratio/bytes_out）不在 `/nxs/ops/nodes` 里。**
+    //   它们在 `metrics.nodes[]` 里，由服务端 `_merge_node_metrics()`
+    //   按 node_id 合并进来（见 nxs/ui/server.py）。
+    //
+    //   踩过的坑（2026-11-13）：节点表直接读 `data.nodes` 就渲染，
+    //   结果是**整张表 7 个格子全是「—」，页面看起来完全正常**。
+    //   而守护测试写的是 `"backlog_ratio" in SHELL` —— 字段名在代码里
+    //   出现过就绿，根本不管它读的是哪个数据源。
+    //   所以别在这里找数据源，也别改回 `data.nodes` 单独一份。
     const cTp = el("td");
     cTp.className = "caps";
     const recv = n.received ?? "—";

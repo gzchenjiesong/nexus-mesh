@@ -18,43 +18,76 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from nxs.ui.page import SHELL
+from nxs.ui.server import UiServer
 
-#: 一份健康的节点列表，三种状态共用
-NODES = [
+#: ``/nxs/ops/nodes`` 返回的**身份/授权**字段 —— 只有这些。
+#:
+#: ⚠ 第一版这里把手写的性能字段（received/backlog_ratio/bytes_out）
+#: 直接混进了节点 dict，于是预览永远是绿的，而生产上那几列全是「—」。
+#: 预览验证的又是假数据 —— 同一个坑的第二次。
+#:
+#: 现在严格分开：这份**只**放 ops/nodes 真实有的字段，
+#: 性能字段进 PERF_NODES，最后由服务端那个函数合并。
+OPS_NODES = [
     {"node_id": "hermes-working", "display_name": "Hermes · working",
      "description": "云端 Hermes Agent（profile=working）",
      "domain": "cloud", "state": "alive", "approved": True,
+     "revision": 3, "last_seen": "2026-11-13T17:09:41+08:00",
      "role": "agent",
      "role_definition": {"can_issue": True, "serves": ["agent.ask"],
                          "max_response_level": "summary"},
+     "may_broadcast": False,
      "capabilities": ["agent.ask"],
-     "received": 3, "completed": 3, "failed": 0,
-     "pending": 0, "in_flight": 0,
-     "backlog_ratio": 0.0, "bytes_out": 0},
+     "max_response_level": "summary",
+     "self_limits": {"max_concurrent": 2}},
     {"node_id": "work-macbook", "display_name": "CodeBuddy · MacBook",
      "description": "本地开发机执行者",
      "domain": "zone-work", "state": "alive", "approved": True,
+     "revision": 1, "last_seen": "2026-11-13T17:09:38+08:00",
      "role": "worker",
      "role_definition": {"can_issue": False, "serves": ["work.query"],
                          "max_response_level": "summary"},
+     "may_broadcast": False,
      "capabilities": ["work.query"],
-     "received": 9, "completed": 6, "failed": 3,
-     "pending": 2, "in_flight": 1,
-     # 这两个是阶段 3a 新用的字段
-     "backlog_ratio": 1.5, "bytes_out": 18432},
-    # ⚠ capacity=0 时 backlog_ratio 为 None（除零）——
-    #   前端必须显示 ∞，不能显示 0 或空白（那会被读成"没有积压"）
+     "max_response_level": "summary",
+     "self_limits": {"max_concurrent": 4}},
     {"node_id": "work-desktop", "display_name": "CodeBuddy · 公司电脑",
      "description": "内网执行者（capacity=0 的边缘情形）",
      "domain": "zone-work", "state": "stale", "approved": False,
+     "revision": 1, "last_seen": "2026-11-12T09:00:00+08:00",
      "role": "worker",
      "role_definition": {"can_issue": False, "serves": ["work.query"],
                          "max_response_level": "summary"},
+     "may_broadcast": False,
      "capabilities": ["work.query"],
-     "received": 0, "completed": 0, "failed": 0,
-     "pending": 0, "in_flight": 0,
-     "backlog_ratio": None, "bytes_out": 0},
+     "max_response_level": "summary",
+     "self_limits": {}},
 ]
+
+#: ``metrics.nodes[]`` 返回的**性能**字段 —— 与上面**不重叠**。
+#:
+#: ⚠ `work-desktop` 的 backlog_ratio 是 None：capacity=0 除零，
+#:   前端必须显示 ∞，不能显示 0 或空白（那会被读成"没有积压"）。
+PERF_NODES = [
+    {"node_id": "hermes-working", "domain": "cloud", "approved": True,
+     "state": "alive", "received": 3, "completed": 3, "failed": 0,
+     "in_flight": 0, "pending": 0, "capacity": 2,
+     "backlog_ratio": 0.0, "bytes_out": 0, "failure_rate": 0.0,
+     "denials": {}},
+    {"node_id": "work-macbook", "domain": "zone-work", "approved": True,
+     "state": "alive", "received": 9, "completed": 6, "failed": 3,
+     "in_flight": 1, "pending": 2, "capacity": 4,
+     "backlog_ratio": 0.5, "bytes_out": 18432, "failure_rate": 0.333,
+     "denials": {"MX-DOMAIN-02": 1}},
+    {"node_id": "work-desktop", "domain": "zone-work", "approved": False,
+     "state": "stale", "received": 0, "completed": 0, "failed": 0,
+     "in_flight": 0, "pending": 3, "capacity": 0,
+     "backlog_ratio": None, "bytes_out": 0, "failure_rate": 0.0,
+     "denials": {}},
+]
+
+#: 预览里展示的节点表数据 —— **由真实合并函数产出**，不手写。
+NODES = UiServer._merge_node_metrics(OPS_NODES, {"nodes": PERF_NODES})
 
 METRICS = {
     "uptime_seconds": 5327,
@@ -63,6 +96,8 @@ METRICS = {
     "latency_samples": 9,
     "denied_by_rule": {"AU-APPROVE-05": 2},
     "by_type": {"work.query": {"submitted": 12, "completed": 9, "failed": 3}},
+    # 真实 metrics 一定含 nodes[]；节点表的性能列就来自这里
+    "nodes": PERF_NODES,
     "anomalies": [],
 }
 
@@ -187,6 +222,10 @@ STATES: dict[str, dict] = {
             "denied_by_rule": {},
             "by_type": {"work.query": {"submitted": 1, "completed": 1,
                                        "failed": 0}},
+            # ⚠ 真实的 metrics 一定带 nodes[]（as_dict 无条件给）。
+            #   这里也必须给 —— 否则节点表的性能列会显示「—」，
+            #   预览就成了在验一个生产上不存在的状态。
+            "nodes": PERF_NODES,
             "anomalies": [{
                 "severity": "warn",
                 "rule": "probe_pattern",

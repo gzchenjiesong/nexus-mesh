@@ -67,7 +67,7 @@ import threading
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
 from ..core.errors import ConfigError
@@ -213,6 +213,76 @@ class UiServer:
     #: 那不是观察窗的用途。
     AUDIT_LIMIT = 100
 
+    #: 从 ``metrics.nodes[]`` 借到节点表上的**性能字段**。
+    #:
+    #: ⚠ **这两个数据源不是同一份东西**（2026-11-13 踩过）：
+    #:
+    #: ==========================  ==================================
+    #: ``/nxs/ops/nodes``          ``metrics.nodes[]``
+    #: ==========================  ==================================
+    #: **身份/授权**视角            **性能**视角
+    #: display_name / description  received / completed / failed
+    #: role / role_definition      in_flight / pending / capacity
+    #: domain / approved / state   backlog_ratio / bytes_out
+    #: capabilities / self_limits  failure_rate / denials
+    #: ==========================  ==================================
+    #:
+    #: 节点表要**同时**显示两边的东西，所以必须按 ``node_id`` 合并。
+    #: 不合并的后果：前端读不到就是空，而 ``?? "—"`` 会把空静默降级成
+    #: 一个貌似正常的「—」，**页面看起来没问题，数字全是空的**。
+    #: 这正是本项目第四次同类型故障（前三次见 page.py 里角色列的注释）。
+    NODE_PERF_FIELDS = (
+        "received", "completed", "failed",
+        "in_flight", "pending", "capacity",
+        "backlog_ratio", "bytes_out", "failure_rate", "denials",
+    )
+
+    @classmethod
+    def _merge_node_metrics(
+        cls,
+        nodes: list[Mapping[str, Any]],
+        metrics: Mapping[str, Any] | None,
+    ) -> list[Mapping[str, Any]]:
+        """把 ``metrics.nodes[]`` 的性能字段按 ``node_id`` 并入节点表。
+
+        ## 合并规则
+
+        * 以 ``nodes``（``ops/nodes``）为准 —— 它决定**有哪些节点**。
+          只在 metrics 里出现的节点不新增行：注册表是成员的唯一权威。
+        * 性能字段**有则覆盖、无则留空**。留空（键不存在）而不是填 0：
+          0 会被读成「真的没有流量」，而「不知道」必须长得像「不知道」。
+        * ``metrics`` 为 ``None``（部分失败）时原样返回 —— 宁可少字段，
+          也不能凭空造数字。
+
+        ## 为什么放在服务端而不是前端合并
+
+        放服务端才能用 Python 写**行为断言**（拿两个真实形状喂进去，
+        检查合并结果）。前端合并只能靠 JS 字符串匹配来守护，
+        而 ``"backlog_ratio" in SHELL`` 这种断言在字段读错数据源时**照样是绿的**
+        —— 它就是这次漏掉问题的原因。
+        """
+        if not metrics:
+            return nodes
+
+        perf: dict[str, Mapping[str, Any]] = {}
+        for row in metrics.get("nodes") or []:
+            nid = row.get("node_id")
+            if nid:
+                perf[nid] = row
+        if not perf:
+            return nodes
+
+        merged: list[Mapping[str, Any]] = []
+        for node in nodes:
+            row = dict(node)
+            source = perf.get(node.get("node_id"))
+            if source:
+                for field in cls.NODE_PERF_FIELDS:
+                    if field in source:
+                        row[field] = source[field]
+            merged.append(row)
+        return merged
+
     def snapshot(self) -> dict[str, Any]:
         """拉一次节点、指标、审计流，并附带本地探针与陈旧判定。
 
@@ -336,6 +406,14 @@ class UiServer:
         except Exception as exc:  # noqa: BLE001
             # 节点拿到了、指标没拿到 —— 仍然把节点显示出来，只标指标的错
             out["error"] = f"metrics: {type(exc).__name__}: {exc}"
+
+        # ---- 合并：节点表要同时显示身份字段与性能字段 ----
+        #
+        # 位置有讲究：必须在**存末次成功之前**。
+        # 否则陈旧兜底拿到的 last_good 是未合并的版本 ——
+        # coordinator 一挂，水位/回传/吞吐列就集体变空，
+        # 而"挂掉的瞬间"恰是最需要看这些数字的时候。
+        out["nodes"] = self._merge_node_metrics(out["nodes"], out["metrics"])
 
         try:
             audit = self._ops.audit(limit=self.AUDIT_LIMIT)

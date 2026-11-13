@@ -619,6 +619,23 @@ FEATURES: tuple[Feature, ...] = (
               "内存末次成功兜底（coordinator 挂时给最后已知状态 + 明确时间戳，不落盘）",
               "nxs/ui/server.py:UiServer._fill_stale",
               ("G3",), "P1"),
+      # ---- F13（2026-11-13 阶段 3a 收尾）----
+      #
+      # 节点表要同时显示**两半数据**，而它们来自两个不同端点：
+      #
+      #     ops/nodes      → 身份/授权（display_name、role、role_definition…）
+      #     metrics.nodes  → 性能（received、pending、backlog_ratio、bytes_out…）
+      #
+      # 前端只读 ops/nodes，于是吞吐/水位/回传三列在生产上全是「—」，
+      # 而页面看起来完全正常 —— 「读不到」被 `?? "—"` 静默降级了。
+      #
+      # 这类缺陷的守护不能靠字符串存在性断言（"backlog_ratio" in SHELL
+      # 在字段读错数据源时照样是绿的），必须是「前端读的每个字段，
+      # 快照里都要有」的契约检查。
+      Feature("M15.F13",
+              "节点表跨端点合并（ops/nodes 的身份字段 + metrics.nodes 的性能字段，按 node_id 对齐）",
+              "nxs/ui/server.py:UiServer._merge_node_metrics",
+              ("G3",), "P1"),
   )
 
 

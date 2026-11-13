@@ -1379,13 +1379,25 @@ class TestStage3aDisplayGaps:
 
     @covers("M15.F10")
     def test_node_table_has_level_and_bytes(self):
-        """★ 节点表要有「水位」「回传」两列。"""
-        assert "backlog_ratio" in SHELL, (
-            "前端没读 backlog_ratio —— 水位列不会显示"
-        )
-        assert "bytes_out" in SHELL, (
-            "前端没读 bytes_out —— 回传字节列不会显示"
-        )
+        """★ 节点表要有「水位」「回传」两列。
+
+        ⚠ **这条只管"列在不在"，不管"数从哪来"。**
+
+        第一版这里写的是 ``assert "backlog_ratio" in SHELL`` ——
+        字段名在代码里出现过就绿，结果那两个字段根本不在
+        ``ops/nodes`` 里，生产上整列是空的而测试照样通过。
+
+        真正的守护在 :class:`TestNodeTableDataSource`
+        （尤其 ``test_snapshot_node_rows_contain_every_field_the_table_reads``）。
+        这里收紧成"必须是从节点行对象上读的属性"，
+        至少排除掉"只在注释里提了一句"这种假绿。
+        """
+        import re
+
+        for field, label in (("backlog_ratio", "水位"), ("bytes_out", "回传")):
+            assert re.search(rf"\bn\.{field}\b", SHELL), (
+                f"前端没从节点行读 {field} —— {label}列不会显示"
+            )
         assert "水位" in SHELL and "回传" in SHELL
 
     @covers("M15.F10")
@@ -1443,6 +1455,214 @@ class TestStage3aDisplayGaps:
         assert "enough" in SHELL or "samples >= 2" in SHELL, (
             "没看到样本数判定逻辑 —— 可能是无条件画分位数"
         )
+
+
+class TestNodeTableDataSource:
+    """★★ 节点表的两半数据来自**两个端点**，必须按 ``node_id`` 合并。
+
+    ## 踩的坑（2026-11-13，阶段 3a 收尾验收时发现）
+
+    给节点表加了「水位」「回传」两列，代码写 ``n.backlog_ratio`` /
+    ``n.bytes_out``，看着完全正常，测试全绿。生产验收时实测：
+
+        ══════ ② 服务与数据 ══════
+          nodes=3  stale=False  error=None
+          单节点含新字段: backlog_ratio=False  bytes_out=False
+
+    因为 ``/nxs/ops/nodes`` 根本没有这两个字段 —— 它们在
+    ``metrics.nodes[]`` 里。而 ``?? "—"`` 把"读不到"静默降级成一个
+    貌似正常的破折号，于是**整张表 7 个格子全空，页面看起来没毛病**。
+
+    顺手发现的还有：吞吐列（``received/completed/failed/pending/in_flight``）
+    **一直**是空的 —— 同一个原因，只是没人核对过生产现场。
+
+    ## 为什么原来的测试抓不到
+
+    原断言是 ``assert "backlog_ratio" in SHELL``：**字段名在代码文本里
+    出现过就绿**。它不管这个字段从哪来、读得对不对 —— 写成
+    ``n.这个字段不存在`` 也照样通过。字符串存在性检查守不住行为。
+
+    ## 现在三层守护
+
+    ① 合并函数的行为：按 id 对齐、不串号、缺指标不造数
+    ② **契约**：``renderNodes`` 里读的每个 ``n.<字段>``，真实快照里必须有
+    ③ 陈旧兜底也带着性能字段（否则 coordinator 一挂就集体变空，
+       而那正是最需要看这些数字的时刻）
+    """
+
+    @staticmethod
+    def _merge(nodes, metrics):
+        from nxs.ui.server import UiServer
+
+        return UiServer._merge_node_metrics(nodes, metrics)
+
+    #: 两个端点的**真实**字段集（照抄生产输出，别凭印象写）
+    OPS_ROW = {"node_id": "a", "display_name": "甲", "description": "说明",
+               "domain": "cloud", "state": "alive", "approved": True,
+               "revision": 1, "last_seen": "2026-11-13T17:09:41+08:00",
+               "role": "worker", "role_definition": {"can_issue": False},
+               "may_broadcast": False, "capabilities": ["work.query"],
+               "max_response_level": "summary", "self_limits": {}}
+    PERF_ROW = {"node_id": "a", "domain": "cloud", "approved": True,
+                "state": "alive", "received": 9, "completed": 6, "failed": 3,
+                "in_flight": 1, "pending": 2, "capacity": 4,
+                "backlog_ratio": 0.5, "bytes_out": 18432,
+                "failure_rate": 0.333, "denials": {}}
+
+    @covers("M15.F13")
+    def test_merge_pulls_perf_fields_by_node_id(self):
+        """★ 性能字段按 node_id 合并进来，身份字段一个不少。"""
+        row = self._merge([self.OPS_ROW], {"nodes": [self.PERF_ROW]})[0]
+
+        for field in ("backlog_ratio", "bytes_out", "received", "completed",
+                      "failed", "pending", "in_flight", "capacity",
+                      "failure_rate", "denials"):
+            assert field in row, f"没合并 {field} —— 那一列在生产上会是空的"
+        assert row["backlog_ratio"] == 0.5
+        assert row["bytes_out"] == 18432
+
+        # 身份字段必须原样保留：合并是"追加"，不是"替换整行"
+        for field, value in self.OPS_ROW.items():
+            assert row[field] == value, f"合并弄丢了身份字段 {field}"
+
+    @covers("M15.F13")
+    def test_merge_does_not_leak_between_nodes(self):
+        """★★ 指标里没有的节点，**不能**借用别人的数字。
+
+        ⚠ 这是合并最危险的失败方式：如果实现写成"取 metrics 里第一行"
+        或者下标错位，节点 B 会显示节点 A 的流量 ——
+        **看起来一切正常，数字全是错的**。比空白难查得多。
+        """
+        other = dict(self.PERF_ROW, node_id="b", received=999,
+                     bytes_out=88888, backlog_ratio=9.9)
+        rows = self._merge(
+            [self.OPS_ROW, dict(self.OPS_ROW, node_id="b", display_name="乙")],
+            {"nodes": [self.PERF_ROW, other]},
+        )
+        by_id = {r["node_id"]: r for r in rows}
+        assert by_id["a"]["received"] == 9
+        assert by_id["b"]["received"] == 999, "乙拿到了甲的数字"
+        assert by_id["b"]["backlog_ratio"] == 9.9
+
+        # 指标里完全没有 c → 不能有性能字段（留空，不是填 0）
+        rows = self._merge([dict(self.OPS_ROW, node_id="c")],
+                           {"nodes": [self.PERF_ROW]})
+        assert "received" not in rows[0], (
+            "指标里没有这个节点却出现了 received —— 凭空造数"
+        )
+        assert "bytes_out" not in rows[0]
+
+    @covers("M15.F13")
+    def test_merge_without_metrics_keeps_identity_only(self):
+        """★ metrics 缺失（部分失败）时原样返回，不崩也不造数。"""
+        nodes = [dict(self.OPS_ROW)]
+        for metrics in (None, {}, {"nodes": []}, {"nodes": None}):
+            got = self._merge(nodes, metrics)
+            assert got == nodes, f"{metrics!r} 时不该改动节点行"
+
+    @covers("M15.F13")
+    def test_snapshot_node_rows_contain_every_field_the_table_reads(self):
+        """★★★ 契约：``renderNodes`` 读的每个 ``n.<字段>``，快照里必须有。
+
+        ⚠ **这条是本次缺陷的真正守护。**
+
+        做法：从 SHELL 里抠出 ``renderNodes`` 的函数体，正则扫出所有
+        ``n.xxx`` 读法，逐个核对是否存在于**真实**（跑起来的 coordinator
+        产出的）节点行里。
+
+        它抓的是"前端读了一个服务端不给的字段"这一类问题 ——
+        也就是上面那个坑。相比 ``"backlog_ratio" in SHELL``，
+        区别在于：字段名出现 ≠ 从这个数据源读得到。
+        """
+        import re
+
+        body = self._render_nodes_body()
+        read = set(re.findall(r"\bn\.([A-Za-z_][A-Za-z0-9_]*)", body))
+        assert len(read) >= 10, (
+            f"只从 renderNodes 里扫出 {len(read)} 个字段读法 —— 正则可能失效了："
+            f"{sorted(read)}"
+        )
+
+        # 用真实 coordinator 的快照，而不是手写 dict
+        from nxs.app import NexusApp
+        from nxs.edge.gateway import Gateway
+        from nxs.mgmt.config import (EXAMPLE_CONFIG_PATH, ServerConfig,
+                                     demo_env_for)
+
+        app = NexusApp.from_config_path(
+            str(EXAMPLE_CONFIG_PATH), env=demo_env_for(EXAMPLE_CONFIG_PATH),
+            force_memory=True)
+        app.start()
+        gw = Gateway(app, server_config=ServerConfig(host="127.0.0.1", port=0),
+                     ops_secret=SECRET).start()
+        try:
+            server = UiServer(gw.base_url, SECRET, port=0)
+            rows = server.snapshot()["nodes"]
+        finally:
+            gw.stop()
+
+        assert rows, "快照里没有节点行，这条测试失去意义"
+        missing = {f for f in read if not all(f in r for r in rows)}
+        assert not missing, (
+            "节点表读了服务端不提供的字段 —— 那些格子会永远显示「—」，"
+            "而页面看起来完全正常：\n  "
+            + "、".join(sorted(missing))
+            + "\n\n  快照实际字段："
+            + "、".join(sorted({k for r in rows for k in r}))
+            + "\n\n  提示：性能字段在 metrics.nodes[] 里，"
+            "要经 UiServer._merge_node_metrics() 合并。"
+        )
+
+    def _render_nodes_body(self) -> str:
+        """抠出 ``function renderNodes(nodes) { ... }`` 的函数体，并剔掉噪音。
+
+        ⚠ 不用"按缩进找结尾"那种脆弱写法：函数体里有嵌套的
+        ``  }``（2 空格），而函数自己的收尾 ``}`` 在第 0 列。
+        所以匹配到行首 ``}`` 为止。
+
+        ⚠ **必须剔掉注释与字符串字面量**（第一版没剔，立刻误报了一条）：
+        函数里有段注释写着「旧代码读 ``n.roles``」—— 那是历史说明，
+        不是真的在读。不剔的话断言会要求服务端提供 ``roles``，
+        而那个字段早就被角色模型改造删掉了。
+        """
+        import re
+
+        m = re.search(r"function renderNodes\(nodes\)\s*\{(.*?)\n\}",
+                      SHELL, re.S)
+        assert m, "SHELL 里找不到 renderNodes 函数 —— 前端结构变了，改这里的解析"
+        body = m.group(1)
+        body = re.sub(r"/\*.*?\*/", " ", body, flags=re.S)     # 块注释
+        body = re.sub(r"//[^\n]*", " ", body)                  # 行注释
+        body = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', body)      # 双引号串
+        body = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", body)      # 单引号串
+        return body
+
+    @covers("M15.F12")
+    def test_stale_fallback_keeps_perf_fields(self):
+        """★★ 陈旧兜底里也必须带性能字段。
+
+        ⚠ 合并如果发生在"存末次成功"之后，coordinator 一挂，
+        水位/回传/吞吐列就集体变空 —— 而**挂掉的瞬间**恰是最需要
+        看这些数字的时候。那是"监控最需要时最没用"的翻版。
+        """
+        from unittest.mock import MagicMock
+
+        srv = UiServer("http://127.0.0.1:18800/nxs", b"x" * 32)
+        srv._ops = MagicMock()
+        srv._ops.nodes.return_value = [dict(self.OPS_ROW)]
+        srv._ops.metrics.return_value = {"nodes": [dict(self.PERF_ROW)]}
+        srv._ops.audit.return_value = {"records": [], "truncated": False,
+                                       "filtered_heartbeats": 0}
+        live = srv.snapshot()
+        assert live["nodes"][0]["backlog_ratio"] == 0.5
+
+        srv._ops.nodes.side_effect = RuntimeError("timed out")
+        stale = srv.snapshot()
+        assert stale["stale"] is True
+        assert stale["nodes"][0]["backlog_ratio"] == 0.5, (
+            "陈旧兜底丢了 backlog_ratio —— coordinator 一挂水位列就空"
+        )
+        assert stale["nodes"][0]["bytes_out"] == 18432
 
 
 class TestVisualBaseline:
