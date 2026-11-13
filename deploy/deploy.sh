@@ -198,4 +198,5 @@ PY
 
 echo
 echo "═══ 完成 ═══"
-echo "  观察窗：journalctl -u nexus-mesh-ui -n 20 --no-pager | grep -o 'http://127.0.0.1:8080/?t=[A-Za-z0-9_-]*' | tail -1"
+echo "  观察窗：https://hub.i-strategy-compass.cn  → Nexus 卡片（经 Authelia 进入）
+  轮换 token：nxs-open --rotate（或 bash deploy/rotate-ui-token.sh）"

@@ -114,10 +114,41 @@ else
 fi
 
 echo "  ③ 数据面"
-TOKEN=$(journalctl -u nexus-mesh-ui --no-pager -n 400 2>/dev/null \
-  | grep -oE "8080/\?t=[A-Za-z0-9_-]{20,}" | tail -1 | cut -d= -f2 || true)
+# ⚠ 这里**不再从 journalctl 抓 token**（2026-11-13 改）。
+#
+# 两个原因：
+#   ① 新版启动输出根本不打印 token（只打印服务台入口）—— 日志里抓不到
+#   ② 就算抓得到，那也是把凭据当字符串处理；token 现在可以从密钥**算**出来
+#
+# 顺带一个安全改善：日志里不再出现 token，少了一个泄露面
+# （journal 会被备份、会被 grep 到别的地方去）。
+cd /opt/nexus-mesh
+TOKEN=$(set -a; . /etc/nexus-mesh/ui.env 2>/dev/null; set +a; \
+  .venv/bin/python - <<'PY' 2>/dev/null
+import base64, hashlib, hmac, os, subprocess
+secret = os.environ.get("NXS_OPS_SECRET", "").encode()
+if len(secret) < 16:
+    raise SystemExit(0)
+# gen 取**进程内**的实际值，而不是 unit 里写的 —— 两者可能不一致
+gen = "0"
+try:
+    pid = subprocess.run(["systemctl", "show", "nexus-mesh-ui",
+                          "-p", "MainPID", "--value"],
+                         capture_output=True, text=True).stdout.strip()
+    env = open(f"/proc/{pid}/environ", "rb").read().decode("utf-8", "replace")
+    for item in env.split("\0"):
+        if item.startswith("NXS_UI_TOKEN_GEN="):
+            gen = item.split("=", 1)[1] or "0"
+except Exception:
+    pass
+msg = f"ui-token:v1:gen{gen}".encode()
+print(base64.urlsafe_b64encode(
+    hmac.new(secret, msg, hashlib.sha256).digest()).decode().rstrip("="))
+PY
+)
+
 if [ -z "${TOKEN:-}" ]; then
-    echo "     ⚠ 日志里找不到 token —— 服务刚启动？等几秒再看"
+    echo "     ⚠ 算不出 token（ui.env 缺失或密钥过短）"
 else
     code=$(curl -s -o /tmp/oui-state.json -w '%{http_code}' \
             -H "Cookie: nxs_ui=$TOKEN" "http://127.0.0.1:8080/api/state" || echo 000)
@@ -135,8 +166,8 @@ else:
     if s.get("error"):
         print(f"     ⚠ error: {s['error']}")
 PY
-        rm -f /tmp/oui-state.json
     fi
+    rm -f /tmp/oui-state.json
 fi
 
 echo "  ④ 统一入口的两种 Host 行为"

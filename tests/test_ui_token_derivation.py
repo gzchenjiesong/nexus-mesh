@@ -338,3 +338,85 @@ class TestUnifiedEntryScript:
             f"默认入口是回环地址 {m.group('default')!r} —— "
             "统一入口应该是公网域名"
         )
+
+
+class TestTokenNotInLogs:
+    """★★ 启动输出不该打印 token —— 这是轮换模式下新增的泄露面收窄。
+
+    ⚠ 原来 ``nxs ui`` 启动时会打印 ``http://127.0.0.1:8080/?t=<token>``，
+    而 systemd 把 stdout 收进 journald。于是 token 出现在：
+
+        · journalctl（会被备份、会被 grep 到别处）
+        · 任何 ``journalctl -u nexus-mesh-ui | grep t=`` 的人眼里
+
+    在「token 每次变」的时代这无伤大雅 —— 十分钟后就作废了。但改成
+    **固定 token** 之后，日志里那一行就是一把长期有效的钥匙。
+    所以启动输出一并改口径：只打印服务台入口，不打印 token。
+
+    ⚠ 这条测试守的是「不要改回去」：将来有人为了排障方便把 token
+    加回启动输出，会让日志重新变成泄露面，而且**没人会注意到**。
+    """
+
+    @staticmethod
+    def _main_src() -> str:
+        return (REPO_ROOT / "nxs" / "__main__.py").read_text()
+
+    @covers("M15.F2")
+    def test_startup_output_does_not_print_entry_url_with_token(self):
+        """★★ **有统一入口时**不许打印 ``entry_url``（它含 ?t=token）。
+
+        ⚠ 判据必须区分两个分支（第一版写成「整个函数都不许出现 entry_url」，
+        结果误伤了降级分支）：
+
+            配了 recover_url   → 打印服务台入口，**不**打印带 token 的链接
+            没配 recover_url   → 打印本机 entry_url 是**唯一出路**，允许
+
+        后者的场景是本地开发/应急排障，那时没有别的入口；而生产配了统一
+        入口，日志里就不该出现一把长期有效的钥匙。
+        """
+        text = self._main_src()
+        start = text.find("def cmd_ui(")
+        assert start > 0
+        nxt = text.find("\ndef ", start + 10)
+        body = text[start:nxt if nxt > 0 else len(text)]
+
+        # 找到 `if server.recover_url:` 分支，到它的 else 之前
+        i = body.find("if server.recover_url:")
+        assert i > 0, "找不到「有统一入口」的分支 —— 结构变了，改这里的解析"
+        j = body.find("else:", i)
+        assert j > i, "找不到 else 分支"
+        hub_branch = body[i:j]
+
+        assert "entry_url" not in hub_branch, (
+            "配了统一入口却仍打印 entry_url（含 ?t=token）—— "
+            "那行会进 journald，成为长期有效的泄露面"
+        )
+        assert "hub" in hub_branch or "入口" in hub_branch, (
+            "有统一入口却不打印它 —— 用户不知道从哪进"
+        )
+
+    @covers("M15.F2")
+    def test_startup_output_points_at_hub(self):
+        """★ 输出要说清从哪进 —— 只删不补会让人不知道怎么办。"""
+        text = self._main_src()
+        start = text.find("def cmd_ui(")
+        nxt = text.find("\ndef ", start + 10)
+        body = text[start:nxt if nxt > 0 else len(text)]
+
+        assert "入口" in body, "启动输出没说从哪进入"
+        assert "Authelia" in body or "服务台" in body, (
+            "没说清统一入口是经过服务台认证的"
+        )
+
+    @covers("M15.F2")
+    def test_check_script_derives_instead_of_scraping_logs(self):
+        """★★ ``open-ui.sh --check`` 要算 token，不能从日志抓。
+
+        两个理由：
+          ① 日志里已经没有 token 了，抓不到
+          ② 就算有，那也是把凭据当字符串处理；而它可以从密钥算出来
+        """
+        text = (REPO_ROOT / "deploy" / "open-ui.sh").read_text()
+        assert "ui-token:v1:gen" in text, (
+            "--check 没有自己算 token —— 说明还在依赖日志抓取"
+        )
