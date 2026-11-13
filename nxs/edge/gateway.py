@@ -652,13 +652,184 @@ class Gateway:
 # 服务器装配
 # ---------------------------------------------------------------------------
 
+#: TLS 握手的最长等待（秒）。
+#:
+#: ⚠ **这是 13 天生产事故的修复核心。** 详见 :func:`_make_httpd` 的说明。
+#:
+#: 取 10 秒的依据：正常握手在本机/同域内是**毫秒级**（实测 < 20ms），
+#: 跨公网慢链路也在 1 秒内。10 秒足够容忍高延迟与丢包重传，
+#: 又不至于让半开连接占着握手太久。
+#:
+#: 太小（如 1 秒）会误杀慢链路上的正常客户端；太大则半开连接占用更久。
+TLS_HANDSHAKE_TIMEOUT_SECONDS = 10.0
+
+
 def _make_httpd(gateway: Gateway) -> ThreadingHTTPServer:
+    """装配 HTTP 服务器。TLS 在 :meth:`_Server.get_request` 里逐连接握手。
+
+    ## ⚠⚠ 为什么不在监听套接字上 wrap —— 这是 13 天事故的修复
+
+    ### 原来的写法（**错的**）
+
+    ```python
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    ```
+
+    看着很自然，但它踩了 Python 的一个行为：**`SSLSocket.accept()` 内部
+    会同步做 TLS 握手**（`do_handshake_on_connect` 默认 `True`）。而
+    `accept()` 是从 `serve_forever` 的**单线程循环**里调用的，且继承来的
+    socket **没有超时**。
+
+    于是：
+
+        一个 TCP 连接建立（三次握手完成）
+          → 但不发 TLS ClientHello
+          → accept() 内部 do_handshake() 永久阻塞
+          → serve_forever 循环卡死
+          → 后续连接全部堆在 accept 队列（实测 Recv-Q=6）
+
+    2026-10-31 18:19 起，生产上就这么冻结了 **13 天**。
+    `py-spy` 抓到的栈（这就是证据）：
+
+        Gateway._serve_locked (gateway.py:428)
+          BaseServer.serve_forever
+            SSLSocket.accept
+              SSLContext.wrap_socket      do_handshake_on_connect: True
+                SSLSocket.do_handshake
+                  timeout: None           ← ★ 无超时
+                addr: ("14.212.83.239", 32509)
+
+    ### 为什么 systemd 没发现
+
+    主线程**一直正常**跑 5 秒维护循环（`ticks` 涨到 241834）。
+    卡住的只有 gateway 线程，进程不退出、不吃 CPU、没有 traceback ——
+    systemd 的所有健康判据都是"正常"。
+
+    这是最坏的失败模式：**服务看起来健康，实际已经死了。**
+
+    ### 现在怎么做
+
+    三条，缺一不可：
+
+    1. **监听套接字不 wrap** —— 它不该带 TLS 状态
+    2. **每条连接单独握手，且设超时** —— 见 :meth:`_Server.get_request`
+    3. **握手失败只丢该连接** —— 不能让异常杀掉 accept 循环
+
+    第 3 点同样重要：一个往 TLS 端口发明文 HTTP 的客户端、一个用错协议的
+    扫描器，都会握手失败。若那让 `serve_forever` 退出，服务就**永久死亡**
+    —— 比阻塞更糟。
+
+    ## 为什么这是「默认行为」问题，而不是「被攻击」
+
+    事故后查证过来源：是个外部 IP（中国电信，从未通过认证、不扫其他端口），
+    客户端侧也不可能产生半开连接（`nxs/edge/client.py` 全用高层 `urlopen`，
+    TCP 与 TLS 由 urllib 内部连续完成，中间没有用户代码）。
+
+    **但两个答案不互斥。** 真正的问题是：
+
+        为什么一个不需要任何凭据、不需要任何协议的静默 TCP 连接，
+        能让协调节点冻结 13 天？
+        换成客户端 bug、机房抖动、某个忘记关的 `nc` 窗口 —— 结果完全一样。
+
+    任何监听公网端口的服务都必须假设会收到畸形连接与半开连接。
+    这是行业常态，不是假设。
+    """
     cfg = gateway.server_config
+
+    #: TLS 上下文。None 表示明文模式（demo / 同机测试用）。
+    ssl_context: ssl.SSLContext | None = None
+    if cfg.tls_cert and cfg.tls_key:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        try:
+            ssl_context.load_cert_chain(cfg.tls_cert, cfg.tls_key)
+        except (OSError, ssl.SSLError) as exc:
+            raise ConfigError(f"TLS 证书加载失败: {exc}") from exc
 
     class _Server(ThreadingHTTPServer):
         daemon_threads = True      # 关闭时不等待僵尸连接
         allow_reuse_address = True
         gateway_instance = gateway
+
+        def process_request(self, request, client_address):     # noqa: D102
+            """把「握手 + 处理」一起丢进工作线程。**accept 循环立刻返回。**
+
+            ## ⚠⚠ 为什么不能只在 get_request 里设超时就完事
+
+            第一版修法就是那样做的（在 `get_request` 里 `wrap_socket`
+            并 `settimeout`）。实测结果：
+
+                ① 正常 HTTPS              → 200
+                ② 建 TCP 不发 ClientHello
+                ③ 第一次正常请求          → **失败，卡满 10 秒**
+                ④ 第二次正常请求          → 200
+
+            **问题没解决。** 超时只是把「永久冻结」变成「每次卡 10 秒」——
+            而调用方的超时往往比 10 秒还短，于是**看起来仍然是坏的**，
+            只不过 10 秒后能自愈。生产上等着这个端点的 Agent 全都会超时。
+
+            根因是**位置不对**：`get_request()` 是在
+            `serve_forever` 的**单线程循环**里被调用的。只要它耗时
+            （同步握手），整个循环就在等它 —— 后面所有连接排队。
+
+            正确位置是**这里**：`process_request` 已经是"派发到工作线程"
+            的钩子。握手移到这里，accept 循环拿完裸 socket 就返回，
+            **无论握手多久都不影响接纳新连接**。
+
+            ## 为什么重写 process_request 而不是 process_request_thread
+
+            `process_request_thread` 的签名拿到的是**已完成握手的**
+            request；要在它之前插入握手，就得重写 `process_request`
+            自己起线程。这样职责更清晰：
+
+                主循环     accept → 立刻返回
+                工作线程   握手（有超时）→ 处理请求
+
+            握手失败的连接只死在那一个工作线程里，与主循环无关。
+            """
+            if ssl_context is None:
+                return super().process_request(request, client_address)
+
+            t = threading.Thread(
+                target=self._handshake_and_process,
+                args=(request, client_address),
+                daemon=self.daemon_threads,
+            )
+            t.start()
+
+        def _handshake_and_process(self, sock, addr) -> None:
+            """工作线程入口：先握手（可超时），成功再交给 handler。"""
+            sock.settimeout(TLS_HANDSHAKE_TIMEOUT_SECONDS)
+            try:
+                tls_sock = ssl_context.wrap_socket(sock, server_side=True)
+            except (ssl.SSLError, OSError) as exc:
+                # 超时、协议不符（往 https 端口发 http）、扫描器 banner 探测
+                # —— 公网端口上这些都是**常态**，用 debug 而非 warning，
+                # 否则日志会被刷爆而真正的错误被埋掉。
+                log.debug("TLS 握手失败 %s: %s（丢弃该连接，服务继续）",
+                          addr, exc)
+                _close_quietly(sock)
+                return
+
+            # 握手成功 → 解除超时。⚠ 必须解除：留着它会让长任务请求
+            # （SSE 流、大 body）在 10 秒后莫名 ReadTimeout。
+            # 握手超时只该约束握手，不该成为整个连接的寿命上限。
+            tls_sock.settimeout(None)
+
+            try:
+                self.process_request_thread(tls_sock, addr)
+            except Exception:                # noqa: BLE001
+                self.handle_error(tls_sock, addr)
+                self.shutdown_request(tls_sock)
+
+        def get_request(self):     # noqa: D102
+            """**只做裸 TCP accept，绝不在这里握手。**
+
+            标准实现把 TLS 加在监听套接字上，于是握手发生在 `accept()`
+            内部、不可超时 —— 那正是 13 天事故的成因。
+            这里明确只拿裸 socket，握手交给工作线程（见
+            :meth:`process_request`）。
+            """
+            return self.socket.accept()
 
         def handle_error(self, request, client_address):  # noqa: D102
             # 客户端提前断开是常态（尤其是 SSE 重连），不是错误
@@ -667,20 +838,33 @@ def _make_httpd(gateway: Gateway) -> ThreadingHTTPServer:
             if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
                 log.debug("客户端断开 %s", client_address)
                 return
+            if isinstance(exc, ssl.SSLError):
+                # 握手阶段的 SSLError 已在 _handshake_and_process 里记录过，
+                # 这里再打一遍只会重复
+                log.debug("TLS 错误 %s: %s", client_address, exc)
+                return
             log.warning("处理请求出错 %s: %s", client_address, exc)
 
     httpd = _Server((cfg.host, cfg.port), _Handler)
 
-    if cfg.tls_cert and cfg.tls_key:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        try:
-            context.load_cert_chain(cfg.tls_cert, cfg.tls_key)
-        except (OSError, ssl.SSLError) as exc:
-            raise ConfigError(f"TLS 证书加载失败: {exc}") from exc
-        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
-        log.info("已启用 TLS")
+    # ⚠ **监听套接字保持裸 TCP。** 不要 wrap 它 —— 那就是事故的成因。
+    if ssl_context is not None:
+        log.info("已启用 TLS（逐连接握手，超时 %.0fs）",
+                 TLS_HANDSHAKE_TIMEOUT_SECONDS)
 
     return httpd
+
+
+def _close_quietly(sock: socket.socket) -> None:
+    """关掉 socket，忽略关闭过程中的错误。
+
+    为什么静默：这发生在**异常处理路径**上。若关闭本身再抛异常，
+    会覆盖掉真正要报告的那个错误，让排查方向全错。
+    """
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
