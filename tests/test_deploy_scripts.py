@@ -2697,3 +2697,112 @@ class TestDeployInstallsUnits:
             "同步 unit 放在了重启之后 —— 这一轮跑的还是旧 unit，"
             "要再部署一次才生效（那正是这个缺陷的形态）"
         )
+
+
+class TestServerEntryIsAThinShell:
+    """★★★ 服务器上的部署入口必须是**薄壳**，不能是仓库版的拷贝。
+
+    ⚠⚠ **这来自一次实测，而且它解释了上一轮"改了什么没生效"的谜团（2026-11-13）。**
+
+    ``/root/nexus-mesh-deploy/deploy.sh`` 原来放的是仓库版的**拷贝**：
+
+        /root/nexus-mesh-deploy/deploy.sh   4664 字节   10-30 的版本
+        /opt/nexus-mesh/deploy/deploy.sh    5846 字节   已加了「同步 systemd unit」
+
+    **改的是后者，执行的是前者。** 于是：
+
+        · 部署脚本说「完成、全部节点在线」   ← 旧脚本打的
+        · 给 UI 加了 NXS_UI_RECOVER_URL      ← 写进了没被执行的那份
+        · 进程环境里根本没有这个变量         ← 因为新脚本从没跑过
+
+    根因是**部署脚本无法通过"部署"来更新自己** —— 鸡生蛋。这是结构问题，
+    不是"下次记得同步"能解决的：靠记性一定会漏，而且漏了以后所有输出
+    都看起来正常。
+
+    ## 守护
+
+    ``deploy/entrypoint.sh`` 是薄壳的源文件，它必须：
+      · 只 ``exec`` 仓库里那份，不重复任何部署逻辑
+      · 在目标缺失时明确报错（而不是静默跑旧逻辑）
+
+    ⚠ 这条测试只能保证**仓库里有正确的薄壳**，管不到服务器上是否已经
+    install 成那样。所以它同时是一份说明：重建服务器时要按 head 注释装。
+    """
+
+    @covers("M15.F1")
+    def test_entrypoint_exists_and_is_executable(self):
+        path = REPO_ROOT / "deploy" / "entrypoint.sh"
+        assert path.exists(), (
+            "没有薄壳源文件 —— 服务器重建时又会被放成一份拷贝"
+        )
+        assert path.stat().st_mode & 0o111, "薄壳没有可执行位"
+
+    @covers("M15.F1")
+    def test_entrypoint_only_execs_the_repo_script(self):
+        import re as _re
+
+        raw = (REPO_ROOT / "deploy" / "entrypoint.sh").read_text()
+
+        assert "exec bash" in raw, "薄壳没有 exec 到仓库脚本"
+        assert "/opt/nexus-mesh/deploy/deploy.sh" in raw, "目标路径不对"
+
+        # ⚠ **必须先剥掉注释再检查**（这条判据第一版就误伤了）。
+        #
+        # 薄壳的头部注释里写着「先在 /opt/nexus-mesh 执行 git pull」——
+        # 那是给人看的说明，不是它自己会执行的命令。直接 `in raw` 检查
+        # 会把它当成"薄壳在 git pull"，测试红，而代码是对的。
+        #
+        # 同类错误在这个项目里反复出现：**判据落在"某个词存在"上，
+        # 而不是"那段代码会做什么"**。所以这里剥注释，只检查真代码。
+        code_lines = [
+            line for line in raw.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        # ⚠ 还要剥掉**字符串字面量**。第四种误伤形态：
+        #
+        #     echo "      git -C /opt/nexus-mesh pull        # 已有" >&2
+        #
+        # 这行的行首是 echo（不是注释），但引号里写着 git pull 三个字。
+        # 只剥注释仍会命中 —— 而那是给人看的说明，不是它会执行的命令。
+        #
+        # 到这里已经是同一类失误的第四次。规律很清楚：
+        # **只要判据是"这段文本里有没有某个词"，就一定会误伤或被绕过。**
+        # 唯一可靠的方向是尽量贴近"这段代码会做什么"，做不到时就
+        # 把可能误伤的部分（注释、字符串）先剥干净。
+        code = _re.sub(r'"[^"]*"', '""', "\n".join(code_lines))
+
+        # ⚠ **判据必须匹配命令形态，不能匹配固定子串。**
+        #
+        # 第一版这里是 `"git pull" not in code`，而真实写法可以是：
+        #     git pull
+        #     git -C /opt/nexus-mesh pull --ff-only      ← 这个漏了
+        #     cd /opt/nexus-mesh && git pull
+        # 实测注入第二种，测试**照样绿** —— 因为 "git pull" 不是它的子串。
+        #
+        # 这已经是同一类失误的第三次了（前两次：`"backlog_ratio" in SHELL`
+        # 在前端读错数据源时仍绿；`in raw` 命中注释里的说明文字）。
+        # 共同点：**把"某个词出现过"当成"这段代码会做那件事"。**
+        patterns = {
+            r"\bgit\b[^\n]*\bpull\b": "git pull",
+            r"\bgit\b[^\n]*\bfetch\b": "git fetch",
+            r"\bsystemctl\s+restart\b": "systemctl restart",
+            r"\bsystemctl\s+daemon-reload\b": "systemctl daemon-reload",
+            r"^\s*(?:sudo\s+)?cp\s": "cp",
+        }
+        hit = [label for pattern, label in patterns.items()
+               if _re.search(pattern, code, _re.M)]
+        assert not hit, (
+            f"薄壳的**代码**里出现了部署逻辑：{hit} —— "
+            "必须只留在仓库那份里，否则又会分裂"
+        )
+
+    @covers("M15.F1")
+    def test_entrypoint_fails_loudly_when_target_missing(self):
+        """★ 目标缺失时必须**明确报错**，不能静默成功。
+
+        ⚠ 这是薄壳相对符号链接的唯一优势：链接断了只会 file not found，
+        而薄壳会告诉你"仓库没拉到"以及怎么修。
+        """
+        text = (REPO_ROOT / "deploy" / "entrypoint.sh").read_text()
+        assert "if [ ! -f" in text, "没有检查目标是否存在"
+        assert "exit 1" in text, "目标缺失没有退出非零"
