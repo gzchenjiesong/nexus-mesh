@@ -51,12 +51,23 @@ systemd 可能不是 init 系统。**一项失败不能拖垮整份探针** —�
 
 `wchan=futex_wait_queue` 对多数人没意义。探针把它翻成人话：
 
-    futex_wait_queue  → 阻塞在锁上（若持续，疑似死锁）
+    futex_wait_queue  → 等待锁或事件（主线程等退出信号时是常态）
     do_epoll_wait     → 正常等待事件
     sk_wait_data      → 等待网络数据
 
 最后给一个 ``verdict``：``healthy`` / ``dead`` / ``unresponsive`` /
 ``unknown``。**那才是人想知道的。**
+
+### ④ 单看 wchan 判断不了死锁（2026-11-13 补）
+
+第一版把 ``futex_wait_queue`` 直接翻成「疑似死锁」，于是在**健康**的
+生产进程上报出了"疑似死锁" —— 而同一份结果里 ``verdict=healthy``。
+自相矛盾的告警比没有告警更糟：它训练人忽略告警。
+
+实测真相：该进程的 accept 循环在**后台线程**（``do_sys_poll``），
+主线程永久停在 futex 上等退出信号。所以探针会读**每个线程**的 wchan，
+只有组合信号（无 I/O 线程 / accept 队列在涨 / ops 不可达）同时成立
+才怀疑死锁 —— 见 ``_deadlock_suspicion``。
 """
 
 from __future__ import annotations
@@ -79,11 +90,25 @@ PROBE_CMD_TIMEOUT = 3.0
 #:
 #: 只覆盖常见值 —— 未收录的原样显示，不猜。
 #: **猜错比不猜更糟**：会让运维顺着错误方向排查。
+#:
+#: ⚠ ``futex_wait_queue`` 的文案是**修过一次**的。原文案是
+#:   「阻塞在锁上（若持续如此，疑似死锁）」，直接在健康的生产进程上
+#:   报出了"疑似死锁"（2026-11-13 部署后实测）。
+#:
+#:   实测真相：这个进程的 I/O 循环跑在**后台线程**（``do_sys_poll``），
+#:   主线程永久停在 futex 上等退出信号 —— 连续 5 次采样稳定如此，
+#:   而 ops 端点每次都正常响应。**futex 在这个架构里是稳态，不是症状。**
+#:
+#:   教训同 ``do_signal_stop``：翻译表只对着事故现场验证过，
+#:   没对着**健康进程**验证。单看 wchan 判断不了死锁 ——
+#:   死锁是组合信号（见 ``_deadlock_suspicion``）。
 _WCHAN_HINTS: dict[str, str] = {
-    "futex_wait_queue": "阻塞在锁上（若持续如此，疑似死锁）",
-    "futex_wait": "阻塞在锁上（若持续如此，疑似死锁）",
+    "futex_wait_queue": "等待锁或事件（主线程等退出信号时是常态；是死锁要看线程与队列）",
+    "futex_wait": "等待锁或事件（主线程等退出信号时是常态；是死锁要看线程与队列）",
     "do_epoll_wait": "正常等待事件（空闲时的常态）",
     "ep_poll": "正常等待事件（空闲时的常态）",
+    "do_sys_poll": "正常等待事件（poll）",
+    "do_select": "正常等待事件（select）",
     "sk_wait_data": "等待网络数据（连接已建立、等对端发）",
     "inet_csk_accept": "等待新连接（accept 循环正常）",
     "poll_schedule_timeout": "定时等待（如心跳循环）",
@@ -91,6 +116,19 @@ _WCHAN_HINTS: dict[str, str] = {
     "do_signal_stop": "进程被暂停（SIGSTOP）—— 不是死锁，是有人按了暂停",
     "0": "正在运行（未阻塞）",
 }
+
+#: 这些 wchan 值说明「这个线程在等 I/O」—— 有它就说明 accept 循环还活着。
+_IO_WCHANS: frozenset[str] = frozenset({
+    "do_epoll_wait", "ep_poll", "do_sys_poll", "do_select",
+    "inet_csk_accept", "sk_wait_data",
+})
+
+#: 最多看多少个线程的 wchan。
+#:
+#: 卡线程上限是为了成本可控：正常情况下网关只有个位数线程；
+#: 真出现几百个线程时，扫前 64 个已足够回答"有没有 I/O 线程"。
+_PROBE_MAX_THREADS = 64
+
 
 
 def _run(cmd: list[str]) -> str | None:
@@ -121,6 +159,43 @@ def _read_text(path: Path) -> str | None:
         return path.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return None
+
+
+def _read_thread_wchans(pid: int) -> list[dict[str, Any]] | None:
+    """读出**每个线程**的 wchan。失败返回 None。
+
+    ## 为什么需要线程级，而不是只看主线程
+
+    主线程的 wchan 单独看**判断不了死锁**。实测（2026-11-13）：
+
+        tid=1080678  (main)  wchan=futex_wait_queue   ← 永久停在这里
+        tid=1080692          wchan=do_sys_poll        ← 真正在收连接
+
+    这个进程的 I/O 循环跑在后台线程，主线程在等退出信号。
+    只看主线程会把**健康的进程**报成"疑似死锁"。
+
+    看到有一个线程在等 I/O（``_IO_WCHANS``），就说明 accept 循环还活着
+    —— 这时候主线程的 futex 是稳态，不是症状。
+
+    ⚠ 线程可能在读取途中消失（正常生灭），所以每个 task 目录单独容错，
+    个别读不到就跳过，不算整体失败。
+    """
+    task_dir = Path("/proc") / str(pid) / "task"
+    try:
+        tids = sorted(int(p.name) for p in task_dir.iterdir() if p.name.isdigit())
+    except (OSError, ValueError):
+        return None
+    if not tids:
+        return None
+
+    rows: list[dict[str, Any]] = []
+    for tid in tids[:_PROBE_MAX_THREADS]:
+        wchan = _read_text(task_dir / str(tid) / "wchan")
+        if wchan is None:
+            continue
+        rows.append({"tid": tid, "wchan": wchan,
+                     "wchan_hint": _WCHAN_HINTS.get(wchan)})
+    return rows or None
 
 
 def _parse_status(raw: str) -> dict[str, Any]:
@@ -253,6 +328,18 @@ def probe_coordinator(
             else:
                 out["wchan"] = wchan
                 out["wchan_hint"] = _WCHAN_HINTS.get(wchan)
+
+            # ---- 线程级 wchan（判定死锁的关键证据）----
+            thread_rows = _read_thread_wchans(pid)
+            if thread_rows is None:
+                unavailable.append("/proc/<pid>/task/*/wchan")
+                out["threads_detail"] = None
+                out["io_thread_present"] = None
+            else:
+                out["threads_detail"] = thread_rows
+                # 有任何一个线程在等 I/O → accept 循环还活着
+                out["io_thread_present"] = any(
+                    row["wchan"] in _IO_WCHANS for row in thread_rows)
         else:
             # MainPID 有值但 /proc 里没有 → 进程刚退出或 PID 被复用
             unavailable.append("/proc/<pid>: 不存在（进程可能刚退出）")
@@ -302,14 +389,30 @@ def probe_coordinator(
     #
     # 即使 ops 通，也值得提示的风险。放在 warnings 里，
     # 不与 verdict 混在一起（verdict 答"能不能用"，warnings 答"稳不稳"）。
+    #
+    # ⚠ **告警必须建在组合信号上，不能只看单个指标。**
+    #
+    #   第一版这里写的是 `if "futex" in wchan: warnings.append("疑似死锁")`，
+    #   结果在健康的生产进程上直接报"疑似死锁"（2026-11-13 部署后实测）。
+    #   因为该进程的主线程**永久**停在 futex 上等退出信号，
+    #   真正的 accept 循环在后台线程（详见 `_read_thread_wchans`）。
+    #
+    #   这与 observ 模块的设计原则是同一条：单指标阈值告警必然误报，
+    #   而误报多了就没人看了 —— 真正的死锁也就被淹没。
     warnings: list[str] = []
     wchan = out.get("wchan") or ""
-    if "futex" in wchan:
-        # 同 note：不嵌套括号
-        warnings.append(
-            f"阻塞在 {wchan} · {out.get('wchan_hint') or '疑似死锁'}"
-        )
     queue = out.get("accept_queue")
+    io_alive = out.get("io_thread_present")
+
+    deadlock = _deadlock_suspicion(
+        wchan=wchan,
+        io_thread_present=io_alive,
+        accept_queue=queue,
+        ops_reachable=ops_reachable,
+    )
+    if deadlock:
+        warnings.append(deadlock)
+
     if isinstance(queue, int) and queue > 0:
         warnings.append(f"accept 队列有 {queue} 个连接待处理")
     if isinstance(out.get("threads"), int) and out["threads"] <= 1:
@@ -320,6 +423,58 @@ def probe_coordinator(
     out["warnings"] = warnings
 
     return out
+
+
+def _deadlock_suspicion(
+    *,
+    wchan: str,
+    io_thread_present: bool | None,
+    accept_queue: int | None,
+    ops_reachable: bool,
+) -> str | None:
+    """主线程停在锁/事件上时，判断**是否值得**怀疑死锁。
+
+    返回一句告警文案，或者 None（正常，不该打扰人）。
+
+    ## 判据
+
+    futex 本身不是证据 —— Python 主线程在 ``Event.wait()`` / ``Lock.acquire()``
+    上都会落在 ``futex_wait_queue``，而网关的 I/O 循环跑在后台线程，
+    所以**健康进程的主线程永久停在 futex**（实测 2026-11-13）。
+
+    只有与下列任一信号**同时**出现才值得报：
+
+    ====================================  ============================
+    组合信号                               含义
+    ====================================  ============================
+    futex + 没有任何 I/O 线程              没人 accept，锁可能是死的
+    futex + accept 队列 > 0                连接在排队、无人取 —— 就是
+                                           2026-10-31 那次的形态
+    futex + ops 不可达                     进程活着但不干活
+    ====================================  ============================
+
+    ``io_thread_present`` 为 ``None`` 表示读不到线程级证据，
+    这时**只依赖队列与可达性**判断 —— 宁可少报，不要编。
+    """
+    if "futex" not in wchan:
+        return None
+
+    reasons: list[str] = []
+    if io_thread_present is False:
+        reasons.append("没有任何线程在等 I/O（看起来无人 accept）")
+    if isinstance(accept_queue, int) and accept_queue > 0:
+        reasons.append(f"accept 队列有 {accept_queue} 个连接无人处理")
+    if not ops_reachable:
+        reasons.append("ops 端点不可达")
+
+    if not reasons:
+        # 有 I/O 线程在跑 / 队列为空 / ops 通 → 主线程等事件是稳态。
+        # 这里刻意**不产生告警**：报一次假警报，下次真警报就没人当真了。
+        return None
+
+    return (f"主线程阻塞在 {wchan} · " + "；".join(reasons)
+            + " —— 组合信号像死锁，建议 py-spy dump 确认")
+
 
 
 __all__ = ["probe_coordinator", "PROBE_CMD_TIMEOUT"]

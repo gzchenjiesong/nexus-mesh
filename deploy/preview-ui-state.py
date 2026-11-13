@@ -121,6 +121,7 @@ def _probe_like_crash() -> dict:
     from nxs.ui import probe as P
 
     real_run, real_read = P._run, P._read_text
+    real_threads = P._read_thread_wchans
     real_is_dir = P.Path.is_dir
 
     def fake_run(cmd):
@@ -143,18 +144,36 @@ def _probe_like_crash() -> dict:
         P._run = fake_run
         P._read_text = fake_read
         P.Path.is_dir = lambda self: True
+        # ⚠ 线程级 wchan 也要 stub：真读 /proc 的话，
+        #   开发机（macOS 无 /proc）与服务器会得到不同结果，
+        #   预览就不再是"固定的一种状态"了。
+        P._read_thread_wchans = lambda pid: [
+            {"tid": 4121514, "wchan": "futex_wait_queue", "wchan_hint": None},
+            {"tid": 4121522, "wchan": "futex_wait_queue", "wchan_hint": None},
+        ]
         return P.probe_coordinator(ops_reachable=False, unit="nexus-mesh",
                                    port=18800)
     finally:
         P._run, P._read_text = real_run, real_read
+        P._read_thread_wchans = real_threads
         P.Path.is_dir = real_is_dir
 
 
 def _probe_healthy() -> dict:
-    """用真实的 probe_coordinator 生成「健康」状态。"""
+    """用真实的 probe_coordinator 生成「健康」状态。
+
+    ⚠ 这里刻意复刻**生产实测的线程签名**（2026-11-13）：
+
+        tid=main    wchan=futex_wait_queue    ← 等退出信号，稳态
+        tid=worker  wchan=do_sys_poll         ← 真正的 accept 循环
+
+    用这个签名做预览，才能验证「健康进程不会被误报死锁」——
+    如果这里图省事写成单线程 do_epoll_wait，那条误报缺陷在预览里就看不见了。
+    """
     from nxs.ui import probe as P
 
     real_run, real_read = P._run, P._read_text
+    real_threads = P._read_thread_wchans
     real_is_dir = P.Path.is_dir
 
     def fake_run(cmd):
@@ -167,19 +186,24 @@ def _probe_healthy() -> dict:
 
     def fake_read(path):
         if path.name == "status":
-            return "State:\tS (sleeping)\nThreads:\t8\nVmRSS:\t   29488 kB"
+            return "State:\tS (sleeping)\nThreads:\t2\nVmRSS:\t   29488 kB"
         if path.name == "wchan":
-            return "do_epoll_wait"
+            return "futex_wait_queue"
         return None
 
     try:
         P._run = fake_run
         P._read_text = fake_read
         P.Path.is_dir = lambda self: True
+        P._read_thread_wchans = lambda pid: [
+            {"tid": 1051336, "wchan": "futex_wait_queue", "wchan_hint": None},
+            {"tid": 1051344, "wchan": "do_sys_poll", "wchan_hint": None},
+        ]
         return P.probe_coordinator(ops_reachable=True, unit="nexus-mesh",
                                    port=18800)
     finally:
-        P._run, P._read_text, = real_run, real_read
+        P._run, P._read_text = real_run, real_read
+        P._read_thread_wchans = real_threads
         P.Path.is_dir = real_is_dir
 
 

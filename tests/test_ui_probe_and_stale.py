@@ -73,17 +73,35 @@ class TestProbeParsing:
     def test_wchan_hints_cover_common_values(self):
         """常见 wchan 必须有人话翻译。
 
-        ⚠ `futex_wait_queue` 是死锁的信号 —— 它必须被翻译成
-        「阻塞在锁上」，否则运维看到的是个没意义的符号名。
+        ⚠ 这条**修过一次**。原断言是：
+
+            assert "死锁" in _WCHAN_HINTS["futex_wait_queue"]
+
+        那是错的：主线程在 ``Event.wait()`` 上也会落在 futex，
+        而这个网关的 accept 循环跑在后台线程，**健康进程的主线程
+        永久停在 futex 上**（2026-11-13 实测）。把 futex 翻成"死锁"
+        会直接在健康进程上报假警报。
+
+        现在要求翻译**中性**，死锁判断交给组合信号。
         """
         from nxs.ui.probe import _WCHAN_HINTS
 
-        # 翻译成人话 —— 刻意不再出现 futex 这个词，
-        # 因为运维要看的是"卡在锁上"，不是内核符号名
-        assert "锁" in _WCHAN_HINTS["futex_wait_queue"]
-        assert "死锁" in _WCHAN_HINTS["futex_wait_queue"]
+        # 要翻成人话（"锁"这个词在，运维看得懂在等什么）
+        hint = _WCHAN_HINTS["futex_wait_queue"]
+        assert "锁" in hint
+        # 但**不能**单独断言死锁 —— 见上面。旧文案是
+        # 「阻塞在锁上（若持续如此，疑似死锁）」，会误报。
+        assert "疑似死锁" not in hint, (
+            "futex 的翻译不能直接说疑似死锁 —— 健康进程的主线程也停在这里"
+        )
+        assert "常态" in hint, (
+            "要说明它可能是正常稳态，否则运维仍会顺着死锁方向排查"
+        )
         # 正常空闲状态不该被说成异常
         assert "正常" in _WCHAN_HINTS["do_epoll_wait"]
+        assert "正常" in _WCHAN_HINTS["do_sys_poll"], (
+            "do_sys_poll 是 I/O 线程的常态，必须翻译（判定死锁要用它）"
+        )
 
     @covers("M15.F11")
     def test_wchan_hint_for_sigstop(self):
@@ -234,6 +252,148 @@ class TestProbeVerdict:
         assert "futex" in blob, "阻塞在锁上必须进告警"
         assert "队列" in blob, "accept 队列非空必须进告警"
         assert "线程" in blob, "线程数过少必须进告警"
+
+
+class TestFutexIsNotEvidenceOfDeadlock:
+    """★★ 主线程停在 futex 上**不是**死锁证据（2026-11-13 部署后实测）。
+
+    ## 事故
+
+    部署完阶段 1-3 后做生产验收，探针给出这样一份自相矛盾的结果：
+
+        verdict=healthy  unit=True  threads=2  queue=0
+        说明: 进程在、ops 端点可达
+        告警: ['阻塞在 futex_wait_queue · 阻塞在锁上（若持续如此，疑似死锁）']
+
+    一边说健康，一边说疑似死锁 —— 而实际完全健康。
+
+    ## 真相
+
+    逐线程实测：
+
+        tid=1080678  (main)  wchan=futex_wait_queue   ← 永久停在这里
+        tid=1080692          wchan=do_sys_poll        ← 真正在收连接
+
+    这个进程的 accept 循环在**后台线程**，主线程在等退出信号。
+    连续 5 次采样（间隔 1 秒）稳定如此，ops 端点每次正常响应。
+
+    **futex 在这个架构里是稳态，不是症状。**
+
+    ## 为什么必须修
+
+    误报比不报更糟：它训练人忽略 warnings。等真死锁来时，
+    那句"疑似死锁"已经没人看了 —— 这和 observ 模块
+    「单指标阈值告警必然误报」那条是同一个道理。
+
+    判据改成组合信号，见 ``probe._deadlock_suspicion``。
+    """
+
+    def _patched(self, monkeypatch, *, threads_wchan, queue, ops_ok,
+                 threads=2):
+        from nxs.ui import probe as P
+
+        monkeypatch.setattr(P, "_run", lambda cmd: (
+            "active" if "is-active" in cmd
+            else "1234" if "MainPID" in cmd
+            else f"State Recv-Q Send-Q Local Address:Port  Peer Address:Port\n"
+                 f"LISTEN {queue} 5 0.0.0.0:18800 0.0.0.0:*"
+        ))
+        monkeypatch.setattr(P, "_read_text", lambda p: (
+            f"State:\tS (sleeping)\nThreads:\t{threads}\nVmRSS:\t 40000 kB"
+            if p.name == "status" else "futex_wait_queue"
+        ))
+        monkeypatch.setattr(P.Path, "is_dir", lambda self: True)
+        monkeypatch.setattr(P, "_read_thread_wchans", lambda pid: [
+            {"tid": tid, "wchan": w, "wchan_hint": None}
+            for tid, w in threads_wchan
+        ])
+        return P.probe_coordinator(ops_reachable=ops_ok, unit="nexus-mesh",
+                                   port=18800)
+
+    @covers("M15.F11")
+    def test_healthy_process_with_io_thread_raises_no_alarm(self, monkeypatch):
+        """★★★ 主线程 futex + 有 I/O 线程 + 队列空 + ops 通 → **不许告警**。
+
+        这就是生产实测的那个状态。第一版在这里报了「疑似死锁」。
+        """
+        got = self._patched(
+            monkeypatch,
+            threads_wchan=[(1080678, "futex_wait_queue"),
+                           (1080692, "do_sys_poll")],
+            queue=0, ops_ok=True,
+        )
+
+        assert got["verdict"] == "healthy"
+        assert got["io_thread_present"] is True, "必须识别出 I/O 线程还活着"
+        deadlock = [w for w in got["warnings"] if "死锁" in w]
+        assert not deadlock, (
+            "健康进程被报成死锁 —— 告警必须靠组合信号，不能只看 wchan：\n  "
+            + "\n  ".join(got["warnings"])
+        )
+
+    @covers("M15.F11")
+    def test_deadlock_suspected_when_no_io_thread(self, monkeypatch):
+        """★★ 主线程 futex + **没有任何 I/O 线程** → 该报。
+
+        这是组合信号成立的那一半：没人 accept，锁可能真死了。
+        """
+        got = self._patched(
+            monkeypatch,
+            threads_wchan=[(1080678, "futex_wait_queue")],
+            queue=0, ops_ok=True, threads=1,
+        )
+        blob = " ".join(got["warnings"])
+        assert "死锁" in blob, f"没有 I/O 线程却不怀疑死锁：{got['warnings']}"
+        assert "无人 accept" in blob, "要说明为什么可疑"
+
+    @covers("M15.F11")
+    def test_deadlock_suspected_on_queue_growth(self, monkeypatch):
+        """★★ futex + accept 队列在涨 → 该报（2026-10-31 那次的形态）。"""
+        got = self._patched(
+            monkeypatch,
+            threads_wchan=[(1080678, "futex_wait_queue"),
+                           (1080692, "do_sys_poll")],
+            queue=6, ops_ok=False,
+        )
+        blob = " ".join(got["warnings"])
+        assert "死锁" in blob, f"队列在涨却不怀疑：{got['warnings']}"
+        assert "队列" in blob
+
+    @covers("M15.F11")
+    def test_unknown_io_thread_falls_back_to_other_signals(self, monkeypatch):
+        """★ 读不到线程级证据时，退回看队列与可达性 —— 不猜。"""
+        from nxs.ui import probe as P
+
+        got = self._patched(
+            monkeypatch,
+            threads_wchan=[], queue=0, ops_ok=True,
+        )
+        # 空列表 → io_thread_present=False（确实没有 I/O 线程的证据）
+        assert got["io_thread_present"] is False
+        # 但队列空、ops 通，仍有一条"没有 I/O 线程"的理由 → 该报
+        assert any("死锁" in w for w in got["warnings"])
+
+    @covers("M15.F11")
+    def test_thread_wchans_are_read_from_proc(self):
+        """★ 线程级 wchan 是真实读出来的，不是猜的。
+
+        ⚠ 只读本进程验证「函数能读」这件事。macOS 没有 /proc，跳过。
+        """
+        import os
+        from pathlib import Path as _Path
+
+        from nxs.ui import probe as P
+
+        if not _Path("/proc/self/task").is_dir():
+            pytest.skip("没有 /proc（非 Linux）")
+
+        rows = P._read_thread_wchans(os.getpid())
+        assert rows, "读不出自己进程的线程 wchan"
+        assert all("tid" in r and "wchan" in r for r in rows)
+        # 容器/测试环境里 wchan 可能是 0（未阻塞）或具体符号，
+        # 不论哪个，只要读到了就算成功
+        assert any(isinstance(r["wchan"], str) for r in rows)
+
 
 
 # ---------------------------------------------------------------------------
