@@ -87,6 +87,38 @@ echo "═══ ③ 配置自检 ═══"
 .venv/bin/python -m nxs verify 2>&1 | tail -1 | sed 's/^/  /'
 
 echo
+echo "═══ ③b 同步 systemd unit ═══"
+# ⚠ **这一步是补的一个真实缺口（2026-11-13）。**
+#
+# 在此之前，`/etc/systemd/system/nexus-mesh-ui.service` 是**手工放**的，
+# 仓库里的 deploy/*.service 只是源码留档 —— 部署脚本从不安装它。
+#
+# 后果实测：给 UI 加了 `Environment=NXS_UI_RECOVER_URL=...`，改的是仓库
+# 那份，跑完部署一看进程环境里根本没有这个变量，401 页面也就没有自动
+# 恢复按钮。**代码是新的、unit 是旧的，而部署脚本说"完成"。**
+#
+# 现在以仓库为唯一源头：内容不同就装过去并 daemon-reload。
+# ⚠ 若你在生产上手工改过 unit，请改仓库那份 —— 否则会被这次覆盖。
+unit_changed=0
+for src in deploy/*.service; do
+    [ -e "$src" ] || continue
+    name=$(basename "$src")
+    dst="/etc/systemd/system/$name"
+    if ! cmp -s "$src" "$dst"; then
+        cp "$src" "$dst"
+        chmod 644 "$dst"
+        echo "  更新 $name"
+        unit_changed=1
+    fi
+done
+if [ "$unit_changed" = "1" ]; then
+    systemctl daemon-reload
+    echo "  已 daemon-reload"
+else
+    echo "  全部与仓库一致"
+fi
+
+echo
 echo "═══ ④ 重启服务 ═══"
 # ⚠ 顺序有意义：mesh 先起（桥接要连它），ui 最后（它要查 mesh）
 for s in "${SERVICES[@]}"; do

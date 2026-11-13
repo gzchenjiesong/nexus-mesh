@@ -2623,3 +2623,77 @@ class TestUiUnitCredentialScope:
             "--check 里没有「不得含 NXS_SECRET_*」这项检查 —— "
             "那样配错了也发现不了"
         )
+
+
+class TestDeployInstallsUnits:
+    """★★★ 部署脚本必须把 systemd unit 也同步过去。
+
+    ⚠⚠ **这来自一次真实的部署缺陷（2026-11-13 实测发现）。**
+
+    `deploy/deploy.sh` 原来只做「拉代码 → 重启 → 验证」，**从不安装 unit**。
+    `/etc/systemd/system/*.service` 是手工放的，仓库里那几份只是源码留档。
+
+    后果实测：给 UI 的 unit 加了
+
+        Environment=NXS_UI_RECOVER_URL=https://hub.../api/nexus-enter
+
+    改的是仓库那份，跑完部署脚本输出"完成、全部节点在线"。然后查进程环境：
+
+        $ tr '\0' '\n' < /proc/<pid>/environ | grep NXS_
+        NXS_OPS_SECRET=...          ← 只有这一个，没有 RECOVER_URL
+
+    于是 token 失效的自动恢复**压根没启用**，而部署脚本说一切正常。
+
+    ## 这类缺陷为什么难发现
+
+    它不报错、不告警、不影响服务启动 —— 只是「你以为改的地方没改」。
+    所有断言都绿：代码是新的（Max-Age 生效就能证明）、服务是 active 的、
+    节点全在线。唯有那个新加的变量不存在。
+
+    ## 守护
+
+    部署脚本里必须有一段：遍历 `deploy/*.service`，与 `/etc/systemd/system/`
+    逐字节比较，不同就装过去并 `daemon-reload`。
+    """
+
+    @covers("M15.F1")
+    def test_deploy_sh_syncs_unit_files(self):
+        text = (REPO_ROOT / "deploy" / "deploy.sh").read_text()
+
+        assert "deploy/*.service" in text, (
+            "部署脚本没有遍历 deploy/*.service —— unit 改动不会生效"
+        )
+        assert "/etc/systemd/system/" in text, (
+            "没有目标目录 —— 装了也没装到 systemd 会读的地方"
+        )
+        assert "daemon-reload" in text, (
+            "没 daemon-reload —— systemd 不会重读 unit，改动照样不生效"
+        )
+
+    @covers("M15.F1")
+    def test_unit_sync_compares_before_writing(self):
+        """★ 必须**先比较再写**，不能无条件 cp。
+
+        无条件 cp 会让每次部署都触发 daemon-reload + 重启，
+        掩盖"这次到底改了什么"，也会让 unit 的 mtime 失去意义。
+        """
+        text = (REPO_ROOT / "deploy" / "deploy.sh").read_text()
+        assert "cmp -s" in text, (
+            "没有逐字节比较 —— 无条件覆盖会每次都触发 daemon-reload"
+        )
+
+    @covers("M15.F1")
+    def test_unit_sync_is_before_restart(self):
+        """★ 同步 unit 必须在**重启之前** —— 否则这一轮用的还是旧 unit。"""
+        text = (REPO_ROOT / "deploy" / "deploy.sh").read_text()
+
+        sync_at = text.find("deploy/*.service")
+        assert sync_at > 0, "找不到同步 unit 的那一段"
+
+        # 「重启服务」那一段的标志
+        restart_at = text.find("═══ ④ 重启服务 ═══")
+        assert restart_at > 0, "找不到重启段"
+        assert sync_at < restart_at, (
+            "同步 unit 放在了重启之后 —— 这一轮跑的还是旧 unit，"
+            "要再部署一次才生效（那正是这个缺陷的形态）"
+        )
