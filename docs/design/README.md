@@ -26,6 +26,7 @@
 
 | 文档 | 回答什么问题 | 编号状态 |
 |---|---|---|
+| [`00-handoff-from-private-hub.md`](00-handoff-from-private-hub.md) | 面板开发的**上游交接稿**（hub 侧 2026-11-13 交来）：数据只走 ops 端点、只报组合异常、视觉规范、边界划分 | **历史交接稿**，结论已由 `09` 落实，见其开头 |
 | [`01-system-definition.md`](01-system-definition.md) | 这个系统**是什么**：定位、边界、13 个模块（缺 M10，见其开头的说明）、角色模型、协作原语、协议契约 | 编号已对齐 **M1–M14** |
 | [`02-numbering-standard.md`](02-numbering-standard.md) | 编号体系**怎么用**：G/M/F/R/T 纵向链 + 横切标签 + C8 命名规范 | 规范本体，最新 |
 | [`03-traceability-review.md`](03-traceability-review.md) | 需求**验证到哪一步**：44 条需求清单 + 追溯矩阵 + 五项强度分布 + 审查发现 | **历史快照**，见下 |

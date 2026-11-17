@@ -1,7 +1,7 @@
 # 09 · 面板接入 private-hub（方案稿）
 
 > 状态：**已决策（2026-11-13）**，见 §4.0 决策记录。本文含方案与实测证据。
-> 前置阅读：`/Users/tencent-code/private-hub/HANDOFF-nexus-ui.md`（下称「交接文档」）
+> 前置阅读：[`00-handoff-from-private-hub.md`](00-handoff-from-private-hub.md)（下称「交接文档」）
 > 边界：面板实现属 nexus-mesh 项目；Caddy / Authelia / sites.json 属 hub 项目。
 
 ---
